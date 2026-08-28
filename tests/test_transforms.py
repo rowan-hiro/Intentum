@@ -114,6 +114,18 @@ def test_empty_transform_is_identity(backend, orders):
     assert response["result"]["row_count"] == 12
 
 
+def test_sort_and_filter_accept_model_style_keys(backend, orders):
+    """Shapes a real model produced: sort keys under `order`, filter under `expression`."""
+    a = backend.transform_dataset("orders", [
+        {"type": "filter", "expression": "amount > 400"},
+        {"type": "sort", "order": [{"field": "amount", "direction": "desc"}]},
+        {"type": "select", "columns": ["order_id", "amount"]},
+    ])
+    assert rows(a) == [[1006, 900.0], [1010, 594.0], [1005, 495.0], [1004, 450.0], [1011, 450.0]]
+    b = backend.transform_dataset("orders", [{"type": "sort", "by": "amount", "order": "desc"}, {"type": "limit", "limit": 1}])
+    assert rows(b)[0][0] == 1006
+
+
 def test_sort_by_aggregate_alias_after_aggregate(backend, orders):
     response = backend.transform_dataset("orders", [
         {"type": "aggregate", "group_by": ["product"], "measures": [{"avg": "unit_price", "as": "avg_price"}]},

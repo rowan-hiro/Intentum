@@ -35,6 +35,7 @@ from .errors import (
     InvalidSchemaError,
     InvalidStateError,
     NotFoundError,
+    PermissionDeniedError,
 )
 from .execution import Executor
 from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SortStep, TransformIR
@@ -167,8 +168,11 @@ class Backend:
         policy: AccessPolicy | None = None,
         store: MetadataStore | None = None,
         engine: AnalyticsEngine | None = None,
+        export_root: str | Path | None = None,
     ) -> None:
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
+        # Files may only be exported under this directory; None disables the guard (library use).
+        self.export_root = Path(export_root).expanduser().resolve() if export_root is not None else None
         self.clock = clock or _utcnow
         self.policy = policy or AllowAllPolicy()
         self.store = store or SqliteMetadataStore(self.workspace.metadata_path)
@@ -1180,13 +1184,25 @@ class Backend:
         if not isinstance(path, str) or not path.strip():
             raise InvalidIntentError("path must be a file path.", field="path")
         target = Path(path).expanduser()
-        if target.exists() and not overwrite:
-            raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
         version = self.store.get_version(ds.id, ds.version)
         if version is None:
             raise InvalidStateError(f"Dataset {ds.name} has no physical version.", field="dataset")
         intent = _jsonable({"dataset": dataset, "path": path, "format": fmt, "overwrite": overwrite})
         with self._operation(OperationKind.EXPORT, intent, principal) as op:
+            # Refusals are recorded as failed operations so attempts to write outside the sandbox are auditable.
+            if self.export_root is not None:
+                resolved = (self.export_root / target).resolve() if not target.is_absolute() else target.resolve()
+                if resolved != self.export_root and self.export_root not in resolved.parents:
+                    raise PermissionDeniedError(
+                        f"Exports are only allowed under {self.export_root}; refusing to write {target}.",
+                        field="path",
+                        recoverable=True,
+                        details={"export_root": str(self.export_root)},
+                        hint=f"Use a path inside {self.export_root} (relative paths are resolved against it).",
+                    )
+                target = resolved
+            if target.exists() and not overwrite:
+                raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
             plan = ExecutionPlan(
                 steps=[
                     PlanStep("Scan", f"Scan({ds.name} v{ds.version})", {"table": version.physical_table}),

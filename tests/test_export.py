@@ -31,6 +31,31 @@ def test_export_refuses_to_overwrite_unless_asked(backend, orders, tmp_path: Pat
     assert backend.export_result("orders", str(target), overwrite=True)["status"] == "success"
 
 
+def test_export_root_confines_writes(tmp_path: Path, clock):
+    from agent_backend import Backend
+    from tests.conftest import ORDERS_CSV
+
+    root = tmp_path / "allowed"
+    backend = Backend(tmp_path / "ws", clock=clock, export_root=root)
+    try:
+        backend.import_dataset(str(ORDERS_CSV))
+        outside = backend.export_result("orders", str(tmp_path / "escape.csv"))
+        assert outside["code"] == "PERMISSION_DENIED" and outside["recoverable"] is True
+        assert str(root) in outside["hint"]
+        assert not (tmp_path / "escape.csv").exists()
+        traversal = backend.export_result("orders", "../escape2.csv")
+        assert traversal["code"] == "PERMISSION_DENIED"
+        relative = backend.export_result("orders", "sub/orders.csv")
+        assert relative["status"] == "success", relative
+        assert Path(relative["path"]) == root / "sub" / "orders.csv"
+        absolute = backend.export_result("orders", str(root / "abs.csv"))
+        assert absolute["status"] == "success"
+        failed = [o for o in backend.store.list_operations() if o.status == "failed"]
+        assert failed and failed[0].error["code"] == "PERMISSION_DENIED"
+    finally:
+        backend.close()
+
+
 def test_export_nulls_and_formats(backend, tmp_path: Path):
     from tests.conftest import write_csv
 

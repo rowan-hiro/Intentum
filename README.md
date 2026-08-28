@@ -336,15 +336,19 @@ identifiers, `import_workspace` and `attach_metadata` are done; a real
 `task_10` workspace (8 csv, 8 sqlite tables, 1 wrapper json, knowledge.md)
 imports in ~2 s and the task's query runs through the semantic steps.
 
-0. **DataSpace `task_10` smoke test** — done for the scripted-agent layer:
-   `examples/dataspace_smoke.py` drives the task through six MCP tool calls
-   and the official evaluator (vendored in `examples/dataspace/`) marks it
-   correct; see `examples/dataspace/README.md` for findings. Next: the same
-   task with a real model through MCP, then extend the transform vocabulary
-   (`distinct`, `union`, window/rank with ties, date formatting) and give
-   `export_result` an output-format specification (rounding, trailing zeros —
-   the first concrete need surfaced by the smoke test). A validated read-only
-   `raw_query` fallback step is recorded as MADR 0002 for the long tail.
+0. **DataSpace `task_10` smoke test** — done for both layers:
+   `examples/dataspace_smoke.py` (scripted agent, six MCP tool calls) passes
+   the official evaluator (vendored in `examples/dataspace/`), and
+   `examples/dataspace_agent.py` (qwen3.5-35b-a3b through the MCP tools, no
+   SQL or dialect rules in the prompt) passes 2 of 3 runs; see
+   `examples/dataspace/README.md` for the traces and findings. Next: accept
+   the loose step shapes the model actually used, extend the expression
+   vocabulary (string slicing, temporal formatting, `distinct`, `union`,
+   window/rank with ties) and give `export_result` an output-format
+   specification (rounding, trailing zeros — the need both layers surfaced).
+   A validated read-only `raw_query` fallback step is recorded as MADR 0002
+   for the long tail. DataSpace is a validation scenario, not the goal
+   (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in
    place, only the operation is missing.
