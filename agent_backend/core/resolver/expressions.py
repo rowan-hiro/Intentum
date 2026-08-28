@@ -112,8 +112,8 @@ class ExpressionResolver:
 
         Real column names such as ``募集资金总额(元)`` or ``Unit Price`` would
         otherwise be read as a function call or two identifiers. Names are
-        substituted longest-first so a field that contains another field's
-        name is handled correctly.
+        matched longest-first in one pass. Existing quoted tokens, including
+        doubled quote escapes, are preserved without inspecting their contents.
         """
         import re
 
@@ -121,10 +121,15 @@ class ExpressionResolver:
             (f.name for f in scope.fields if '"' not in f.name and not re.fullmatch(r"[^\W\d]\w*", f.name)),
             key=len, reverse=True,
         )
-        for name in special:
-            if name in text:
-                text = re.sub(r'(?<!["\w])' + re.escape(name) + r'(?!["\w])', '"' + name + '"', text)
-        return text
+        if not special:
+            return text
+        quoted = r"""(?:'(?:[^']|'')*'|"(?:[^"]|"")*")"""
+        fields = r'(?<!["\w])(?:' + "|".join(re.escape(name) for name in special) + r')(?!["\w])'
+        pattern = re.compile(f"(?P<quoted>{quoted})|(?P<field>{fields})")
+        return pattern.sub(
+            lambda match: match.group(0) if match.group("quoted") is not None else '"' + match.group(0) + '"',
+            text,
+        )
 
     def _column(self, name: Any, scope: Scope, field: str, notes: list[ResolutionNote] | None) -> ColumnExpr:
         resolved = self.fields.resolve(name, scope, field=field, notes=notes)

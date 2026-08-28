@@ -91,6 +91,23 @@ def test_chinese_derived_and_materialized_names(backend, chinese):
     assert backend.integrity_report()["ok"]
 
 
+@pytest.mark.parametrize(("predicate", "expected_notes"), [
+    ("note = 'Unit Price'", ["Unit Price"]),
+    ("note = 'A ''Unit Price'' label'", ["A 'Unit Price' label"]),
+    ('"Extended Unit Price Label" = 20', ["Unit Price"]),
+    ("Unit Price + Extended Unit Price Label = 30", ["Unit Price"]),
+])
+def test_special_fields_preserve_literals_and_quoted_identifiers(backend, tmp_path, predicate, expected_notes):
+    path = write_csv(tmp_path / "prices.csv", "Unit Price,Extended Unit Price Label,note",
+                     ["10,20,Unit Price", "11,21,A 'Unit Price' label"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+    response = backend.transform_dataset("prices", {"filter": predicate, "select": ["note"]})
+
+    assert response["status"] == "success", response
+    assert response["result"]["rows"] == [[note] for note in expected_notes]
+
+
 def test_chinese_temporal_hint_words(backend, clock, tmp_path):
     backend.import_dataset(str(write_csv(tmp_path / "北京股本变动.csv", "公司代码,配股年度", ["1,2001"])))
     clock.advance(days=1)
