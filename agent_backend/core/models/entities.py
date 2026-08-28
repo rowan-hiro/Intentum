@@ -47,10 +47,12 @@ class DatasetStatus(StrEnum):
 
 class OperationKind(StrEnum):
     IMPORT = "import_dataset"
+    IMPORT_WORKSPACE = "import_workspace"
     TRANSFORM = "transform_dataset"
     MATERIALIZE = "materialize_result"
     PUBLISH = "publish_dataset"
     UPDATE_METADATA = "update_metadata"
+    ATTACH_METADATA = "attach_metadata"
     DELETE = "delete_dataset"
     RESTORE = "restore_dataset"
 
@@ -66,6 +68,24 @@ class Relationship(StrEnum):
     JOINED_WITH = "joined_with"
 
 
+class ArtifactKind(StrEnum):
+    CSV = "csv"
+    JSON = "json"
+    PARQUET = "parquet"
+    SQLITE = "sqlite"
+    MARKDOWN = "markdown"
+    TEXT = "text"
+    PDF = "pdf"
+    VIDEO = "video"
+    AUDIO = "audio"
+    IMAGE = "image"
+    OTHER = "other"
+
+    @property
+    def is_tabular(self) -> bool:
+        return self in (ArtifactKind.CSV, ArtifactKind.JSON, ArtifactKind.PARQUET, ArtifactKind.SQLITE)
+
+
 class _Entity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=False)
 
@@ -79,6 +99,7 @@ class Column(_Entity):
     description: str = ""
     semantic_role: SemanticRole = SemanticRole.UNKNOWN
     aliases: list[str] = Field(default_factory=list)
+    unit: str = ""
     position: int = 0
 
 
@@ -94,6 +115,8 @@ class Dataset(_Entity):
     origin: str  # "import" | "materialize" | "restore"
     metadata: dict[str, Any] = Field(default_factory=dict)
     deleted_at: datetime | None = None
+    source_artifact_id: str | None = None
+    source_locator: str | None = None  # e.g. a table name inside a SQLite artifact
     columns: list[Column] = Field(default_factory=list)
 
     @property
@@ -104,6 +127,25 @@ class Dataset(_Entity):
     @property
     def is_deleted(self) -> bool:
         return self.status == DatasetStatus.DELETED
+
+
+class Artifact(_Entity):
+    """An external or managed file the backend knows about.
+
+    Tabular artifacts become datasets; documents and media are registered so
+    lineage and metadata can point at them (for example a knowledge document
+    that describes a dataset, or a PDF a table was extracted from).
+    """
+
+    id: str
+    kind: ArtifactKind
+    name: str
+    path: str
+    managed_path: str | None = None
+    content_hash: str
+    size_bytes: int
+    created_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class DatasetVersion(_Entity):
@@ -139,6 +181,7 @@ class Operation(_Entity):
     error: dict[str, Any] | None = None
     idempotency_key: str | None = None
     principal: str | None = None
+    parent_operation_id: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
 

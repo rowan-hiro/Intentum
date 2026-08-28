@@ -23,9 +23,9 @@ def test_tool_surface_is_semantic(server):
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
     assert names == {
-        "list_datasets", "describe_dataset", "search_datasets", "import_dataset", "transform_dataset",
-        "materialize_result", "publish_dataset", "update_metadata", "delete_dataset", "restore_dataset",
-        "get_provenance", "get_operation",
+        "list_datasets", "list_artifacts", "describe_dataset", "search_datasets", "import_dataset",
+        "import_workspace", "attach_metadata", "transform_dataset", "materialize_result", "publish_dataset",
+        "update_metadata", "delete_dataset", "restore_dataset", "get_provenance", "get_operation",
     }
     assert not (names & FORBIDDEN)
     transform = next(t for t in tools if t.name == "transform_dataset")

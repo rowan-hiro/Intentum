@@ -7,8 +7,6 @@ the deterministic gate before planning: nothing that fails here is executed.
 
 from __future__ import annotations
 
-import re
-
 from ..errors import InvalidSchemaError, InvalidStateError, InvalidTransformError, NotFoundError, TypeMismatchError
 from ..ir import (
     AggregateStep,
@@ -40,9 +38,19 @@ from ..ir.typing import (
     unary_result_type,
 )
 from ..models.entities import Dataset, DatasetStatus, LogicalType
+from ..naming import is_identifier
 from ...storage.metadata.interface import MetadataStore
 
-NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
+
+class _NameRule:
+    """Adapter so identifier checks read like a regex ``fullmatch``."""
+
+    @staticmethod
+    def fullmatch(name: str) -> bool:
+        return is_identifier(name)
+
+
+NAME_RE = _NameRule()
 
 
 class IRValidator:
