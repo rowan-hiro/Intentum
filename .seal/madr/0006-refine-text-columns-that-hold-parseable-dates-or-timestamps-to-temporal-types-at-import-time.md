@@ -35,22 +35,24 @@ During import, after loading, the backend probes each string column: if every no
 
 ## Decision History
 
+*Outcome ids in this section were realigned on 2026-08-28: merging two branches made `driftseal absorb` renumber the colliding ids in the outcome log, while these entries had been written with the pre-merge ids. Each entry was matched back to its outcome by timestamp; the log itself was not touched.*
+
 <!-- driftseal-reconciliation: f23591d7-0a1a-4ef7-bce1-703ad43e8357 -->
-### 2026-08-28T07:57:06.628Z — Outcome `2026-08-28-005`
+### 2026-08-28T07:57:06.628Z — Outcome `2026-08-28-006`
 
 Status: Proposed → Accepted
 
 Implemented: at import every text column whose non-null values all match the documented ISO patterns and cast cleanly is promoted to date or timestamp (all bare dates give date, a mix gives timestamp), the physical column is cast, the refinement is returned as a resolution note and recorded in the import's canonical IR under refined_types, excluded from the idempotency fingerprint because it is derived from the source. Explicit type hints win; a column holding 2002-02-31 stays text. Measured cost on the task_127 workspace (10 datasets, 854k vitalperiodic rows): 53 s with the probe against 49 s without. Evidence: task_10's EndDate and task_329's intakeoutputtime now arrive as timestamp from SQLite and json text, and no run needed an agent-side cast to sort or compare a date.
 
 <!-- driftseal-reconciliation: a9f0adb6-9dfb-470e-ac23-cf5fd80c14c6 -->
-### 2026-08-28T08:25:16.197Z — Outcome `2026-08-28-006`
+### 2026-08-28T08:25:16.197Z — Outcome `2026-08-28-007`
 
 Status: Accepted → Accepted
 
 Temporal refinement remains the accepted deterministic ISO probe with hint override and recorded IR. Its ordinary failure paths now share import table compensation; regression coverage includes cast and subsequent schema-read failures followed by a successful retry and idempotent replay.
 
 <!-- driftseal-reconciliation: f82344cb-217d-4c53-99f5-242065ebec3d -->
-### 2026-08-28T08:27:26.874Z — Outcome `2026-08-28-006`
+### 2026-08-28T08:27:26.874Z — Outcome `2026-08-28-007`
 
 Status: Accepted → Accepted
 

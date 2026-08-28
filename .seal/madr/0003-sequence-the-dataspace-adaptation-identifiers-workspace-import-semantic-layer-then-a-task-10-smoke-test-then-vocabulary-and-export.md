@@ -129,57 +129,59 @@ long tail — is the input to the next outcome. Full tables and traces are in
 
 ## Decision History
 
+*Outcome ids in this section were realigned on 2026-08-28: merging two branches made `driftseal absorb` renumber the colliding ids in the outcome log, while these entries had been written with the pre-merge ids. Each entry was matched back to its outcome by timestamp; the log itself was not touched.*
+
 <!-- driftseal-reconciliation: c1815772-878f-428d-a6a2-6da3854a15dd -->
-### 2026-08-28T04:05:23.140Z — Outcome `2026-08-28-001`
+### 2026-08-28T04:05:23.140Z — Outcome `2026-08-28-002`
 
 Status: Accepted → Accepted
 
 Steps 1-3 implemented: core/naming.py (Unicode identifiers), import_workspace + Artifact entity + source provenance, attach_metadata with core/knowledge parser; task_10 workspace imports and its query runs; 83 tests pass. Next in sequence: task_10 smoke through MCP with the official evaluator, then gaps 4-5.
 
 <!-- driftseal-reconciliation: 8f43f714-fb84-497c-a678-fab6eeead02b -->
-### 2026-08-28T05:28:48.139Z — Outcome `2026-08-28-002`
+### 2026-08-28T05:28:48.139Z — Outcome `2026-08-28-003`
 
 Status: Accepted → Accepted
 
 task_10 smoke (scripted-agent layer) done: examples/dataspace_smoke.py drives the task through six MCP tool calls; the vendored official evaluator (HKUSTDial/DataSpace 6491caa) marks it correct (242/242 rows, order-sensitive). A minimal export_result was needed to produce prediction.csv and was added. Finding for step 5: DuckDB prints 31783696.815 as 31783696.814999998, so export needs a numeric format spec; SQLite date columns arrive as VARCHAR. LLM-driven layer and steps 4-5 remain.
 
 <!-- driftseal-reconciliation: d3930c91-93c1-45fb-b8f9-a49684a81eeb -->
-### 2026-08-28T05:47:05.789Z — Outcome `2026-08-28-003`
+### 2026-08-28T05:47:05.789Z — Outcome `2026-08-28-004`
 
 Status: Accepted → Accepted
 
 Body amended with 'Evidence from the task_10 smoke test': (1) export_result needs a numeric format specification (31783696.815 rendered as 31783696.814999998 scored 0.45 on the champion scorer, 1.0 officially); (2) SQLite date columns import as VARCHAR and should be refined to date/timestamp on import. Both constrain steps 4-5.
 
 <!-- driftseal-reconciliation: 34ab744f-6955-473f-8c9b-7b2a70bf0db9 -->
-### 2026-08-28T06:54:06.245Z — Outcome `2026-08-28-004`
+### 2026-08-28T06:54:06.245Z — Outcome `2026-08-28-005`
 
 Status: Accepted → Accepted
 
 LLM layer of the task_10 smoke run: qwen3.5-35b-a3b through the MCP tools, 3 runs, 2/3 passed officially, mean 27 turns and ~$0.004 per run. Evidence subsection added to the body: discovery is not the problem; the failure was a unit-reading error by the agent; passing runs looped on formatting (confirms export-format specification, step 5); five loose step shapes to accept in step 4; export sandbox root added as a new invariant.
 
 <!-- driftseal-reconciliation: e4409656-a943-4cf3-895d-d8ec8e1a7cd5 -->
-### 2026-08-28T07:02:23.296Z — Outcome `2026-08-28-005`
+### 2026-08-28T07:02:23.296Z — Outcome `2026-08-28-006`
 
 Status: Accepted → Accepted
 
 Steps 4-5 scoped from evidence and handed off as outcome 2026-08-28-005: export format specification (MADR 0005), import-time temporal refinement (MADR 0006), loose step shapes and string/date vocabulary; distinct/union/window remain unscheduled until a task requires them; next tasks to measure: two or three structured-only public-reference tasks.
 
 <!-- driftseal-reconciliation: 27931ee7-a89b-4706-8967-9278dec35668 -->
-### 2026-08-28T07:57:14.066Z — Outcome `2026-08-28-005`
+### 2026-08-28T07:57:14.066Z — Outcome `2026-08-28-006`
 
 Status: Accepted → Accepted
 
 Steps 4 and 5 of the sequence are done. Body amended with 'Evidence from the second measurement': scripted layer extended to four structured-only public-reference tasks (task_10, task_44, task_127, task_329), all four pass the official evaluator; model-driven layer 3/3 on task_10 (was 2/3, 27 to 17 mean turns) and 3/3 on task_127. The six failing runs on task_44 and task_329 are attributed: four exported correct values with one column too many, thirteen refusals were strftime written pattern-first, the rest were date-part vocabulary and path finding. Next sequence step is that ordering, not distinct/union/window, which no measured task has required.
 
 <!-- driftseal-reconciliation: 3e03a522-fc92-49b4-adc7-07ebc5a4b58c -->
-### 2026-08-28T08:25:15.441Z — Outcome `2026-08-28-006`
+### 2026-08-28T08:25:15.441Z — Outcome `2026-08-28-007`
 
 Status: Accepted → Accepted
 
 Corrected loose-expression quoting to preserve literal and quoted-identifier tokens, including doubled escapes and overlapping field names. Explicit knowledge scopes that do not match the selected datasets are now reported as unmatched instead of being applied globally. No deferred vocabulary or benchmark work was added.
 
 <!-- driftseal-reconciliation: 66497238-f752-4a5a-ae94-db10e28e73e0 -->
-### 2026-08-28T08:27:26.181Z — Outcome `2026-08-28-006`
+### 2026-08-28T08:27:26.181Z — Outcome `2026-08-28-007`
 
 Status: Accepted → Accepted
 

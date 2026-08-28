@@ -36,15 +36,17 @@ Add a raw_query step type to the canonical IR rather than a separate execute_sql
 
 ## Decision History
 
+*Outcome ids in this section were realigned on 2026-08-28: merging two branches made `driftseal absorb` renumber the colliding ids in the outcome log, while these entries had been written with the pre-merge ids. Each entry was matched back to its outcome by timestamp; the log itself was not touched.*
+
 <!-- driftseal-reconciliation: 1a62dc04-a1ee-4bdb-ae1b-c73c87dd11c6 -->
-### 2026-08-28T07:02:23.103Z — Outcome `2026-08-28-005`
+### 2026-08-28T07:02:23.103Z — Outcome `2026-08-28-006`
 
 Status: Proposed → Proposed
 
 Still deferred after the task_10 smoke: across one scripted and three model-driven runs no query shape required SQL; every refusal was a loose-shape or formatting issue now scoped to MADRs 0005/0006 and outcome 2026-08-28-005. Revisit after the next structured-only tasks are measured.
 
 <!-- driftseal-reconciliation: 7842e592-8bfc-4920-9596-368fe930352e -->
-### 2026-08-28T07:57:20.159Z — Outcome `2026-08-28-005`
+### 2026-08-28T07:57:20.159Z — Outcome `2026-08-28-006`
 
 Status: Proposed → Proposed
 
