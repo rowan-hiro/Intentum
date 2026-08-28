@@ -1154,6 +1154,78 @@ class Backend:
             return response
 
     # ======================================================================
+    # export_result
+    # ======================================================================
+    @semantic_operation("export_result")
+    def export_result(
+        self,
+        dataset: Any,
+        path: str,
+        *,
+        format: str = "csv",
+        overwrite: bool = False,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
+        """Write a managed dataset to a file at the boundary of the system.
+
+        The file is an *export*, not authoritative state: the dataset keeps
+        living in the backend, and the audit trail records where a copy went
+        and what it contained (content hash, rows).
+        """
+        notes: list[ResolutionNote] = []
+        ds = self.datasets.resolve(dataset, field="dataset", notes=notes)
+        fmt = str(format or "csv").lower().lstrip(".")
+        if fmt not in ("csv", "parquet"):
+            raise InvalidSchemaError(f"Unsupported export format {fmt!r}; supported formats are csv and parquet.", field="format")
+        if not isinstance(path, str) or not path.strip():
+            raise InvalidIntentError("path must be a file path.", field="path")
+        target = Path(path).expanduser()
+        if target.exists() and not overwrite:
+            raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
+        version = self.store.get_version(ds.id, ds.version)
+        if version is None:
+            raise InvalidStateError(f"Dataset {ds.name} has no physical version.", field="dataset")
+        intent = _jsonable({"dataset": dataset, "path": path, "format": fmt, "overwrite": overwrite})
+        with self._operation(OperationKind.EXPORT, intent, principal) as op:
+            plan = ExecutionPlan(
+                steps=[
+                    PlanStep("Scan", f"Scan({ds.name} v{ds.version})", {"table": version.physical_table}),
+                    PlanStep("WriteFile", f"WriteFile({target.name}, {fmt})", {"path": str(target)}),
+                    PlanStep("Audit", "Audit(dataset.exported)"),
+                ],
+                physical_inputs={ds.id: version.physical_table}, output_table=None,
+            )
+            op.canonical_ir = {"operation": "export", "dataset_id": ds.id, "version": ds.version, "path": str(target), "format": fmt}
+            op.execution_plan = plan.to_dict()
+            self._save_operation(op)
+            log_event("plan.created", operation_id=op.id, plan=plan.to_text())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            rows = self.engine.export_table(version.physical_table, target, fmt)
+            content_hash = self.workspace.content_hash(target)
+            log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
+            now = self.clock()
+            with self.store.transaction():
+                self.audit.record(event_type="dataset.exported", entity_type="dataset", entity_id=ds.id,
+                                  operation_id=op.id, now=now, actor=principal,
+                                  details={"path": str(target), "format": fmt, "rows": rows, "content_hash": content_hash,
+                                           "version": ds.version})
+                response = {
+                    "status": "success",
+                    "operation_id": op.id,
+                    "dataset": self._dataset_summary(ds),
+                    "path": str(target),
+                    "format": fmt,
+                    "rows": rows,
+                    "columns": [c.name for c in ds.columns],
+                    "content_hash": content_hash,
+                    "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}.",
+                    "plan": plan.to_text(),
+                }
+                self._complete(op, response, None, None, now)
+            log_event("state.committed", operation_id=op.id, dataset_id=ds.id, exported=str(target))
+            return self._with_notes(response, notes)
+
+    # ======================================================================
     # Integrity
     # ======================================================================
     def integrity_report(self) -> dict[str, Any]:

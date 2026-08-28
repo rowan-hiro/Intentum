@@ -127,6 +127,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         return backend.materialize_result(source, transform, name, description=description, explain=explain,
                                           idempotency_key=idempotency_key)
 
+    @server.tool(name="export_result", annotations=annotations("write"),
+                 description="Write a managed dataset to a file (csv or parquet) at a path you name, e.g. the "
+                             "prediction file a task requires. The dataset stays managed; the export is audited "
+                             "with its content hash. Existing files are not replaced unless `overwrite` is true.")
+    def export_result(dataset: str, path: str, format: str = "csv", overwrite: bool = False) -> dict[str, Any]:
+        return backend.export_result(dataset, path, format=format, overwrite=overwrite)
+
     @server.tool(name="publish_dataset", annotations=annotations("write"),
                  description="Mark a dataset as stable and reusable after validating it (description present, "
                              "physical data consistent, inputs not deleted).")

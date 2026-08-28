@@ -228,8 +228,8 @@ Claude Code: `claude mcp add agent-backend -- uv run --directory /abs/path/to/In
 Tools exposed (all semantic; no SQL, no file or table primitives):
 `list_datasets`, `list_artifacts`, `describe_dataset`, `search_datasets`,
 `import_dataset`, `import_workspace`, `attach_metadata`, `transform_dataset`,
-`materialize_result`, `publish_dataset`, `update_metadata`, `delete_dataset`,
-`restore_dataset`, `get_provenance`, `get_operation`.
+`materialize_result`, `export_result`, `publish_dataset`, `update_metadata`,
+`delete_dataset`, `restore_dataset`, `get_provenance`, `get_operation`.
 
 ## 5. Example MCP calls
 
@@ -336,12 +336,15 @@ identifiers, `import_workspace` and `attach_metadata` are done; a real
 `task_10` workspace (8 csv, 8 sqlite tables, 1 wrapper json, knowledge.md)
 imports in ~2 s and the task's query runs through the semantic steps.
 
-0. **DataSpace `task_10` smoke test** through the MCP surface, scored with the
-   official evaluator; then extend the transform vocabulary (`distinct`,
-   `union`, window/rank with ties, not-null shorthand, date formatting) and add
-   `export_result` with the output contract (rectangular UTF-8 CSV, rounding
-   rules). A validated read-only `raw_query` fallback step is recorded as
-   MADR 0002 for the long tail.
+0. **DataSpace `task_10` smoke test** — done for the scripted-agent layer:
+   `examples/dataspace_smoke.py` drives the task through six MCP tool calls
+   and the official evaluator (vendored in `examples/dataspace/`) marks it
+   correct; see `examples/dataspace/README.md` for findings. Next: the same
+   task with a real model through MCP, then extend the transform vocabulary
+   (`distinct`, `union`, window/rank with ties, date formatting) and give
+   `export_result` an output-format specification (rounding, trailing zeros —
+   the first concrete need surfaced by the smoke test). A validated read-only
+   `raw_query` fallback step is recorded as MADR 0002 for the long tail.
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in
    place, only the operation is missing.

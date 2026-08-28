@@ -85,6 +85,7 @@ class AnalyticsEngine(Protocol):
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def drop_table(self, table: str) -> None: ...
     def list_tables(self) -> list[str]: ...
+    def export_table(self, table: str, path: Path, fmt: str) -> int: ...
     def close(self) -> None: ...
 
 
@@ -255,6 +256,20 @@ class DuckDBEngine:
             "WHERE table_schema = 'main' AND table_catalog = current_database() ORDER BY 1"
         ).fetchall()
         return [str(r[0]) for r in rows]
+
+    def export_table(self, table: str, path: Path, fmt: str) -> int:
+        """Write a table to a file; returns the row count written."""
+        if fmt == "csv":
+            options = "FORMAT CSV, HEADER TRUE, DELIMITER ',', NULL ''"
+        elif fmt == "parquet":
+            options = "FORMAT PARQUET"
+        else:
+            raise InvalidSchemaError(f"Unsupported export format {fmt!r}; supported formats are csv and parquet.", field="format")
+        try:
+            self.conn.execute(f"COPY (SELECT * FROM {quote_ident(table)}) TO {_literal(str(path))} ({options})")
+        except duckdb.Error as exc:
+            raise ExecutionFailedError(f"Export failed: {exc}", details={"path": str(path)}) from exc
+        return self.row_count(table)
 
     def close(self) -> None:
         self.conn.close()
