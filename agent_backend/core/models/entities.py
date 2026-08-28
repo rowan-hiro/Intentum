@@ -55,6 +55,7 @@ class OperationKind(StrEnum):
     ATTACH_METADATA = "attach_metadata"
     DELETE = "delete_dataset"
     RESTORE = "restore_dataset"
+    EXPORT = "export_result"
 
 
 class OperationStatus(StrEnum):

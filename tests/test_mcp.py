@@ -24,8 +24,8 @@ def test_tool_surface_is_semantic(server):
     names = {t.name for t in tools}
     assert names == {
         "list_datasets", "list_artifacts", "describe_dataset", "search_datasets", "import_dataset",
-        "import_workspace", "attach_metadata", "transform_dataset", "materialize_result", "publish_dataset",
-        "update_metadata", "delete_dataset", "restore_dataset", "get_provenance", "get_operation",
+        "import_workspace", "attach_metadata", "transform_dataset", "materialize_result", "export_result",
+        "publish_dataset", "update_metadata", "delete_dataset", "restore_dataset", "get_provenance", "get_operation",
     }
     assert not (names & FORBIDDEN)
     transform = next(t for t in tools if t.name == "transform_dataset")

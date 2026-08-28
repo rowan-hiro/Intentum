@@ -41,3 +41,10 @@ Implement in this order: first gaps 1, 2 and 3 (Unicode-safe identifiers, import
 Status: Accepted → Accepted
 
 Steps 1-3 implemented: core/naming.py (Unicode identifiers), import_workspace + Artifact entity + source provenance, attach_metadata with core/knowledge parser; task_10 workspace imports and its query runs; 83 tests pass. Next in sequence: task_10 smoke through MCP with the official evaluator, then gaps 4-5.
+
+<!-- driftseal-reconciliation: 8f43f714-fb84-497c-a678-fab6eeead02b -->
+### 2026-08-28T05:28:48.139Z — Outcome `2026-08-28-002`
+
+Status: Accepted → Accepted
+
+task_10 smoke (scripted-agent layer) done: examples/dataspace_smoke.py drives the task through six MCP tool calls; the vendored official evaluator (HKUSTDial/DataSpace 6491caa) marks it correct (242/242 rows, order-sensitive). A minimal export_result was needed to produce prediction.csv and was added. Finding for step 5: DuckDB prints 31783696.815 as 31783696.814999998, so export needs a numeric format spec; SQLite date columns arrive as VARCHAR. LLM-driven layer and steps 4-5 remain.
