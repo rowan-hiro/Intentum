@@ -32,3 +32,12 @@ Implement in this order: first gaps 1, 2 and 3 (Unicode-safe identifiers, import
 * The first measurable result is a single structured-only task; document and video tasks come later and depend on importing extraction outputs as datasets
 * Gaps 4 and 5 may be re-scoped after the smoke test; their MADR-worthy sub-decisions (e.g. how ties are expressed) are recorded when made
 * task_10 must be scored with the official evaluator, not the champion repo's local scorer, whose semantics differ (partial credit, order ignored)
+
+## Decision History
+
+<!-- driftseal-reconciliation: c1815772-878f-428d-a6a2-6da3854a15dd -->
+### 2026-08-28T04:05:23.140Z — Outcome `2026-08-28-001`
+
+Status: Accepted → Accepted
+
+Steps 1-3 implemented: core/naming.py (Unicode identifiers), import_workspace + Artifact entity + source provenance, attach_metadata with core/knowledge parser; task_10 workspace imports and its query runs; 83 tests pass. Next in sequence: task_10 smoke through MCP with the official evaluator, then gaps 4-5.

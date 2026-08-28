@@ -39,10 +39,11 @@ def test_import_missing_file_is_structured(backend):
 
 
 def test_import_unsupported_format(backend, tmp_path: Path):
-    path = tmp_path / "data.json"
-    path.write_text("{}")
+    path = tmp_path / "data.yaml"
+    path.write_text("a: 1")
     response = backend.import_dataset(str(path))
     assert response["code"] == "INVALID_SCHEMA"
+    assert "csv" in response["message"]
 
 
 def test_import_same_file_twice_replays(backend, orders):

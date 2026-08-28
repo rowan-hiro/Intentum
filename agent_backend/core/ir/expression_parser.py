@@ -22,7 +22,7 @@ _TOKEN_RE = re.compile(
   | (?P<number>\d+(?:\.\d+)?)
   | (?P<string>'(?:[^']|'')*')
   | (?P<qident>"(?:[^"]|"")*")
-  | (?P<ident>[A-Za-z_][A-Za-z0-9_]*)
+  | (?P<ident>[^\W\d]\w*)
   | (?P<op><=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|,)
     """,
     re.VERBOSE,
@@ -47,6 +47,7 @@ def _tokenize(text: str) -> list[_Token]:
             raise InvalidTransformError(
                 f"Unexpected character {text[pos]!r} at position {pos} in expression {text!r}.",
                 field="expression",
+                hint='Wrap field names that contain spaces or punctuation in double quotes, e.g. "unit price" * 2.',
             )
         kind = match.lastgroup or ""
         value = match.group(kind)

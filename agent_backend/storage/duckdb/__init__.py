@@ -1,3 +1,3 @@
-from .engine import AnalyticsEngine, DuckDBEngine
+from .engine import SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource
 
-__all__ = ["AnalyticsEngine", "DuckDBEngine"]
+__all__ = ["SUPPORTED_FORMATS", "AnalyticsEngine", "DuckDBEngine", "TableSource"]

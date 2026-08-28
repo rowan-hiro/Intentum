@@ -10,22 +10,24 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
-import json
 import re
+from collections import Counter
 from contextlib import contextmanager
+from dataclasses import dataclass, field as dc_field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from pydantic import ValidationError
 
-from ..storage.duckdb.engine import AnalyticsEngine, DuckDBEngine, physical_to_logical
+from ..storage.duckdb.engine import SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource, physical_to_logical
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .errors import (
+    AmbiguousReferenceError,
     BackendError,
     ConflictError,
     ErrorCode,
@@ -36,9 +38,12 @@ from .errors import (
 )
 from .execution import Executor
 from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SortStep, TransformIR
+from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
 from .models.entities import (
+    Artifact,
+    ArtifactKind,
     Column,
     Dataset,
     DatasetStatus,
@@ -50,13 +55,41 @@ from .models.entities import (
     Relationship,
     SemanticRole,
 )
-from .planner import ExecutionPlan, Planner
+from .naming import normalize, slugify, tokens
+from .planner import ExecutionPlan, Planner, PlanStep
 from .planner.planner import _expr_text
 from .resolver import DatasetResolver, FieldResolver, ResolutionNote, Scope, ScopeField, TransformResolver
-from .resolver.common import slugify, tokens
 from .validation import IRValidator
 
 Clock = Callable[[], dt.datetime]
+
+ARTIFACT_KINDS: dict[str, ArtifactKind] = {
+    ".csv": ArtifactKind.CSV,
+    ".json": ArtifactKind.JSON,
+    ".parquet": ArtifactKind.PARQUET,
+    ".db": ArtifactKind.SQLITE,
+    ".sqlite": ArtifactKind.SQLITE,
+    ".sqlite3": ArtifactKind.SQLITE,
+    ".md": ArtifactKind.MARKDOWN,
+    ".markdown": ArtifactKind.MARKDOWN,
+    ".txt": ArtifactKind.TEXT,
+    ".pdf": ArtifactKind.PDF,
+    ".mp4": ArtifactKind.VIDEO,
+    ".mov": ArtifactKind.VIDEO,
+    ".mkv": ArtifactKind.VIDEO,
+    ".avi": ArtifactKind.VIDEO,
+    ".webm": ArtifactKind.VIDEO,
+    ".mp3": ArtifactKind.AUDIO,
+    ".wav": ArtifactKind.AUDIO,
+    ".m4a": ArtifactKind.AUDIO,
+    ".flac": ArtifactKind.AUDIO,
+    ".png": ArtifactKind.IMAGE,
+    ".jpg": ArtifactKind.IMAGE,
+    ".jpeg": ArtifactKind.IMAGE,
+    ".gif": ArtifactKind.IMAGE,
+    ".webp": ArtifactKind.IMAGE,
+}
+FORMAT_BY_KIND = {ArtifactKind.CSV: "csv", ArtifactKind.JSON: "json", ArtifactKind.PARQUET: "parquet", ArtifactKind.SQLITE: "sqlite"}
 
 
 def _utcnow() -> dt.datetime:
@@ -105,6 +138,26 @@ def semantic_operation(action: str):
     return decorator
 
 
+@dataclass
+class _ImportSpec:
+    """Everything needed to turn one tabular source into a dataset."""
+
+    artifact: Artifact
+    source: TableSource
+    name: str
+    description: str
+    hints: dict[str, dict[str, Any]] = dc_field(default_factory=dict)
+    aliases: list[str] = dc_field(default_factory=list)
+    parent_operation_id: str | None = None
+
+    @property
+    def locator(self) -> str | None:
+        return self.source.table
+
+    def describe(self) -> str:
+        return f"{self.artifact.name}::{self.locator}" if self.locator else self.artifact.name
+
+
 class Backend:
     def __init__(
         self,
@@ -141,6 +194,26 @@ class Backend:
         datasets = self.store.list_datasets(include_deleted=include_deleted)
         return {"status": "success", "datasets": [self._dataset_summary(d) for d in datasets], "count": len(datasets)}
 
+    @semantic_operation("list_artifacts")
+    def list_artifacts(self, *, kind: str | None = None, principal: str | None = None) -> dict[str, Any]:
+        artifacts = self.store.list_artifacts()
+        if kind is not None:
+            try:
+                wanted = ArtifactKind(str(kind).lower())
+            except ValueError as exc:
+                raise InvalidIntentError(f"Unknown artifact kind {kind!r}.", field="kind",
+                                         details={"allowed": [str(k) for k in ArtifactKind]}) from exc
+            artifacts = [a for a in artifacts if a.kind == wanted]
+        datasets_by_artifact: dict[str, list[str]] = {}
+        for d in self.store.list_datasets():
+            if d.source_artifact_id:
+                datasets_by_artifact.setdefault(d.source_artifact_id, []).append(d.name)
+        return {
+            "status": "success",
+            "artifacts": [{**self._artifact_summary(a), "datasets": datasets_by_artifact.get(a.id, [])} for a in artifacts],
+            "count": len(artifacts),
+        }
+
     @semantic_operation("describe_dataset")
     def describe_dataset(self, dataset: Any, *, sample_rows: int = 5, principal: str | None = None) -> dict[str, Any]:
         notes: list[ResolutionNote] = []
@@ -172,6 +245,9 @@ class Backend:
             },
             "hints": self._semantic_hints(ds),
         }
+        source = self._source_summary(ds)
+        if source is not None:
+            body["source"] = source
         if sample is not None:
             body["sample"] = sample
         return self._with_notes(body, notes)
@@ -189,9 +265,10 @@ class Backend:
                 "alias": set(t for a in d.aliases for t in tokens(a)),
                 "description": set(tokens(d.description)),
                 "column": set(t for c in d.columns for t in tokens(c.name) + [t2 for a in c.aliases for t2 in tokens(a)]),
+                "column_description": set(t for c in d.columns for t in tokens(c.description)),
                 "metadata": set(t for v in d.metadata.values() if isinstance(v, (str, int, float)) for t in tokens(str(v))),
             }
-            weights = {"name": 3, "alias": 3, "description": 1.5, "column": 1, "metadata": 1}
+            weights = {"name": 3, "alias": 3, "description": 1.5, "column": 1, "column_description": 0.5, "metadata": 1}
             for w in words:
                 for kind, bag in haystacks.items():
                     if w in bag or any(w in t for t in bag if len(w) >= 3):
@@ -228,6 +305,7 @@ class Backend:
             "dataset": self._dataset_summary(ds),
             "produced_by": self._operation_summary(op) if op else None,
             "inputs": inputs,
+            "source": self._source_summary(ds),
             "upstream": upstream,
             "audit": self.audit.for_entity(ds.id),
         }
@@ -247,7 +325,7 @@ class Backend:
         return body
 
     # ======================================================================
-    # import_dataset
+    # import_dataset / import_workspace
     # ======================================================================
     @semantic_operation("import_dataset")
     def import_dataset(
@@ -257,80 +335,260 @@ class Backend:
         name: str | None = None,
         description: str | None = None,
         format: str | None = None,
+        table: str | None = None,
         schema_hints: dict[str, Any] | None = None,
         aliases: list[str] | None = None,
         idempotency_key: str | None = None,
         principal: str | None = None,
     ) -> dict[str, Any]:
-        intent = _jsonable({"path": path, "name": name, "description": description, "format": format,
-                            "schema_hints": schema_hints, "aliases": aliases})
         source = Path(str(path)).expanduser()
         if not source.is_file():
             raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True)
-        fmt = (format or source.suffix.lstrip(".")).lower()
-        if fmt not in ("csv", "parquet"):
-            raise InvalidSchemaError(f"Unsupported format {fmt!r}; supported formats are csv and parquet.", field="format")
-        logical_name = slugify(name or source.stem)
-        content_hash = self.workspace.content_hash(source)
+        kind = self._classify(source, format)
+        if not kind.is_tabular:
+            raise InvalidSchemaError(
+                f"Unsupported format {(format or source.suffix.lstrip('.')).lower()!r}; supported formats are "
+                f"{', '.join(SUPPORTED_FORMATS)}.",
+                field="format",
+            )
+        fmt = FORMAT_BY_KIND[kind]
         hints = self._normalize_hints(schema_hints)
-        ir = ImportIR(source_path=str(source), format=fmt, name=logical_name, description=description or "",
-                      content_hash=content_hash, column_hints=hints)
-        key = idempotency_key or f"import:{ir.logical_fingerprint()}"
+        artifact = self._register_artifact(source, kind)
+        locator: str | None = None
+        if fmt == "sqlite":
+            tables = self.engine.list_container_tables(Path(artifact.managed_path or artifact.path), fmt)
+            if table is not None:
+                match = next((t for t in tables if t == table), None) or next((t for t in tables if t.lower() == str(table).lower()), None)
+                if match is None:
+                    raise NotFoundError(f"Table {table!r} not found in {source.name}.", field="table", candidates=tables)
+                locator = match
+            elif len(tables) == 1:
+                locator = tables[0]
+            elif not tables:
+                raise InvalidSchemaError(f"{source.name} contains no tables.", field="path")
+            else:
+                raise AmbiguousReferenceError(
+                    f"{source.name} contains {len(tables)} tables; pass table=<name> or use import_workspace to import them all.",
+                    field="table",
+                    candidates=[{"name": t} for t in tables],
+                )
+        elif table is not None:
+            raise InvalidIntentError("table applies to SQLite sources only.", field="table")
+        logical_name = slugify(name or (locator if locator else source.stem))
+        spec = _ImportSpec(
+            artifact=artifact,
+            source=TableSource(path=Path(artifact.managed_path or artifact.path), format=fmt, table=locator),
+            name=logical_name,
+            description=description or "",
+            hints=hints,
+            aliases=[str(a) for a in (aliases or [])],
+        )
+        intent = _jsonable({"path": path, "name": name, "description": description, "format": format, "table": table,
+                            "schema_hints": schema_hints, "aliases": aliases})
+        return self._import_source(spec, intent, idempotency_key, principal)
 
+    @semantic_operation("import_workspace")
+    def import_workspace(
+        self,
+        path: str,
+        *,
+        description: str | None = None,
+        include_documents: bool = True,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
+        root = Path(str(path)).expanduser()
+        if not root.is_dir():
+            raise NotFoundError(f"Directory {path!r} does not exist.", field="path")
+        intent = _jsonable({"path": path, "description": description, "include_documents": include_documents})
+        files = sorted(p for p in root.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts))
+
+        with self._operation(OperationKind.IMPORT_WORKSPACE, intent, principal) as op:
+            artifacts: list[Artifact] = []
+            skipped: list[str] = []
+            for file in files:
+                kind = self._classify(file, None)
+                if not kind.is_tabular and not include_documents:
+                    skipped.append(str(file.relative_to(root)))
+                    continue
+                artifacts.append(self._register_artifact(file, kind, relative_to=root))
+            log_event("resolution.completed", operation_id=op.id, artifacts=len(artifacts), skipped=len(skipped))
+
+            # Plan: one source per tabular file, or per table for containers.
+            candidates: list[tuple[Artifact, TableSource, str]] = []  # artifact, source, base name
+            failed: list[dict[str, Any]] = []
+            for artifact in artifacts:
+                if not artifact.kind.is_tabular:
+                    continue
+                fmt = FORMAT_BY_KIND[artifact.kind]
+                managed = Path(artifact.managed_path or artifact.path)
+                if fmt == "sqlite":
+                    try:
+                        tables = self.engine.list_container_tables(managed, fmt)
+                    except BackendError as err:
+                        failed.append({"source": artifact.name, "code": str(err.code), "message": err.message})
+                        continue
+                    for table in tables:
+                        candidates.append((artifact, TableSource(path=managed, format=fmt, table=table), table))
+                else:
+                    candidates.append((artifact, TableSource(path=managed, format=fmt), Path(artifact.name).stem))
+            names = self._assign_names(candidates, root)
+            plan = ExecutionPlan(
+                steps=[
+                    PlanStep("ScanWorkspace", f"ScanWorkspace({root.name})", {"files": len(files)}),
+                    PlanStep("RegisterArtifacts", f"RegisterArtifacts({len(artifacts)})"),
+                    PlanStep("ImportSources", f"ImportSources({len(candidates)})", {"sources": [n for n in names]}),
+                    PlanStep("Audit", "Audit(workspace.imported)"),
+                ],
+                physical_inputs={},
+                output_table=None,
+            )
+            op.canonical_ir = {
+                "operation": "import_workspace",
+                "root": str(root),
+                "sources": [
+                    {"artifact_id": a.id, "path": str(s.path), "format": s.format, "locator": s.table, "name": n}
+                    for (a, s, _), n in zip(candidates, names)
+                ],
+            }
+            op.execution_plan = plan.to_dict()
+            self._save_operation(op)
+            log_event("plan.created", operation_id=op.id, plan=plan.to_text())
+
+            imported: list[dict[str, Any]] = []
+            replayed: list[str] = []
+            for (artifact, source, _base), name in zip(candidates, names):
+                spec = _ImportSpec(
+                    artifact=artifact, source=source, name=name, description="", parent_operation_id=op.id,
+                )
+                child_intent = {"workspace_operation_id": op.id, "artifact_id": artifact.id, "locator": source.table, "name": name}
+                try:
+                    result = self._import_source(spec, child_intent, None, principal)
+                except BackendError as err:
+                    failed.append({"source": spec.describe(), "name": name, "code": str(err.code), "message": err.message})
+                    continue
+                entry = {**result["dataset"], "source": spec.describe(), "operation_id": result["operation_id"]}
+                if result.get("idempotent_replay"):
+                    replayed.append(name)
+                imported.append(entry)
+
+            now = self.clock()
+            with self.store.transaction():
+                self.audit.record(event_type="workspace.imported", entity_type="workspace", entity_id=str(root),
+                                  operation_id=op.id, now=now, actor=principal,
+                                  details={"artifacts": len(artifacts), "datasets": len(imported), "failed": len(failed)})
+                response = {
+                    "status": "success" if not failed else "partial",
+                    "operation_id": op.id,
+                    "workspace": str(root),
+                    "datasets": imported,
+                    "artifacts": [self._artifact_summary(a) for a in artifacts],
+                    "failed": failed,
+                    "replayed": replayed,
+                    "skipped": skipped,
+                    "summary": (
+                        f"Imported {len(imported)} dataset(s) from {len(artifacts)} artifact(s) in {root.name}"
+                        + (f"; {len(replayed)} already existed" if replayed else "")
+                        + (f"; {len(failed)} source(s) failed" if failed else "")
+                        + "."
+                    ),
+                    "plan": plan.to_text(),
+                }
+                if description:
+                    response["description"] = description
+                self._complete(op, response, None, None, now)
+            log_event("state.committed", operation_id=op.id, datasets=len(imported), failed=len(failed))
+            return response
+
+    def _assign_names(self, candidates: list[tuple[Artifact, TableSource, str]], root: Path) -> list[str]:
+        """Deterministic, collision-free logical names for a batch of sources.
+
+        Every member of a colliding group is qualified (never just the second
+        one), so names do not depend on discovery order.
+        """
+        names = [slugify(base) for _, _, base in candidates]
+        for level in (1, 2):
+            counts = Counter(names)
+            for index, (artifact, source, base) in enumerate(candidates):
+                if counts[names[index]] <= 1:
+                    continue
+                stem = Path(artifact.name).stem
+                if level == 1:
+                    qualifier = stem if source.table else Path(artifact.name).suffix.lstrip(".")
+                    names[index] = slugify(f"{stem}__{source.table}") if source.table else slugify(f"{base}__{qualifier}")
+                else:
+                    parent = Path(artifact.path).parent.name or "root"
+                    names[index] = slugify(f"{parent}__{names[index]}")
+        return names
+
+    def _import_source(
+        self,
+        spec: _ImportSpec,
+        intent: dict[str, Any],
+        idempotency_key: str | None,
+        principal: str | None,
+    ) -> dict[str, Any]:
+        ir = ImportIR(
+            source_path=spec.artifact.path, format=spec.source.format, locator=spec.locator, name=spec.name,
+            description=spec.description, content_hash=spec.artifact.content_hash, column_hints=spec.hints,
+        )
+        key = idempotency_key or f"import:{ir.logical_fingerprint()}"
         replay = self._replay(key, ir.logical_fingerprint())
         if replay is not None:
             return replay
 
-        existing = self.store.get_dataset_by_name(logical_name)
+        existing = self.store.get_dataset_by_name(spec.name)
         if existing is not None:
             raise ConflictError(
-                f"A dataset named {logical_name!r} already exists ({existing.id}) with different content.",
+                f"A dataset named {spec.name!r} already exists ({existing.id}) with different content.",
                 field="name",
                 details={"existing": self._dataset_summary(existing)},
                 hint="Choose another name, or delete_dataset the existing one first.",
             )
 
-        with self._operation(OperationKind.IMPORT, intent, principal, key) as op:
-            log_event("resolution.completed", operation_id=op.id, name=logical_name, format=fmt, content_hash=content_hash)
+        with self._operation(OperationKind.IMPORT, intent, principal, key, parent=spec.parent_operation_id) as op:
+            log_event("resolution.completed", operation_id=op.id, name=spec.name, source=spec.describe(),
+                      content_hash=spec.artifact.content_hash)
             op.canonical_ir = ir.model_dump(mode="json")
-            physical_columns = self.engine.inspect_file(source, fmt)
+            physical_columns = self.engine.inspect_source(spec.source)
             if not physical_columns:
-                raise InvalidSchemaError("The file has no columns.", field="path")
+                raise InvalidSchemaError(f"{spec.describe()} has no columns.", field="path")
             self._check_column_names([c for c, _ in physical_columns])
-            managed = self.workspace.import_file(source, content_hash)
             dataset_id = self.store.allocate_id("ds")
             table = f"{dataset_id}_v1"
             plan = ExecutionPlan(
-                steps=[],
+                steps=[
+                    PlanStep("InspectSource", f"InspectSource({spec.describe()})", {"columns": [c for c, _ in physical_columns]}),
+                    PlanStep("LoadTable", f"LoadTable({table})", {"format": spec.source.format, "locator": spec.locator}),
+                    PlanStep("RegisterDataset", f"RegisterDataset({spec.name} as {dataset_id})"),
+                    PlanStep("Audit", "Audit(dataset.created, version.created)"),
+                ],
                 physical_inputs={},
                 output_table=table,
             )
-            from .planner import PlanStep
-
-            plan.steps = [
-                PlanStep("InspectFile", f"InspectFile({source.name})", {"columns": [c for c, _ in physical_columns]}),
-                PlanStep("CopyToWorkspace", f"CopyToWorkspace({managed.name})"),
-                PlanStep("LoadTable", f"LoadTable({table})", {"format": fmt}),
-                PlanStep("RegisterDataset", f"RegisterDataset({logical_name} as {dataset_id})"),
-                PlanStep("Audit", "Audit(dataset.created, version.created)"),
-            ]
             op.execution_plan = plan.to_dict()
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
-            row_count = self.engine.import_file(managed, fmt, table)
+            row_count = self.engine.import_source(spec.source, table)
             log_event("execution.completed", operation_id=op.id, table=table, rows=row_count)
             now = self.clock()
             try:
                 with self.store.transaction():
-                    columns = self._build_columns(dataset_id, physical_columns, hints)
-                    metadata: dict[str, Any] = {"source_file": source.name, "content_hash": content_hash, "format": fmt}
-                    if aliases:
-                        metadata["aliases"] = [str(a) for a in aliases]
+                    columns = self._build_columns(dataset_id, physical_columns, spec.hints)
+                    metadata: dict[str, Any] = {
+                        "source_file": spec.artifact.name,
+                        "content_hash": spec.artifact.content_hash,
+                        "format": spec.source.format,
+                    }
+                    if spec.aliases:
+                        metadata["aliases"] = list(spec.aliases)
+                    original = spec.locator or Path(spec.artifact.name).stem
+                    if original != spec.name and original not in metadata.get("aliases", []):
+                        metadata.setdefault("aliases", []).append(original)
                     dataset = Dataset(
-                        id=dataset_id, name=logical_name, description=description or "", status=DatasetStatus.ACTIVE,
+                        id=dataset_id, name=spec.name, description=spec.description, status=DatasetStatus.ACTIVE,
                         version=1, created_at=now, updated_at=now, physical_location=f"duckdb://{table}", origin="import",
-                        metadata=metadata, columns=columns,
+                        metadata=metadata, columns=columns, source_artifact_id=spec.artifact.id, source_locator=spec.locator,
                     )
                     self.store.insert_dataset(dataset)
                     self.store.insert_columns(columns)
@@ -341,16 +599,19 @@ class Backend:
                     ))
                     self.audit.record(event_type="dataset.created", entity_type="dataset", entity_id=dataset_id,
                                       operation_id=op.id, now=now, actor=principal,
-                                      details={"name": logical_name, "origin": "import", "rows": row_count})
+                                      details={"name": spec.name, "origin": "import", "rows": row_count,
+                                               "artifact_id": spec.artifact.id, "locator": spec.locator})
                     self.audit.record(event_type="version.created", entity_type="dataset", entity_id=dataset_id,
                                       operation_id=op.id, now=now, actor=principal, details={"version": 1, "table": table})
                     response = {
                         "status": "success",
                         "operation_id": op.id,
-                        "dataset": {"id": dataset_id, "name": logical_name, "rows": row_count,
+                        "dataset": {"id": dataset_id, "name": spec.name, "rows": row_count,
                                     "columns": [c.name for c in columns], "version": 1},
                         "schema": [self._column_summary(c) for c in columns],
-                        "summary": f"Imported {source.name} as {logical_name} ({row_count} rows, {len(columns)} columns).",
+                        "source": {"artifact_id": spec.artifact.id, "name": spec.artifact.name,
+                                   "kind": str(spec.artifact.kind), "locator": spec.locator},
+                        "summary": f"Imported {spec.describe()} as {spec.name} ({row_count} rows, {len(columns)} columns).",
                     }
                     self._complete(op, response, key, ir.logical_fingerprint(), now)
             except Exception:
@@ -512,7 +773,7 @@ class Backend:
                 logical_type=f.logical_type, physical_type=physical_types.get(f.name, "UNKNOWN"),
                 description=origin.description if origin else "",
                 semantic_role=origin.semantic_role if origin else (SemanticRole.MEASURE if f.logical_type.is_numeric else SemanticRole.UNKNOWN),
-                aliases=list(origin.aliases) if origin else [], position=position,
+                aliases=list(origin.aliases) if origin else [], unit=origin.unit if origin else "", position=position,
             ))
         metadata = {"derived": True, "intent_fingerprint": ir.logical_fingerprint()}
         dataset = Dataset(
@@ -550,7 +811,7 @@ class Backend:
         }
 
     # ======================================================================
-    # publish / update_metadata / delete / restore
+    # publish / update_metadata / attach_metadata / delete / restore
     # ======================================================================
     @semantic_operation("publish_dataset")
     def publish_dataset(self, dataset: Any, *, principal: str | None = None) -> dict[str, Any]:
@@ -603,7 +864,7 @@ class Backend:
             raise InvalidIntentError("update_metadata needs at least one of description, aliases, metadata or columns.")
         if metadata is not None and not isinstance(metadata, dict):
             raise InvalidIntentError("metadata must be an object.", field="metadata")
-        reserved = {"aliases", "source_file", "content_hash", "format", "derived", "intent_fingerprint"}
+        reserved = {"aliases", "source_file", "content_hash", "format", "derived", "intent_fingerprint", "knowledge_artifacts"}
         if metadata and (bad := sorted(set(metadata) & reserved)):
             raise InvalidIntentError(f"metadata keys {bad} are managed by the backend.", field="metadata",
                                      hint="Use the aliases parameter for aliases.")
@@ -614,16 +875,18 @@ class Backend:
             for ref, patch in (columns or {}).items():
                 if not isinstance(patch, dict):
                     raise InvalidIntentError(f"column patch for {ref!r} must be an object.", field="columns")
-                unknown = sorted(set(patch) - {"description", "aliases", "semantic_role"})
+                unknown = sorted(set(patch) - {"description", "aliases", "semantic_role", "unit"})
                 if unknown:
                     raise InvalidIntentError(f"Unknown column metadata keys {unknown}.", field="columns",
-                                             details={"allowed_keys": ["description", "aliases", "semantic_role"]})
+                                             details={"allowed_keys": ["description", "aliases", "semantic_role", "unit"]})
                 target = self.fields.resolve(ref, scope, field="columns", notes=notes)
                 column = next(c for c in ds.columns if c.id == target.column_id)
                 if "description" in patch:
                     column.description = str(patch["description"])
                 if "aliases" in patch:
                     column.aliases = [str(a) for a in (patch["aliases"] or [])]
+                if "unit" in patch:
+                    column.unit = str(patch["unit"] or "")
                 if "semantic_role" in patch:
                     try:
                         column.semantic_role = SemanticRole(str(patch["semantic_role"]).lower())
@@ -653,6 +916,167 @@ class Backend:
                             "changes": changes, "summary": f"Updated metadata of {ds.name}: {', '.join(changes)}."}
                 self._complete(op, response, None, None, now)
             return self._with_notes(response, notes)
+
+    @semantic_operation("attach_metadata")
+    def attach_metadata(
+        self,
+        source: str,
+        *,
+        dataset: Any | None = None,
+        overwrite: bool = False,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
+        """Ingest a knowledge / semantic-layer document into dataset and column metadata."""
+        notes: list[ResolutionNote] = []
+        artifact = self._resolve_document(source)
+        text = Path(artifact.managed_path or artifact.path).read_text(encoding="utf-8", errors="replace")
+        document = parse_knowledge_markdown(text)
+        targets = [self.datasets.resolve(dataset, field="dataset", notes=notes)] if dataset is not None else self.store.list_datasets()
+        intent = _jsonable({"source": source, "dataset": dataset, "overwrite": overwrite})
+        with self._operation(OperationKind.ATTACH_METADATA, intent, principal) as op:
+            op.canonical_ir = {"operation": "attach_metadata", "artifact_id": artifact.id, "facts": document.summary(),
+                               "targets": [d.id for d in targets], "overwrite": overwrite}
+            plan = ExecutionPlan(
+                steps=[
+                    PlanStep("ParseDocument", f"ParseDocument({artifact.name})", document.summary()),
+                    PlanStep("MatchDatasets", f"MatchDatasets({len(targets)} candidates)"),
+                    PlanStep("ApplyMetadata", "ApplyMetadata(descriptions, units)"),
+                    PlanStep("Audit", "Audit(metadata.attached)"),
+                ],
+                physical_inputs={}, output_table=None,
+            )
+            op.execution_plan = plan.to_dict()
+            self._save_operation(op)
+            log_event("plan.created", operation_id=op.id, plan=plan.to_text(), facts=document.summary())
+
+            applied, unmatched_tables, unmatched_columns = self._match_knowledge(document, targets, overwrite)
+            now = self.clock()
+            with self.store.transaction():
+                touched: list[dict[str, Any]] = []
+                for changes in applied:
+                    ds = changes["dataset"]
+                    if not changes["description_set"] and not changes["columns"]:
+                        continue
+                    knowledge = ds.metadata.setdefault("knowledge_artifacts", [])
+                    if artifact.id not in knowledge:
+                        knowledge.append(artifact.id)
+                    ds.updated_at = now
+                    self.store.update_dataset(ds)
+                    for column in changes["column_objects"]:
+                        self.store.update_column(column)
+                    self.audit.record(event_type="metadata.attached", entity_type="dataset", entity_id=ds.id,
+                                      operation_id=op.id, now=now, actor=principal,
+                                      details={"artifact_id": artifact.id, "description_set": changes["description_set"],
+                                               "columns": changes["columns"]})
+                    touched.append({"dataset": ds.id, "name": ds.name, "description_set": changes["description_set"],
+                                    "columns": changes["columns"]})
+                response = {
+                    "status": "success",
+                    "operation_id": op.id,
+                    "source": self._artifact_summary(artifact),
+                    "facts": document.summary(),
+                    "applied": touched,
+                    "unmatched": {"tables": unmatched_tables, "columns": unmatched_columns},
+                    "summary": (
+                        f"Attached {artifact.name}: updated {len(touched)} dataset(s), "
+                        f"{sum(len(t['columns']) for t in touched)} column(s); "
+                        f"{len(unmatched_tables)} table fact(s) and {len(unmatched_columns)} column fact(s) did not match."
+                    ),
+                    "plan": plan.to_text(),
+                }
+                if unmatched_tables or unmatched_columns:
+                    response["hint"] = "Unmatched facts refer to names that no dataset has; use update_metadata to apply them by hand if they matter."
+                self._complete(op, response, None, None, now)
+            log_event("state.committed", operation_id=op.id, datasets=len(touched))
+            return self._with_notes(response, notes)
+
+    def _resolve_document(self, source: str) -> Artifact:
+        if not isinstance(source, str) or not source.strip():
+            raise InvalidIntentError("source must be an artifact id, an artifact name, or a path to a markdown document.", field="source")
+        text = source.strip()
+        artifact = self.store.get_artifact(text)
+        if artifact is None:
+            candidates = [a for a in self.store.list_artifacts() if a.name.lower() == text.lower() or a.path == text]
+            if len(candidates) == 1:
+                artifact = candidates[0]
+            elif len(candidates) > 1:
+                raise AmbiguousReferenceError(f"Several artifacts are named {text!r}.", field="source",
+                                              candidates=[self._artifact_summary(a) for a in candidates])
+        if artifact is None:
+            path = Path(text).expanduser()
+            if not path.is_file():
+                raise NotFoundError(f"No artifact or file matches {text!r}.", field="source",
+                                    candidates=[self._artifact_summary(a) for a in self.store.list_artifacts()
+                                                if a.kind in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT)])
+            artifact = self._register_artifact(path, self._classify(path, None))
+        if artifact.kind not in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT):
+            raise InvalidSchemaError(f"{artifact.name} is a {artifact.kind} artifact; attach_metadata reads markdown or text.", field="source")
+        return artifact
+
+    def _match_knowledge(
+        self, document: KnowledgeDocument, targets: list[Dataset], overwrite: bool
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        by_key: dict[str, Dataset] = {}
+        for ds in targets:
+            for key in (ds.id, ds.name, normalize(ds.name), *(normalize(a) for a in ds.aliases)):
+                by_key.setdefault(key.casefold(), ds)
+
+        def find_dataset(name: str) -> Dataset | None:
+            return by_key.get(name.casefold()) or by_key.get(normalize(name))
+
+        applied: dict[str, dict[str, Any]] = {}
+
+        def changes_for(ds: Dataset) -> dict[str, Any]:
+            return applied.setdefault(ds.id, {"dataset": ds, "description_set": False, "columns": [], "column_objects": []})
+
+        unmatched_tables: list[dict[str, Any]] = []
+        for fact in document.tables:
+            ds = find_dataset(fact.name)
+            if ds is None:
+                unmatched_tables.append({"name": fact.name, "line": fact.line})
+                continue
+            changes = changes_for(ds)
+            if fact.description and (overwrite or not ds.description.strip()) and not changes["description_set"]:
+                ds.description = fact.description
+                changes["description_set"] = True
+
+        unmatched_columns: list[dict[str, Any]] = []
+        for fact in document.columns:
+            scoped = find_dataset(fact.scope) if fact.scope else None
+            candidates = [scoped] if scoped is not None else targets
+            hit = False
+            for ds in candidates:
+                column = self._find_column(ds, fact.name)
+                if column is None:
+                    continue
+                hit = True
+                changes = changes_for(ds)
+                updated = False
+                if fact.description and (overwrite or not column.description.strip()):
+                    column.description = fact.description
+                    updated = True
+                if fact.unit and (overwrite or not column.unit.strip()):
+                    column.unit = fact.unit
+                    updated = True
+                if updated and column.name not in changes["columns"]:
+                    changes["columns"].append(column.name)
+                    changes["column_objects"].append(column)
+            if not hit:
+                unmatched_columns.append({"name": fact.name, "scope": fact.scope, "line": fact.line})
+        return list(applied.values()), unmatched_tables, unmatched_columns
+
+    @staticmethod
+    def _find_column(ds: Dataset, name: str) -> Column | None:
+        lowered = name.casefold()
+        for c in ds.columns:
+            if c.name == name:
+                return c
+        for c in ds.columns:
+            if c.name.casefold() == lowered or lowered in (a.casefold() for a in c.aliases):
+                return c
+        norm = normalize(name)
+        hits = [c for c in ds.columns if normalize(c.name) == norm]
+        return hits[0] if len(hits) == 1 else None
 
     @semantic_operation("delete_dataset")
     def delete_dataset(self, dataset: Any, *, reason: str | None = None, principal: str | None = None) -> dict[str, Any]:
@@ -705,8 +1129,6 @@ class Backend:
             raise NotFoundError(f"No deleted dataset matches {text!r}.", field="dataset",
                                 candidates=[{"id": d.id, "name": d.name} for d in deleted])
         if len(hits) > 1:
-            from .errors import AmbiguousReferenceError
-
             raise AmbiguousReferenceError(f"Several deleted datasets match {text!r}.", field="dataset",
                                           candidates=[{"id": d.id, "name": d.name, "deleted_at": d.deleted_at.isoformat()} for d in hits])
         ds = hits[0]
@@ -744,11 +1166,14 @@ class Backend:
                 issues.append({"kind": "missing_table", "dataset_id": v.dataset_id, "version": v.version, "table": v.physical_table})
             elif self.engine.row_count(v.physical_table) != v.row_count:
                 issues.append({"kind": "row_count_mismatch", "dataset_id": v.dataset_id, "version": v.version})
+        artifacts = {a.id for a in self.store.list_artifacts()}
         for d in self.store.list_datasets(include_deleted=True):
             if self.store.get_version(d.id, d.version) is None:
                 issues.append({"kind": "missing_version", "dataset_id": d.id, "version": d.version})
             if not d.columns:
                 issues.append({"kind": "no_columns", "dataset_id": d.id})
+            if d.source_artifact_id and d.source_artifact_id not in artifacts:
+                issues.append({"kind": "missing_artifact", "dataset_id": d.id, "artifact_id": d.source_artifact_id})
         for table in self.engine.list_tables():
             if table not in referenced:
                 issues.append({"kind": "orphan_table", "table": table})
@@ -762,12 +1187,13 @@ class Backend:
     # ======================================================================
     @contextmanager
     def _operation(self, kind: OperationKind, intent: dict[str, Any], principal: str | None,
-                   idempotency_key: str | None = None) -> Iterator[Operation]:
+                   idempotency_key: str | None = None, parent: str | None = None) -> Iterator[Operation]:
         op = Operation(id=self.store.allocate_id("op"), kind=kind, status=OperationStatus.PENDING,
-                       original_intent=intent, idempotency_key=idempotency_key, principal=principal, created_at=self.clock())
+                       original_intent=intent, idempotency_key=idempotency_key, principal=principal,
+                       parent_operation_id=parent, created_at=self.clock())
         with self.store.transaction():
             self.store.insert_operation(op)
-        log_event("intent.received", operation_id=op.id, kind=str(kind), intent=intent, principal=principal)
+        log_event("intent.received", operation_id=op.id, kind=str(kind), intent=intent, principal=principal, parent=parent)
         try:
             yield op
         except BackendError as err:
@@ -835,10 +1261,58 @@ class Backend:
         log_event("idempotency.replayed", key=key, original_operation_id=original_op)
         return response
 
+    # -- artifacts ---------------------------------------------------------
+    @staticmethod
+    def _classify(path: Path, explicit_format: str | None) -> ArtifactKind:
+        if explicit_format:
+            fmt = str(explicit_format).lower().lstrip(".")
+            kind = ARTIFACT_KINDS.get(f".{fmt}")
+            if kind is None:
+                raise InvalidSchemaError(f"Unsupported format {explicit_format!r}; supported formats are {', '.join(SUPPORTED_FORMATS)}.",
+                                         field="format")
+            return kind
+        return ARTIFACT_KINDS.get(path.suffix.lower(), ArtifactKind.OTHER)
+
+    def _register_artifact(self, path: Path, kind: ArtifactKind, relative_to: Path | None = None) -> Artifact:
+        """Register a file once (by path + content hash); tabular files get a managed copy."""
+        resolved = path.resolve()
+        content_hash = self.workspace.content_hash(resolved)
+        existing = self.store.find_artifact(str(resolved), content_hash)
+        if existing is not None:
+            return existing
+        managed = self.workspace.import_file(resolved, content_hash) if kind.is_tabular else None
+        artifact = Artifact(
+            id=self.store.allocate_id("art"),
+            kind=kind,
+            name=str(resolved.relative_to(relative_to.resolve())) if relative_to else resolved.name,
+            path=str(resolved),
+            managed_path=str(managed) if managed else None,
+            content_hash=content_hash,
+            size_bytes=resolved.stat().st_size,
+            created_at=self.clock(),
+            metadata={},
+        )
+        with self.store.transaction():
+            self.store.insert_artifact(artifact)
+        return artifact
+
+    @staticmethod
+    def _artifact_summary(a: Artifact) -> dict[str, Any]:
+        return {"id": a.id, "kind": str(a.kind), "name": a.name, "size_bytes": a.size_bytes,
+                "managed": a.managed_path is not None, "created_at": a.created_at.isoformat()}
+
+    def _source_summary(self, d: Dataset) -> dict[str, Any] | None:
+        if not d.source_artifact_id:
+            return None
+        artifact = self.store.get_artifact(d.source_artifact_id)
+        if artifact is None:
+            return {"artifact_id": d.source_artifact_id, "locator": d.source_locator}
+        return {"artifact_id": artifact.id, "name": artifact.name, "kind": str(artifact.kind), "locator": d.source_locator}
+
     # -- projections -----------------------------------------------------
     def _dataset_summary(self, d: Dataset) -> dict[str, Any]:
         version = self.store.get_version(d.id, d.version)
-        return {
+        body = {
             "id": d.id,
             "name": d.name,
             "description": d.description,
@@ -851,12 +1325,18 @@ class Backend:
             "created_at": d.created_at.isoformat(),
             "updated_at": d.updated_at.isoformat(),
         }
+        if d.source_artifact_id:
+            artifact = self.store.get_artifact(d.source_artifact_id)
+            body["source"] = (f"{artifact.name}::{d.source_locator}" if d.source_locator else artifact.name) if artifact else d.source_artifact_id
+        return body
 
     @staticmethod
     def _column_summary(c: Column) -> dict[str, Any]:
         body: dict[str, Any] = {"id": c.id, "name": c.name, "type": str(c.logical_type), "role": str(c.semantic_role)}
         if c.description:
             body["description"] = c.description
+        if c.unit:
+            body["unit"] = c.unit
         if c.aliases:
             body["aliases"] = c.aliases
         return body
@@ -869,6 +1349,7 @@ class Backend:
             "status": str(op.status),
             "original_intent": op.original_intent,
             "plan": " → ".join(s["description"] for s in (op.execution_plan or {}).get("steps", [])) or None,
+            "parent_operation_id": op.parent_operation_id,
             "created_at": op.created_at.isoformat(),
             "completed_at": op.completed_at.isoformat() if op.completed_at else None,
             "principal": op.principal,
@@ -881,8 +1362,12 @@ class Backend:
         times = [c.name for c in d.columns if c.semantic_role == SemanticRole.TIME]
         identifiers = [c.name for c in d.columns if c.semantic_role == SemanticRole.IDENTIFIER]
         suggestions = [f"sum({m}) by {dim}" for m in measures[:2] for dim in dimensions[:2]]
-        return {"measures": measures, "dimensions": dimensions, "time_columns": times, "identifiers": identifiers,
-                "suggested_aggregations": suggestions}
+        units = {c.name: c.unit for c in d.columns if c.unit}
+        hints: dict[str, Any] = {"measures": measures, "dimensions": dimensions, "time_columns": times,
+                                 "identifiers": identifiers, "suggested_aggregations": suggestions}
+        if units:
+            hints["units"] = units
+        return hints
 
     @staticmethod
     def _with_notes(body: dict[str, Any], notes: list[ResolutionNote]) -> dict[str, Any]:
@@ -902,34 +1387,34 @@ class Backend:
         for name, patch in raw.items():
             if not isinstance(patch, dict):
                 raise InvalidIntentError(f"schema hint for {name!r} must be an object.", field="schema_hints")
-            unknown = sorted(set(patch) - {"description", "aliases", "semantic_role", "type"})
+            unknown = sorted(set(patch) - {"description", "aliases", "semantic_role", "type", "unit"})
             if unknown:
                 raise InvalidIntentError(f"Unknown schema hint keys {unknown} for column {name!r}.", field="schema_hints",
-                                         details={"allowed_keys": ["description", "aliases", "semantic_role", "type"]})
+                                         details={"allowed_keys": ["description", "aliases", "semantic_role", "type", "unit"]})
             hints[str(name)] = _jsonable(patch)
         return hints
 
     @staticmethod
     def _check_column_names(names: list[str]) -> None:
-        lowered = [n.lower() for n in names]
+        lowered = [n.casefold() for n in names]
         if len(set(lowered)) != len(lowered):
-            raise InvalidSchemaError("The file has duplicate column names (case-insensitive).", field="path",
+            raise InvalidSchemaError("The source has duplicate column names (case-insensitive).", field="path",
                                      details={"columns": names})
         for n in names:
             if not n.strip():
-                raise InvalidSchemaError("The file has an empty column name.", field="path", details={"columns": names})
+                raise InvalidSchemaError("The source has an empty column name.", field="path", details={"columns": names})
 
     def _build_columns(self, dataset_id: str, physical_columns: list[tuple[str, str]],
                        hints: dict[str, dict[str, Any]]) -> list[Column]:
-        lowered_hints = {k.lower(): v for k, v in hints.items()}
-        unknown = sorted(set(lowered_hints) - {n.lower() for n, _ in physical_columns})
+        lowered_hints = {k.casefold(): v for k, v in hints.items()}
+        unknown = sorted(set(lowered_hints) - {n.casefold() for n, _ in physical_columns})
         if unknown:
             raise InvalidSchemaError(f"schema_hints reference unknown columns {unknown}.", field="schema_hints",
                                      candidates=[n for n, _ in physical_columns])
         columns: list[Column] = []
         for position, (name, physical) in enumerate(physical_columns):
             logical = physical_to_logical(physical)
-            hint = lowered_hints.get(name.lower(), {})
+            hint = lowered_hints.get(name.casefold(), {})
             if "type" in hint:
                 try:
                     logical = LogicalType(str(hint["type"]).lower())
@@ -946,16 +1431,18 @@ class Backend:
             columns.append(Column(
                 id=self.store.allocate_id("col"), dataset_id=dataset_id, name=name, logical_type=logical,
                 physical_type=physical, description=str(hint.get("description", "")), semantic_role=role,
-                aliases=[str(a) for a in hint.get("aliases", [])], position=position,
+                aliases=[str(a) for a in hint.get("aliases", [])], unit=str(hint.get("unit", "")), position=position,
             ))
         return columns
 
     @staticmethod
     def _infer_role(name: str, logical: LogicalType) -> SemanticRole:
-        lowered = name.lower()
-        if lowered == "id" or lowered.endswith("_id") or lowered.endswith("uuid") or lowered.endswith("_key"):
+        lowered = name.casefold()
+        if lowered == "id" or lowered.endswith("_id") or lowered.endswith("uuid") or lowered.endswith("_key") \
+                or lowered.endswith(("code", "代码", "编码", "编号")) or lowered.startswith("id_"):
             return SemanticRole.IDENTIFIER
-        if logical.is_temporal or re.search(r"(^|_)(date|time|timestamp|day|month|year)($|_)", lowered):
+        if logical.is_temporal or re.search(r"(^|_)(date|time|timestamp|day|month|year)($|_)", lowered) \
+                or any(w in lowered for w in ("日期", "时间", "年度", "报告期", "截止日")):
             return SemanticRole.TIME
         if logical.is_numeric:
             return SemanticRole.MEASURE

@@ -22,13 +22,18 @@ STOPWORDS = {
     "the", "a", "an", "i", "we", "my", "our", "of", "that", "this", "those", "these", "one", "ones",
     "s", "which", "from", "in", "on", "at", "to", "it", "is", "was", "were", "with", "by", "for",
     "dataset", "datasets", "data", "table", "tables", "file", "files", "set",
+    # Chinese function words and generic nouns (matched as tokens/bigrams)
+    "的", "我", "我们", "那个", "这个", "那份", "这份", "数据", "数据集", "表", "表格", "文件", "那张", "这张", "个",
 }
-RECENCY_WORDS = {"latest", "recent", "recently", "newest", "last", "earlier", "previous", "just", "now"}
-IMPORT_WORDS = {"imported", "import", "loaded", "load", "uploaded", "upload", "ingested"}
-DERIVED_WORDS = {"result", "results", "created", "made", "built", "derived", "computed", "generated", "materialized", "output"}
-PUBLISHED_WORDS = {"published", "stable"}
-TODAY_WORDS = {"today", "todays"}
-YESTERDAY_WORDS = {"yesterday", "yesterdays"}
+RECENCY_WORDS = {"latest", "recent", "recently", "newest", "last", "earlier", "previous", "just", "now",
+                 "最新", "最近", "刚才", "刚刚", "上次", "之前", "先前"}
+IMPORT_WORDS = {"imported", "import", "loaded", "load", "uploaded", "upload", "ingested",
+                "导入", "上传", "加载", "载入"}
+DERIVED_WORDS = {"result", "results", "created", "made", "built", "derived", "computed", "generated", "materialized", "output",
+                 "结果", "生成", "创建", "计算", "产出", "输出"}
+PUBLISHED_WORDS = {"published", "stable", "发布", "已发布"}
+TODAY_WORDS = {"today", "todays", "今天", "今日"}
+YESTERDAY_WORDS = {"yesterday", "yesterdays", "昨天", "昨日"}
 HINT_WORDS = RECENCY_WORDS | IMPORT_WORDS | DERIVED_WORDS | PUBLISHED_WORDS | TODAY_WORDS | YESTERDAY_WORDS
 
 
@@ -50,11 +55,19 @@ class DatasetResolver:
         datasets = self.store.list_datasets(include_deleted=True)
         active = [d for d in datasets if d.status != DatasetStatus.DELETED]
 
-        exact = self._exact_match(text, active)
-        if exact is not None:
-            return exact
+        exact_hits = self._exact_matches(text, active)
+        if len(exact_hits) == 1:
+            return exact_hits[0]
+        if len(exact_hits) > 1:
+            raise AmbiguousReferenceError(
+                f"The {field} {text!r} is an alias of several datasets.",
+                field=field,
+                candidates=[self._candidate(d) for d in exact_hits[:8]],
+                hint="Repeat the request with the dataset id or exact name.",
+            )
 
-        deleted_hit = self._exact_match(text, [d for d in datasets if d.status == DatasetStatus.DELETED])
+        deleted_hits = self._exact_matches(text, [d for d in datasets if d.status == DatasetStatus.DELETED])
+        deleted_hit = deleted_hits[0] if len(deleted_hits) == 1 else None
         if deleted_hit is not None:
             raise NotFoundError(
                 f"Dataset {text!r} ({deleted_hit.id}) was deleted and is not available.",
@@ -118,17 +131,22 @@ class DatasetResolver:
         )
 
     @staticmethod
-    def _exact_match(text: str, datasets: list[Dataset]) -> Dataset | None:
-        lowered = text.lower()
+    def _exact_matches(text: str, datasets: list[Dataset]) -> list[Dataset]:
+        """Datasets whose id, name, alias or normalized name equals the reference.
+
+        Ids and names are unique, so a hit there is decisive. Aliases are not:
+        several datasets may share one (e.g. three ``orders`` sources), and
+        every hit is returned so the caller can surface the ambiguity.
+        """
+        lowered = text.casefold()
         for d in datasets:
-            if d.id.lower() == lowered or d.name.lower() == lowered:
-                return d
-        for d in datasets:
-            if lowered in (a.lower() for a in d.aliases):
-                return d
+            if d.id.casefold() == lowered or d.name.casefold() == lowered:
+                return [d]
+        hits = [d for d in datasets if lowered in (a.casefold() for a in d.aliases)]
+        if hits:
+            return hits
         norm = normalize(text)
-        hits = [d for d in datasets if normalize(d.name) == norm or norm in (normalize(a) for a in d.aliases)]
-        return hits[0] if len(hits) == 1 else None
+        return [d for d in datasets if normalize(d.name) == norm or norm in (normalize(a) for a in d.aliases)]
 
     def _score(self, text: str, datasets: list[Dataset], context: dict[str, Any]) -> list[tuple[Dataset, float, list[str]]]:
         words = tokens(text)

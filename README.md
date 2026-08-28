@@ -40,8 +40,10 @@ Key properties, all enforced in software rather than in prompts:
 
 | Concern | Where it lives |
 |---|---|
-| Identifiers, physical table names, storage paths, timestamps | allocated by the backend (`ds_N`, `col_N`, `op_N`, `ds_N_v1`), never accepted from the agent |
-| Name normalization / uniqueness | `slugify` + partial unique index on active dataset names |
+| Identifiers, physical table names, storage paths, timestamps | allocated by the backend (`ds_N`, `col_N`, `art_N`, `op_N`, `ds_N_v1`), never accepted from the agent |
+| Name normalization / uniqueness | Unicode-aware `slugify` (`公募基金经理(新)` → `公募基金经理_新`, `Regional Sales` → `regional_sales`) + partial unique index on active dataset names; original names stay reachable as aliases |
+| Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too |
+| Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match |
 | Schema and type correctness | shared type rules in `core/ir/typing.py`, applied twice (resolver inference, validator re-check) |
 | Ambiguity | `AmbiguousReferenceError` → `status: needs_resolution` with candidates |
 | Write-ahead operation record | operation row is inserted `pending` before any work, updated with IR and plan before execution, and finalized in the commit transaction |
@@ -89,12 +91,15 @@ The response tells the agent how each fuzzy reference was resolved:
 
 ### Resolution rules (in order)
 
-Datasets: exact id → exact name → alias → normalized name → token scoring over
-name/aliases/description/columns with temporal words (`today`, `yesterday`),
-origin words (`imported`, `result`, `created`), status words (`published`), and
-recency words (`latest`, `earlier`) → single clear winner, or a recency tie-break
-when the reference asks for it, otherwise `needs_resolution`. A reference that
-hits a deleted dataset returns `NOT_FOUND` with `restorable: true`.
+Datasets: exact id → exact name → alias (an alias shared by several datasets is
+reported as ambiguous, never picked) → normalized name → token scoring over
+name/aliases/description/columns with temporal words (`today`/`今天`,
+`yesterday`/`昨天`), origin words (`imported`/`导入`, `result`/`结果`), status
+words (`published`/`发布`), and recency words (`latest`/`最新`, `earlier`/`之前`)
+→ single clear winner, or a recency tie-break when the reference asks for it,
+otherwise `needs_resolution`. Tokens are Unicode-aware: CJK runs contribute
+character bigrams, so `股本变动` matches `北京股本变动`. A reference that hits a
+deleted dataset returns `NOT_FOUND` with `restorable: true`.
 
 Fields (resolved against the schema that is current at each step, so you can
 sort by an aggregate alias): exact → case-insensitive/alias → normalized → small
@@ -147,8 +152,10 @@ agent_backend/
 │   ├── access.py           AccessPolicy hook (AllowAll, DenyActions)
 │   ├── errors.py           error codes and structured error rendering
 │   ├── logging.py          structured stage events
-│   ├── models/             Dataset, Column, DatasetVersion, LineageEdge, Operation, AuditEvent
+│   ├── naming.py           Unicode-aware identifier rules (normalize, slugify, tokens)
+│   ├── models/             Dataset, Column, Artifact, DatasetVersion, LineageEdge, Operation, AuditEvent
 │   ├── ir/                 canonical IR (pydantic), expression parser, shared type rules
+│   ├── knowledge/          heuristic parser for knowledge.md-style semantic-layer documents
 │   ├── resolver/           dataset / field / expression / transform resolvers
 │   ├── validation/         IR validator (independent re-check)
 │   ├── planner/            explicit execution plan
@@ -219,17 +226,30 @@ Client configuration (Claude Desktop / Claude Code / Codex style; see
 Claude Code: `claude mcp add agent-backend -- uv run --directory /abs/path/to/Intentum agent-backend-mcp --workspace /abs/path/to/workspace`.
 
 Tools exposed (all semantic; no SQL, no file or table primitives):
-`list_datasets`, `describe_dataset`, `search_datasets`, `import_dataset`,
-`transform_dataset`, `materialize_result`, `publish_dataset`,
-`update_metadata`, `delete_dataset`, `restore_dataset`, `get_provenance`,
-`get_operation`.
+`list_datasets`, `list_artifacts`, `describe_dataset`, `search_datasets`,
+`import_dataset`, `import_workspace`, `attach_metadata`, `transform_dataset`,
+`materialize_result`, `publish_dataset`, `update_metadata`, `delete_dataset`,
+`restore_dataset`, `get_provenance`, `get_operation`.
 
 ## 5. Example MCP calls
 
 ```jsonc
-// import
+// import one file
 {"name": "import_dataset", "arguments": {"path": "/data/orders.csv", "description": "Shop orders"}}
-// → {"status": "success", "operation_id": "op_1", "dataset": {"id": "ds_1", "name": "orders", "rows": 12, ...}}
+// → {"status": "success", "operation_id": "op_1", "dataset": {"id": "ds_1", "name": "orders", "rows": 12, ...},
+//    "source": {"artifact_id": "art_1", "name": "orders.csv", "kind": "csv", "locator": null}}
+
+// import a whole task workspace (csv + json + every table of every sqlite; docs/media become artifacts)
+{"name": "import_workspace", "arguments": {"path": "/data/task_10/context"}}
+// → {"status": "success", "datasets": [{"id": "ds_9", "name": "ed_moneyauthoritybs", "rows": 294,
+//    "source": "db/sub_db.sqlite::ed_moneyauthoritybs", ...}, ...], "artifacts": [...], "failed": [], "replayed": [],
+//    "summary": "Imported 16 dataset(s) from 14 artifact(s) in context."}
+
+// attach the workspace's semantic layer
+{"name": "attach_metadata", "arguments": {"source": "knowledge.md"}}
+// → {"status": "success", "applied": [{"name": "ed_moneyauthoritybs", "description_set": true,
+//    "columns": ["TotalAssets", "Forex", ...]}, ...],
+//    "unmatched": {"tables": [{"name": "ed_grossdomesticproduct", "line": 88}], "columns": [...]}}
 
 // preview a transform with fuzzy references
 {"name": "transform_dataset", "arguments": {
@@ -292,6 +312,16 @@ the canonical IR, the full execution plan and the generated SQL.
 - `test_mcp.py`: semantic-only tool surface, required-fields-only schemas,
   end-to-end through `call_tool`, errors as structured content.
 - `test_e2e.py`: the demo scenario and intent-repair flows.
+- `test_naming.py`: Chinese dataset/column names through import, resolution
+  (exact, alias, fuzzy, ambiguity, Chinese hint words), expressions with
+  punctuated names, derived/materialized names.
+- `test_workspace.py`: `import_workspace` over csv + wrapper json + multi-table
+  sqlite + documents + media: deterministic collision-free names, aliases,
+  artifacts, per-source failure reporting, idempotent re-run, single-table
+  import with locators.
+- `test_knowledge.py`: knowledge.md parsing (table and bullet styles, scoped
+  and global facts, units), `attach_metadata` application, overwrite
+  semantics, unmatched reporting, source forms.
 
 Each state-changing test finishes by checking `Backend.integrity_report()`,
 which cross-checks metadata versions, DuckDB tables, row counts, orphan tables
@@ -299,6 +329,19 @@ and pending operations.
 
 ## 7. What to implement next
 
+The backend is being validated on the [DataSpace](https://github.com/BugMaker-Boyan/DataSpace)
+benchmark (410 heterogeneous task workspaces) against the KDD Cup 2026 champion
+pipeline as baseline; see `.seal/madr/0003-*` for the sequence. Unicode
+identifiers, `import_workspace` and `attach_metadata` are done; a real
+`task_10` workspace (8 csv, 8 sqlite tables, 1 wrapper json, knowledge.md)
+imports in ~2 s and the task's query runs through the semantic steps.
+
+0. **DataSpace `task_10` smoke test** through the MCP surface, scored with the
+   official evaluator; then extend the transform vocabulary (`distinct`,
+   `union`, window/rank with ties, not-null shorthand, date formatting) and add
+   `export_result` with the output contract (rectangular UTF-8 CSV, rounding
+   rules). A validated read-only `raw_query` fallback step is recorded as
+   MADR 0002 for the long tail.
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in
    place, only the operation is missing.

@@ -1,4 +1,6 @@
 from .entities import (
+    Artifact,
+    ArtifactKind,
     AuditEvent,
     Column,
     Dataset,
@@ -14,6 +16,8 @@ from .entities import (
 )
 
 __all__ = [
+    "Artifact",
+    "ArtifactKind",
     "AuditEvent",
     "Column",
     "Dataset",

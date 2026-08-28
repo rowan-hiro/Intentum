@@ -30,39 +30,65 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         return ToolAnnotations(**TOOL_ANNOTATIONS[kind])
 
     @server.tool(name="list_datasets", annotations=annotations("read"),
-                 description="List available datasets with concise metadata (id, name, description, rows, columns, status).")
+                 description="List available datasets with concise metadata (id, name, description, rows, columns, status, source).")
     def list_datasets(include_deleted: bool = False) -> dict[str, Any]:
         return backend.list_datasets(include_deleted=include_deleted)
 
+    @server.tool(name="list_artifacts", annotations=annotations("read"),
+                 description="List registered artifacts (source files, documents, media) and the datasets derived from "
+                             "each. Optional `kind`: csv, json, parquet, sqlite, markdown, text, pdf, video, audio, image.")
+    def list_artifacts(kind: str | None = None) -> dict[str, Any]:
+        return backend.list_artifacts(kind=kind)
+
     @server.tool(name="describe_dataset", annotations=annotations("read"),
-                 description="Describe one dataset: schema with types and semantic roles, row count, metadata, "
-                             "recent versions, lineage summary, semantic hints and a small sample. "
-                             "`dataset` may be an id, a name, an alias, or a loose description such as "
-                             "'the orders I imported today'.")
+                 description="Describe one dataset: schema with types, semantic roles, units and descriptions, row count, "
+                             "metadata, source artifact, recent versions, lineage summary, semantic hints and a small "
+                             "sample. `dataset` may be an id, a name, an alias (any script), or a loose description "
+                             "such as 'the orders I imported today'.")
     def describe_dataset(dataset: str, sample_rows: int = 5) -> dict[str, Any]:
         return backend.describe_dataset(dataset, sample_rows=sample_rows)
 
     @server.tool(name="search_datasets", annotations=annotations("read"),
-                 description="Search datasets by name, description, aliases, column names and metadata.")
+                 description="Search datasets by name, description, aliases, column names, column descriptions and metadata.")
     def search_datasets(query: str, limit: int = 10) -> dict[str, Any]:
         return backend.search_datasets(query, limit=limit)
 
     @server.tool(name="import_dataset", annotations=annotations("write"),
-                 description="Import a local CSV or Parquet file as a managed dataset. The backend inspects the file, "
-                             "infers the schema, copies the file into its workspace, loads it, assigns an id and "
-                             "records provenance atomically. Optional `schema_hints` is an object keyed by column "
-                             "name with description/aliases/semantic_role/type. Safe to retry: identical content "
-                             "and name replays the original result.")
+                 description="Import one local file as a managed dataset: csv, parquet, json (array or "
+                             "{table, records} wrapper) or a SQLite table (pass `table` when the file has several). "
+                             "The backend inspects the source, infers the schema, keeps a managed copy, loads it, "
+                             "assigns an id and records provenance atomically. Optional `schema_hints` is an object "
+                             "keyed by column name with description/aliases/semantic_role/type/unit. Safe to retry: "
+                             "identical content and name replays the original result.")
     def import_dataset(
         path: str,
         name: str | None = None,
         description: str | None = None,
+        table: str | None = None,
         schema_hints: dict[str, Any] | None = None,
         aliases: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        return backend.import_dataset(path, name=name, description=description, schema_hints=schema_hints,
-                                      aliases=aliases, idempotency_key=idempotency_key)
+        return backend.import_dataset(path, name=name, description=description, table=table,
+                                      schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key)
+
+    @server.tool(name="import_workspace", annotations=annotations("write"),
+                 description="Import a whole directory (a task workspace) in one operation: every csv/json/parquet file "
+                             "and every table of every SQLite file becomes a dataset; markdown, pdf, video and other "
+                             "files are registered as artifacts. Names are derived deterministically and collisions "
+                             "are qualified. Returns the datasets created, artifacts registered, sources that failed "
+                             "and sources that already existed (re-running is idempotent).")
+    def import_workspace(path: str, description: str | None = None, include_documents: bool = True) -> dict[str, Any]:
+        return backend.import_workspace(path, description=description, include_documents=include_documents)
+
+    @server.tool(name="attach_metadata", annotations=annotations("write"),
+                 description="Read a knowledge / semantic-layer markdown document (for example knowledge.md) and attach "
+                             "the table and column descriptions and units it contains to the matching datasets. "
+                             "`source` is an artifact id, artifact name or file path. Reports every fact that did not "
+                             "match a dataset or column so you can apply it with update_metadata. Existing descriptions "
+                             "are kept unless `overwrite` is true.")
+    def attach_metadata(source: str, dataset: str | None = None, overwrite: bool = False) -> dict[str, Any]:
+        return backend.attach_metadata(source, dataset=dataset, overwrite=overwrite)
 
     @server.tool(name="transform_dataset", annotations=annotations("write"),
                  description="Run a semantic transform on a dataset and preview the result (or persist it when "
@@ -109,7 +135,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
 
     @server.tool(name="update_metadata", annotations=annotations("write"),
                  description="Update semantic metadata: dataset description, aliases, free-form metadata, and "
-                             "per-column description/aliases/semantic_role (`columns` is an object keyed by column name).")
+                             "per-column description/aliases/semantic_role/unit (`columns` is an object keyed by column name).")
     def update_metadata(
         dataset: str,
         description: str | None = None,
@@ -131,7 +157,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
 
     @server.tool(name="get_provenance", annotations=annotations("read"),
                  description="Explain where a dataset came from: the operation that produced it, the canonical "
-                             "intent that was executed, input datasets, upstream lineage and audit trail.")
+                             "intent that was executed, input datasets, source artifact, upstream lineage and audit trail.")
     def get_provenance(dataset: str) -> dict[str, Any]:
         return backend.get_provenance(dataset)
 
