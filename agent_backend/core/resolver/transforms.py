@@ -8,9 +8,10 @@ aggregate alias). Every lenient decision is recorded as a ``ResolutionNote``.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from ..errors import InvalidIntentError, InvalidTransformError
+from ..errors import BackendError, InvalidIntentError, InvalidTransformError
 from ..ir import (
     AggregateFunction,
     AggregateStep,
@@ -71,6 +72,24 @@ _IMPLICIT_KEYS = {
 }
 
 
+_ALIAS_RE = re.compile(r"""^(?P<head>.+?)\s+as\s+(?P<alias>"[^"]+"|'[^']+'|[^\s"']+)\s*$""", re.IGNORECASE)
+
+
+def split_alias(text: str) -> tuple[str, str | None]:
+    """Split a trailing SQL-style ``... as name`` off a field reference or expression.
+
+    Returns ``(text, None)`` when there is no alias. The caller decides whether
+    the split is real: a field may legitimately be called ``x as y``.
+    """
+    match = _ALIAS_RE.match(text.strip())
+    if match is None:
+        return text, None
+    alias = match.group("alias")
+    if alias[:1] in ('"', "'"):
+        alias = alias[1:-1]
+    return match.group("head").strip(), alias
+
+
 class TransformResolver:
     def __init__(self, datasets: DatasetResolver, fields: FieldResolver | None = None) -> None:
         self.datasets = datasets
@@ -96,8 +115,8 @@ class TransformResolver:
 
         steps: list[Step] = []
         for index, loose_step in enumerate(self._normalize_steps(transform)):
-            step, scope = self._resolve_step(loose_step, scope, index, context, notes, used)
-            steps.append(step)
+            produced, scope = self._resolve_step(loose_step, scope, index, context, notes, used)
+            steps.extend(produced)
 
         if output_name is not None:
             name = slugify(output_name)
@@ -127,15 +146,39 @@ class TransformResolver:
                 hint='Example: {"type": "aggregate", "group_by": ["region"], "measures": [{"function": "sum", "field": "amount"}]}',
             )
         if isinstance(transform, list):
-            return [self._normalize_one(s) for s in transform]
+            return [s for item in transform for s in self._normalize_one(item)]
         if not isinstance(transform, dict):
             raise InvalidTransformError("transform must be an object or a list of step objects.", field="transform")
         if "steps" in transform:
             reject_unknown_keys(transform, {"steps"}, "transform")
-            return [self._normalize_one(s) for s in transform["steps"]]
-        if "type" in transform or "op" in transform or "operation" in transform:
-            return [self._normalize_one(transform)]
-        # implicit compound form: {"filter": ..., "group_by": [...], "metric": "revenue", "sort": ..., "limit": 5}
+            return [s for item in transform["steps"] for s in self._normalize_one(item)]
+        return self._normalize_one(transform)
+
+    def _normalize_one(self, step: Any) -> list[dict[str, Any]]:
+        """Turn one loose step object into one or more typed step dicts.
+
+        A step may name its type ("type"/"op"/"operation"); a step that does not
+        is read by its keys, so the bare ``{"filter": "..."}`` is a step too, and
+        a compound object such as ``{"filter": ..., "group_by": [...], "limit": 5}``
+        becomes several.
+        """
+        if not isinstance(step, dict):
+            raise InvalidTransformError(f"Each step must be an object, got {step!r}.", field="transform")
+        raw = pick(step, "type", "op", "operation")
+        if raw is None:
+            return self._implicit_steps(step)
+        step_type = _STEP_TYPE_ALIASES.get(str(raw).lower())
+        if step_type is None:
+            raise InvalidTransformError(
+                f"Unknown step type {raw!r}.", field="transform",
+                details={"allowed_types": sorted(set(_STEP_TYPE_ALIASES.values()))},
+            )
+        body = {k: v for k, v in step.items() if k not in ("type", "op", "operation")}
+        return [{"type": step_type, **body}]
+
+    @staticmethod
+    def _implicit_steps(transform: dict[str, Any]) -> list[dict[str, Any]]:
+        """Read an untyped step object by its keys, in the canonical step order."""
         keys = set(transform)
         all_known = set().union(*_IMPLICIT_KEYS.values())
         reject_unknown_keys(transform, all_known | {"type"}, "transform")
@@ -154,26 +197,13 @@ class TransformResolver:
                 (key,) = tuple(present)
                 payload = {key: transform[key]}
             steps.append({"type": step_type, **payload})
+        if not steps:
+            raise InvalidTransformError(
+                "A step needs a 'type' or a key that names one.", field="transform",
+                details={"allowed_types": sorted(set(_STEP_TYPE_ALIASES.values())),
+                         "allowed_keys": sorted(all_known)},
+            )
         return steps
-
-    @staticmethod
-    def _normalize_one(step: Any) -> dict[str, Any]:
-        if not isinstance(step, dict):
-            raise InvalidTransformError(f"Each step must be an object, got {step!r}.", field="transform")
-        raw = pick(step, "type", "op", "operation")
-        if raw is None:
-            raise InvalidTransformError(
-                "Each step needs a 'type'.", field="transform",
-                details={"allowed_types": sorted(set(_STEP_TYPE_ALIASES.values()))},
-            )
-        step_type = _STEP_TYPE_ALIASES.get(str(raw).lower())
-        if step_type is None:
-            raise InvalidTransformError(
-                f"Unknown step type {raw!r}.", field="transform",
-                details={"allowed_types": sorted(set(_STEP_TYPE_ALIASES.values()))},
-            )
-        body = {k: v for k, v in step.items() if k not in ("type", "op", "operation")}
-        return {"type": step_type, **body}
 
     # -- step resolution -------------------------------------------------
     def _resolve_step(
@@ -184,22 +214,73 @@ class TransformResolver:
         context: dict[str, Any] | None,
         notes: list[ResolutionNote],
         used: list[Dataset],
-    ) -> tuple[Step, Scope]:
+    ) -> tuple[list[Step], Scope]:
         step_type = loose["type"]
         where = f"transform.steps[{index}] ({step_type})"
         handler = getattr(self, f"_step_{step_type}")
-        return handler(loose, scope, where, context, notes, used)
+        produced, scope = handler(loose, scope, where, context, notes, used)
+        return (produced if isinstance(produced, list) else [produced]), scope
 
     def _step_select(self, loose, scope, where, context, notes, used):
         reject_unknown_keys(loose, {"type", "select", "fields", "columns"}, where)
         raw = pick(loose, "select", "fields", "columns")
-        names = [raw] if isinstance(raw, str) else raw
-        if not isinstance(names, list) or not names:
+        items = [raw] if isinstance(raw, (str, dict)) else raw
+        if not isinstance(items, list) or not items:
             raise InvalidTransformError("select needs a non-empty list of fields.", field=where)
-        fields = [self.fields.resolve(n, scope, field=where, notes=notes) for n in names]
+        fields: list[ScopeField] = []
+        aliases: list[str | None] = []
+        for item in items:
+            if isinstance(item, dict):
+                reject_unknown_keys(item, {"field", "column", "name", "as", "alias", "to"}, where)
+                reference = pick(item, "field", "column", "name")
+                alias = pick(item, "as", "alias", "to")
+                field = self.fields.resolve(reference, scope, field=where, notes=notes)
+            else:
+                field, alias = self._field_with_alias(str(item), scope, where, notes)
+            fields.append(field)
+            aliases.append(str(alias) if alias is not None else None)
         self._check_unique([f.name for f in fields], where)
-        new_scope = scope.with_fields(fields)
-        return SelectStep(fields=[f.ref() for f in fields], output_schema=new_scope.refs()), new_scope
+        selected = scope.with_fields(fields)
+        steps: list[Step] = [SelectStep(fields=[f.ref() for f in fields], output_schema=selected.refs())]
+        if all(a is None for a in aliases):
+            return steps, selected
+        # "amount as revenue" is a projection plus a rename; both stay visible in the IR.
+        mappings: list[RenameMapping] = []
+        renamed_fields: list[ScopeField] = []
+        for field, alias in zip(fields, aliases):
+            if alias is None:
+                renamed_fields.append(field)
+                continue
+            new_name = slugify(alias)
+            if new_name != alias:
+                notes.append(ResolutionNote(where, alias, new_name, "normalized to snake_case"))
+            if new_name != field.name:
+                mappings.append(RenameMapping(field=field.ref(), to=new_name))
+            renamed_fields.append(ScopeField(name=new_name, logical_type=field.logical_type, column_id=field.column_id,
+                                             aliases=field.aliases, semantic_role=field.semantic_role))
+        if not mappings:
+            return steps, selected
+        self._check_unique([f.name for f in renamed_fields], where)
+        final = selected.with_fields(renamed_fields)
+        steps.append(RenameStep(mappings=mappings, output_schema=final.refs()))
+        return steps, final
+
+    def _field_with_alias(self, text: str, scope: Scope, where: str, notes: list[ResolutionNote]):
+        """Resolve a field reference that may carry a trailing ``as alias``.
+
+        The split is only honoured when the part before ``as`` resolves; a field
+        genuinely named ``x as y`` still wins.
+        """
+        head, alias = split_alias(text)
+        if alias is None:
+            return self.fields.resolve(text, scope, field=where, notes=notes), None
+        trial: list[ResolutionNote] = []
+        try:
+            field = self.fields.resolve(head, scope, field=where, notes=trial)
+        except BackendError:
+            return self.fields.resolve(text, scope, field=where, notes=notes), None
+        notes.extend(trial)
+        return field, alias
 
     def _step_filter(self, loose, scope, where, context, notes, used):
         reject_unknown_keys(loose, {"type", "filter", "where", "predicate", "condition", "expression", "expr"}, where)
@@ -377,23 +458,67 @@ class TransformResolver:
         raw = pick(loose, "derive", "compute")
         name = pick(loose, "name", "as", "alias")
         expression = pick(loose, "expression", "expr", "formula")
-        if isinstance(raw, dict) and name is None and expression is None:
-            if "name" in raw or "expression" in raw or "expr" in raw:
-                reject_unknown_keys(raw, {"name", "as", "alias", "expression", "expr", "formula"}, where)
-                name = pick(raw, "name", "as", "alias")
-                expression = pick(raw, "expression", "expr", "formula")
-            elif len(raw) == 1:
-                (name, expression), = raw.items()
+        pairs: list[tuple[Any, Any]] = []
+        if name is not None or expression is not None:
+            pairs.append((name, expression if expression is not None else raw))
+        elif isinstance(raw, list):
+            pairs.extend(self._derive_pair(item, where) for item in raw)
+        elif isinstance(raw, dict):
+            if any(k in raw for k in ("name", "as", "alias", "expression", "expr", "formula")):
+                pairs.append(self._derive_pair(raw, where))
             else:
-                raise InvalidTransformError('derive needs exactly one {"name": "expression"} pair per step.', field=where)
-        elif raw is not None and expression is None:
-            expression = raw
+                pairs.extend(raw.items())
+        elif raw is not None:
+            pairs.append((None, raw))
+        if not pairs:
+            raise InvalidTransformError(
+                'derive needs a name and an expression, e.g. {"type": "derive", "name": "total", "expression": "quantity * unit_price"}.',
+                field=where,
+            )
+        steps: list[Step] = []
+        for derived_name, derived_expression in pairs:
+            step, scope = self._derive_one(derived_name, derived_expression, scope, where, notes)
+            steps.append(step)
+        return steps, scope
+
+    @staticmethod
+    def _derive_pair(item: Any, where: str) -> tuple[Any, Any]:
+        if isinstance(item, str):
+            return None, item
+        if isinstance(item, dict):
+            if any(k in item for k in ("name", "as", "alias", "expression", "expr", "formula")):
+                reject_unknown_keys(item, {"name", "as", "alias", "expression", "expr", "formula"}, where)
+                return pick(item, "name", "as", "alias"), pick(item, "expression", "expr", "formula")
+            if len(item) == 1:
+                (pair,) = item.items()
+                return pair
+        raise InvalidTransformError(f"Invalid derive entry {item!r}.", field=where)
+
+    def _derive_one(self, name: Any, expression: Any, scope: Scope, where: str, notes: list[ResolutionNote]):
+        expr = None
+        if isinstance(expression, str):
+            head, alias = split_alias(expression)
+            if alias is not None:
+                # "quantity * unit_price as total": only a head that resolves makes it an alias.
+                trial: list[ResolutionNote] = []
+                try:
+                    expr = self.expressions.resolve(head, scope, field=where, notes=trial)
+                except BackendError:
+                    expr = None
+                else:
+                    notes.extend(trial)
+                    if name is None:
+                        name = alias
+                    elif slugify(str(name)) != slugify(alias):
+                        raise InvalidTransformError(
+                            f"derive names the result twice: {name!r} and {alias!r}.", field=where)
         if not isinstance(name, str) or not name.strip() or expression is None:
             raise InvalidTransformError(
                 'derive needs a name and an expression, e.g. {"type": "derive", "name": "total", "expression": "quantity * unit_price"}.',
                 field=where,
             )
-        expr = self.expressions.resolve(expression, scope, field=where, notes=notes)
+        if expr is None:
+            expr = self.expressions.resolve(expression, scope, field=where, notes=notes)
         new_name = slugify(name)
         if new_name != name:
             notes.append(ResolutionNote(where, name, new_name, "normalized to snake_case"))
