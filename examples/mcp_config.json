@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-backend": {
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/Intentum", "agent-backend-mcp", "--workspace", "/absolute/path/to/workspace"],
+      "env": {
+        "AGENT_BACKEND_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
