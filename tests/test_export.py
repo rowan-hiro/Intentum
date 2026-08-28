@@ -249,3 +249,78 @@ def test_export_overwrite_preserves_private_target_permissions(backend, orders, 
     assert response["status"] == "success", response
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert target.read_bytes() != b"previous private export\n"
+
+
+# -- review findings 2-4 ---------------------------------------------------
+
+def _two_similar_columns(backend, tmp_path: Path) -> None:
+    from tests.conftest import write_csv
+
+    path = write_csv(tmp_path / "prices.csv", "Unit Price,unit_price", ["1.005,2.005"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_format_spec_key_prefers_the_column_it_names_exactly(backend, tmp_path: Path):
+    """An exact name must never lose to another column's lenient form."""
+    _two_similar_columns(backend, tmp_path)
+    target = tmp_path / "out.csv"
+    response = backend.export_result("prices", str(target), format_spec={"columns": {"unit_price": {"decimals": 2}}})
+    assert response["status"] == "success", response
+    assert rendered(target) == ["Unit Price,unit_price", "1.005,2.01"]
+    assert "resolution" not in response
+
+
+def test_format_spec_refuses_a_key_that_fits_several_columns(backend, tmp_path: Path):
+    _two_similar_columns(backend, tmp_path)
+    target = tmp_path / "out.csv"
+    response = backend.export_result("prices", str(target), format_spec={"columns": {"Unit-Price": {"decimals": 2}}})
+    assert response["code"] == "INVALID_SCHEMA" and response["field"] == "format_spec"
+    assert response["candidates"] == ["Unit Price", "unit_price"]
+    assert not target.exists()
+
+
+def test_format_spec_reports_a_lenient_column_match(backend, tmp_path: Path):
+    _balance_sheet(backend, tmp_path)
+    response = backend.export_result("bs", str(tmp_path / "out.csv"),
+                                     format_spec={"columns": {"totalassets": {"decimals": 1}}})
+    assert response["status"] == "success", response
+    assert [(n["reference"], n["resolved_to"]) for n in response["resolution"]
+            if n["field"] == "format_spec.columns"] == [("totalassets", "TotalAssets")]
+
+
+def test_date_pattern_also_renders_timestamps(backend, tmp_path: Path):
+    """Asking for %Y-%m-%d on a timestamp column is a request, not a mistake to swallow."""
+    _balance_sheet(backend, tmp_path)
+    assert next(c for c in backend.describe_dataset("bs")["schema"] if c["name"] == "EndDate")["type"] == "timestamp"
+    target = tmp_path / "out.csv"
+    response = backend.export_result("bs", str(target), format_spec={"columns": {"EndDate": {"date_format": "%Y-%m-%d"}}})
+    assert response["status"] == "success", response
+    assert rendered(target)[1].split(",")[0] == "2002-01-31"
+
+
+def test_export_to_a_directory_is_a_structured_error(backend, orders, tmp_path: Path):
+    victim = tmp_path / "adir"
+    victim.mkdir()
+    for overwrite in (False, True):
+        response = backend.export_result("orders", str(victim), overwrite=overwrite)
+        assert response["code"] == "INVALID_INTENT", response
+        assert response["recoverable"] is True and "directory" in response["message"]
+    assert list(victim.iterdir()) == []
+    failed = [o for o in backend.store.list_operations() if o.status == "failed"]
+    assert failed and {o.error["code"] for o in failed} == {"INVALID_INTENT"}
+
+
+def test_export_reports_a_refusing_filesystem_as_a_failed_export(backend, orders, tmp_path: Path, monkeypatch):
+    target = tmp_path / "out" / "orders.csv"
+    target.parent.mkdir()
+    target.write_bytes(b"previous export\n")
+
+    def refuse(self, other):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    response = backend.export_result("orders", str(target), overwrite=True)
+    assert response["code"] == "EXECUTION_FAILED", response
+    assert response["details"]["path"] == str(target)
+    assert target.read_bytes() == b"previous export\n"
+    assert list(target.parent.iterdir()) == [target]  # no staging directory left behind

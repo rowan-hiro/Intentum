@@ -34,6 +34,7 @@ from .errors import (
     BackendError,
     ConflictError,
     ErrorCode,
+    ExecutionFailedError,
     InvalidIntentError,
     InvalidSchemaError,
     InvalidStateError,
@@ -41,7 +42,7 @@ from .errors import (
     PermissionDeniedError,
 )
 from .execution import Executor
-from .export import ExportFormat, write_formatted_csv
+from .export import ExportFormat, ValueRenderer, write_formatted_csv
 from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SortStep, TransformIR
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
@@ -1226,6 +1227,9 @@ class Backend:
                         hint=f"Use a path inside {self.export_root} (relative paths are resolved against it).",
                     )
                 target = resolved
+            if target.is_dir():
+                raise InvalidIntentError(f"{target} is a directory; path must name a file.", field="path",
+                                         hint="Give the file to write, for example a path ending in .csv.")
             if target.exists() and not overwrite:
                 raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
             steps = [PlanStep("Scan", f"Scan({ds.name} v{ds.version})", {"table": version.physical_table})]
@@ -1240,32 +1244,26 @@ class Backend:
             op.execution_plan = plan.to_dict()
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
+            renderer: ValueRenderer | None = None
+            columns: list[str] = []
+            data: list[Any] = []
+            if spec is not None:
+                # Prepared before anything is staged, so a bad column key costs no work.
+                columns, data = self.engine.read_table(version.physical_table)
+                renderer = ValueRenderer(spec, columns)
+                for key, column, how in renderer.lenient:
+                    notes.append(ResolutionNote("format_spec.columns", key, column, how))
             target.parent.mkdir(parents=True, exist_ok=True)
             # Publish only a complete file, staged on the target's filesystem.
             # A failed render leaves the original target untouched.
             with TemporaryDirectory(prefix=".intentum-export-", dir=target.parent) as staging_dir:
                 staged = Path(staging_dir) / target.name
-                if spec is None:
+                if renderer is None:
                     rows = self.engine.export_table(version.physical_table, staged, fmt)
                 else:
-                    columns, data = self.engine.read_table(version.physical_table)
-                    rows = write_formatted_csv(staged, columns, data, spec)
+                    rows = write_formatted_csv(staged, columns, data, renderer)
                 content_hash = self.workspace.content_hash(staged)
-                if overwrite:
-                    try:
-                        target_mode = stat.S_IMODE(target.stat().st_mode)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        staged.chmod(target_mode)
-                    staged.replace(target)
-                else:
-                    try:
-                        # Linking is atomic and refuses a target created after our initial check.
-                        os.link(staged, target)
-                    except FileExistsError as exc:
-                        raise ConflictError(f"{target} already exists.", field="path",
-                                            hint="Pass overwrite=true to replace it.") from exc
+                self._publish_export(staged, target, overwrite)
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
             now = self.clock()
             with self.store.transaction():
@@ -1291,6 +1289,36 @@ class Backend:
                 self._complete(op, response, None, None, now)
             log_event("state.committed", operation_id=op.id, dataset_id=ds.id, exported=str(target))
             return self._with_notes(response, notes)
+
+    @staticmethod
+    def _publish_export(staged: Path, target: Path, overwrite: bool) -> None:
+        """Move a fully written file into place, keeping failures structured.
+
+        Both branches are atomic: replace swaps the inode, link refuses a target
+        that appeared while we were rendering. Anything the filesystem refuses is
+        reported as a failed export, never as an internal error.
+        """
+        try:
+            if overwrite:
+                try:
+                    target_mode = stat.S_IMODE(target.stat().st_mode)
+                except FileNotFoundError:
+                    pass
+                else:
+                    staged.chmod(target_mode)
+                staged.replace(target)
+            else:
+                # Linking is atomic and refuses a target created after our initial check.
+                os.link(staged, target)
+        except FileExistsError as exc:
+            raise ConflictError(f"{target} already exists.", field="path",
+                                hint="Pass overwrite=true to replace it.") from exc
+        except IsADirectoryError as exc:
+            raise InvalidIntentError(f"{target} is a directory; path must name a file.", field="path",
+                                     hint="Give the file to write, for example a path ending in .csv.") from exc
+        except OSError as exc:
+            raise ExecutionFailedError(f"Could not write the export to {target}: {exc}",
+                                       details={"path": str(target)}) from exc
 
     @staticmethod
     def _export_format(format_spec: Any, fmt: str) -> ExportFormat | None:

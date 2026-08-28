@@ -106,27 +106,46 @@ class ValueRenderer:
     def __init__(self, spec: ExportFormat, columns: list[str]) -> None:
         self.columns = list(columns)
         self.matched: dict[str, str] = {}  # specification key -> column name
-        by_key: dict[str, str] = {}
-        for name in columns:
-            by_key.setdefault(name.casefold(), name)
-            by_key.setdefault(normalize(name), name)
+        self.lenient: list[tuple[str, str, str]] = []  # key, column, how it matched
         overrides: dict[str, ValueFormat] = {}
         for key, rules in spec.columns.items():
-            column = by_key.get(str(key)) or by_key.get(str(key).casefold()) or by_key.get(normalize(str(key)))
-            if column is None:
-                raise InvalidSchemaError(
-                    f"format_spec references unknown column {key!r}.", field="format_spec", candidates=list(columns)
-                )
+            column, how = self._match(str(key), columns)
             if column in overrides:
                 raise InvalidSchemaError(f"format_spec sets column {column!r} twice.", field="format_spec")
             overrides[column] = rules
             self.matched[str(key)] = column
+            if how is not None:
+                self.lenient.append((str(key), column, how))
         for rules, where in [(spec, "format_spec")] + [(r, f"format_spec.columns.{c}") for c, r in overrides.items()]:
             if rules.date_format is not None:
                 validate_pattern(rules.date_format, f"{where}.date_format")
             if rules.timestamp_format is not None:
                 validate_pattern(rules.timestamp_format, f"{where}.timestamp_format")
         self.rules = [_Rule.build(spec, overrides.get(name)) for name in columns]
+
+    @staticmethod
+    def _match(key: str, columns: list[str]) -> tuple[str, str | None]:
+        """One column for a specification key: exact name first, then lenient forms.
+
+        A lenient form that fits several columns is refused rather than guessed,
+        so a key that exactly names one column can never be applied to another.
+        """
+        if key in columns:
+            return key, None
+        for candidates, how in (
+            ([c for c in columns if c.casefold() == key.casefold()], "case-insensitive match"),
+            ([c for c in columns if normalize(c) == normalize(key)], "normalized match"),
+        ):
+            if len(candidates) == 1:
+                return candidates[0], how
+            if len(candidates) > 1:
+                raise InvalidSchemaError(
+                    f"format_spec column {key!r} matches {len(candidates)} columns; name one exactly.",
+                    field="format_spec", candidates=candidates,
+                )
+        raise InvalidSchemaError(
+            f"format_spec references unknown column {key!r}.", field="format_spec", candidates=list(columns)
+        )
 
     def render_row(self, row: Iterable[Any]) -> list[str]:
         return [self._render(value, rule) for value, rule in zip(row, self.rules)]
@@ -140,7 +159,10 @@ class ValueRenderer:
         if isinstance(value, (int, float, Decimal)):
             return self._number(value, rule)
         if isinstance(value, dt.datetime):
-            return value.strftime(rule.timestamp_format) if rule.timestamp_format else str(value)
+            # Either key may name the pattern: asking for %Y-%m-%d on a timestamp
+            # column is a rendering request, not a mistake to swallow silently.
+            pattern = rule.timestamp_format or rule.date_format
+            return value.strftime(pattern) if pattern else str(value)
         if isinstance(value, dt.date):
             pattern = rule.date_format or rule.timestamp_format
             return value.strftime(pattern) if pattern else str(value)
@@ -176,13 +198,12 @@ class ValueRenderer:
         return text
 
 
-def write_formatted_csv(path: Path, columns: list[str], rows: Iterable[Iterable[Any]], spec: ExportFormat) -> int:
-    """Write rows as csv with the specification applied; returns the row count.
+def write_formatted_csv(path: Path, columns: list[str], rows: Iterable[Iterable[Any]], renderer: ValueRenderer) -> int:
+    """Write rows as csv with a prepared renderer; returns the row count.
 
     Rendering happens in this process, so a formatted export materializes its
     rows in memory — exports are answers, not bulk unloads.
     """
-    renderer = ValueRenderer(spec, columns)
     written = 0
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
