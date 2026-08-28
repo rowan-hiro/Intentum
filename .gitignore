@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 workspace/
 examples/dataspace/runs/
+.env
 *.egg-info/
 dist/
 build/

@@ -128,9 +128,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                                           idempotency_key=idempotency_key)
 
     @server.tool(name="export_result", annotations=annotations("write"),
-                 description="Write a managed dataset to a file (csv or parquet) at a path you name, e.g. the "
-                             "prediction file a task requires. The dataset stays managed; the export is audited "
-                             "with its content hash. Existing files are not replaced unless `overwrite` is true.")
+                 description="Write a managed dataset to a file (csv or parquet) at a path you name, e.g. a result "
+                             "file another system expects. Paths are confined to the configured export root. The "
+                             "dataset stays managed; the export is audited with its content hash. Existing files "
+                             "are not replaced unless `overwrite` is true.")
     def export_result(dataset: str, path: str, format: str = "csv", overwrite: bool = False) -> dict[str, Any]:
         return backend.export_result(dataset, path, format=format, overwrite=overwrite)
 

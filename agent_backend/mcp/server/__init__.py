@@ -1,3 +1,3 @@
-from .main import create_server, main
+from .main import INSTRUCTIONS, create_server, main
 
-__all__ = ["create_server", "main"]
+__all__ = ["INSTRUCTIONS", "create_server", "main"]

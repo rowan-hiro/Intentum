@@ -40,11 +40,14 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Agent-ready backend MCP server")
     parser.add_argument("--workspace", default=os.environ.get("AGENT_BACKEND_WORKSPACE", "./workspace"),
                         help="Managed workspace directory (default: ./workspace or $AGENT_BACKEND_WORKSPACE)")
+    parser.add_argument("--export-root", default=os.environ.get("AGENT_BACKEND_EXPORT_ROOT"),
+                        help="Directory exports may be written to (default: <workspace>/exports)")
     parser.add_argument("--log-level", default=os.environ.get("AGENT_BACKEND_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    backend = Backend(args.workspace)
+    export_root = args.export_root or os.path.join(args.workspace, "exports")
+    backend = Backend(args.workspace, export_root=export_root)
     try:
         create_server(backend).run(transport="stdio")
     finally:

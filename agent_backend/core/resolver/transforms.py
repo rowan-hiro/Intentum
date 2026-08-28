@@ -202,8 +202,8 @@ class TransformResolver:
         return SelectStep(fields=[f.ref() for f in fields], output_schema=new_scope.refs()), new_scope
 
     def _step_filter(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "filter", "where", "predicate", "condition"}, where)
-        raw = pick(loose, "filter", "where", "predicate", "condition")
+        reject_unknown_keys(loose, {"type", "filter", "where", "predicate", "condition", "expression", "expr"}, where)
+        raw = pick(loose, "filter", "where", "predicate", "condition", "expression", "expr")
         if raw is None:
             raise InvalidTransformError("filter needs a predicate.", field=where)
         predicate = self.expressions.resolve(raw, scope, field=where, notes=notes)
@@ -275,8 +275,16 @@ class TransformResolver:
         return Measure(function=function, field=field.ref(), alias=slugify(alias or f"{function}_{field.name}"), logical_type=result_type)
 
     def _step_sort(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "sort", "by", "keys", "order_by", "sort_by", "direction"}, where)
-        raw = pick(loose, "sort", "by", "keys", "order_by", "sort_by")
+        reject_unknown_keys(loose, {"type", "sort", "by", "keys", "order_by", "sort_by", "direction", "order",
+                                    "field", "fields", "column", "columns"}, where)
+        raw = pick(loose, "sort", "by", "keys", "order_by", "sort_by", "field", "fields", "column", "columns")
+        if "order" in loose:
+            # "order" is a direction when it is asc/desc, otherwise the list of keys.
+            if isinstance(loose["order"], str) and loose["order"].strip().lower() in ("asc", "desc", "ascending", "descending"):
+                if "direction" not in loose:
+                    loose = {**loose, "direction": loose["order"]}
+            elif raw is None:
+                raw = loose["order"]
         items = [raw] if isinstance(raw, (str, dict)) else list(raw or [])
         if not items:
             raise InvalidTransformError("sort needs at least one key.", field=where)

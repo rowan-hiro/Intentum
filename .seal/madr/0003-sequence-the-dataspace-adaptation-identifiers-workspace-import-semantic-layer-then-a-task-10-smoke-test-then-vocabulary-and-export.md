@@ -67,6 +67,35 @@ question (货币当局资产负债表) does not resolve because the workspace's
 knowledge document is English; the scripted agent searched in English.
 Whether a model does that in one round is what the LLM-driven layer measures.
 
+### Evidence from the task_10 smoke test (2026-08-28, LLM layer: qwen3.5-35b-a3b, 3 runs)
+
+Official result 2/3 passed; mean 27 turns, ≈ $0.004 and 81 s per run
+(`examples/dataspace_agent.py`, traces under `examples/dataspace/runs/`).
+
+- Dataset discovery took two turns in every run (import listing →
+  describe); the cross-language concern above did not materialize.
+- The failed run divided the amount by 100 after reading the attached unit
+  `亿元 (100M CNY)` as "needs conversion" — an agent semantics error, not a
+  backend gap.
+- Both passing runs had the correct file exported early (turn 8 / 12) and
+  then spent the remaining turns trying to satisfy the question's formatting
+  clause with string/date rendering in the transform (`strftime`, `format`,
+  `substr`, `||`), each refused. This confirms finding 1 above with a model
+  in the loop: step 5's export-format specification is what ends these
+  loops, and it must be discoverable from the tool surface.
+- Loose step shapes the model used and the resolver rejected — all general
+  and to be accepted in step 4: single-key steps without `type`
+  (`[{"filter": …}, {"select": …}, {"sort": …}]`, five occurrences);
+  `sort` with `order: [{field, direction}]` (fixed immediately); SQL-style
+  `x as y` aliases in `select` and in derive expressions; `derive` as a
+  list of `{name, expression}`; string slicing and temporal formatting
+  functions; `year()` on the VARCHAR date column (finding 2 above).
+- A new invariant surfaced and was added: `export_result` must be confined
+  to an export root. Before the guard, the first exploratory run wrote a
+  stray file into the benchmark's input directory; with it, run 3's attempt
+  to write `/tmp/...` was refused with `PERMISSION_DENIED` and the model
+  recovered inside the allowed root.
+
 ## Decision History
 
 <!-- driftseal-reconciliation: c1815772-878f-428d-a6a2-6da3854a15dd -->
@@ -89,3 +118,10 @@ task_10 smoke (scripted-agent layer) done: examples/dataspace_smoke.py drives th
 Status: Accepted → Accepted
 
 Body amended with 'Evidence from the task_10 smoke test': (1) export_result needs a numeric format specification (31783696.815 rendered as 31783696.814999998 scored 0.45 on the champion scorer, 1.0 officially); (2) SQLite date columns import as VARCHAR and should be refined to date/timestamp on import. Both constrain steps 4-5.
+
+<!-- driftseal-reconciliation: 34ab744f-6955-473f-8c9b-7b2a70bf0db9 -->
+### 2026-08-28T06:54:06.245Z — Outcome `2026-08-28-004`
+
+Status: Accepted → Accepted
+
+LLM layer of the task_10 smoke run: qwen3.5-35b-a3b through the MCP tools, 3 runs, 2/3 passed officially, mean 27 turns and ~$0.004 per run. Evidence subsection added to the body: discovery is not the problem; the failure was a unit-reading error by the agent; passing runs looped on formatting (confirms export-format specification, step 5); five loose step shapes to accept in step 4; export sandbox root added as a new invariant.
