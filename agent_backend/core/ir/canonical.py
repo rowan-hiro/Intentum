@@ -250,22 +250,27 @@ class TransformIR(IRModel):
 class ImportIR(IRModel):
     operation: Literal["import"] = "import"
     source_path: str
-    format: Literal["csv", "parquet"]
+    format: Literal["csv", "parquet", "json", "sqlite"]
+    locator: str | None = None  # table inside a multi-table container such as SQLite
     name: str
     description: str = ""
     content_hash: str
     column_hints: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Types the import itself refined (text → date/timestamp); replayable, and
+    # excluded from the fingerprint because they are derived from the source.
+    refined_types: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("name")
     @classmethod
     def _check_name(cls, value: str) -> str:
-        import re
+        from ..naming import is_identifier
 
-        if not re.fullmatch(r"[a-z][a-z0-9_]*", value):
-            raise ValueError("dataset names must be lowercase snake_case")
+        if not is_identifier(value):
+            raise ValueError("dataset names must be normalized identifiers (casefolded snake_case, any script)")
         return value
 
     def logical_fingerprint(self) -> str:
         payload = self.model_dump(mode="json")
+        payload.pop("refined_types", None)
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()

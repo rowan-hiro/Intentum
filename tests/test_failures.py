@@ -2,6 +2,9 @@
 
 import logging
 
+import pytest
+
+from agent_backend.core.errors import ExecutionFailedError
 from agent_backend.core.logging import EventCapture, logger
 
 
@@ -36,6 +39,33 @@ def test_metadata_commit_failure_drops_physical_table(backend, orders, monkeypat
     # the same request now succeeds (no stale idempotency record was written)
     ok = backend.materialize_result("orders", {"group_by": ["region"], "metric": "revenue"}, "regional_sales")
     assert ok["status"] == "success", ok
+
+
+@pytest.mark.parametrize("failure_point", ["cast_column", "describe_table"])
+def test_temporal_refinement_failure_drops_import_table(backend, tmp_path, monkeypatch, failure_point):
+    source = tmp_path / "dates.parquet"
+    backend.engine.conn.execute(
+        "COPY (SELECT '2026-08-28'::VARCHAR AS stamp) TO ? (FORMAT PARQUET)", [str(source)])
+
+    def fail(*args, **kwargs):
+        raise ExecutionFailedError("Injected refinement failure")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(backend.engine, failure_point, fail)
+        response = backend.import_dataset(str(source))
+
+    assert response["code"] == "EXECUTION_FAILED", response
+    assert backend.list_datasets()["count"] == 0
+    assert backend.engine.list_tables() == []
+    assert backend.integrity_report()["ok"]
+    failed = [op for op in backend.store.list_operations() if op.status == "failed"]
+    assert failed and failed[0].error["code"] == "EXECUTION_FAILED"
+
+    retry = backend.import_dataset(str(source))
+    assert retry["status"] == "success", retry
+    assert retry["schema"][0]["type"] == "date"
+    assert backend.import_dataset(str(source))["idempotent_replay"]
+    assert backend.integrity_report()["ok"]
 
 
 def test_failed_operations_are_audited_and_logged(backend, orders):

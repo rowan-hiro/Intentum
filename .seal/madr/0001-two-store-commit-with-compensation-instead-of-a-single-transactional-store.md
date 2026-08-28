@@ -36,3 +36,17 @@ Execute DuckDB work first (CREATE TABLE AS is atomic), then commit all metadata 
 Status: Accepted → Accepted
 
 Implemented in core/backend.py (_run_transform, _commit_materialization, _replay) and verified by tests/test_failures.py and tests/test_idempotency.py
+
+<!-- driftseal-reconciliation: 01d2ea37-233a-42c4-9da1-fa1317406216 -->
+### 2026-08-28T08:25:14.989Z — Outcome `2026-08-28-006`
+
+Status: Accepted → Accepted
+
+Extended import compensation to cover ordinary exceptions from loading, temporal refinement, and post-refinement schema inspection before metadata commit. Failed operations remain auditable and the same import can retry without orphan tables. The accepted process-crash window is unchanged.
+
+<!-- driftseal-reconciliation: a7e7e030-1042-40c9-b6e3-13b8e16ba102 -->
+### 2026-08-28T08:27:25.823Z — Outcome `2026-08-28-006`
+
+Status: Accepted → Accepted
+
+Reconciled after the overwrite-permission follow-up: import compensation and the accepted crash window are unchanged; the existing ordinary-failure regression tests remain part of the cumulative verifier.

@@ -57,7 +57,7 @@ class ExpressionResolver:
         notes: list[ResolutionNote] | None = None,
     ) -> Expr:
         if isinstance(loose, str):
-            return self.resolve(parse_expression(loose), scope, field=field, notes=notes)
+            return self.resolve(parse_expression(self._quote_special_fields(loose, scope)), scope, field=field, notes=notes)
         if isinstance(loose, bool) or loose is None or isinstance(loose, (int, float)):
             return LiteralExpr(value=loose, logical_type=literal_type(loose))
         if isinstance(loose, list):
@@ -106,6 +106,31 @@ class ExpressionResolver:
         )
 
     # -- internals -------------------------------------------------------
+    @staticmethod
+    def _quote_special_fields(text: str, scope: Scope) -> str:
+        """Double-quote bare occurrences of field names that are not plain identifiers.
+
+        Real column names such as ``募集资金总额(元)`` or ``Unit Price`` would
+        otherwise be read as a function call or two identifiers. Names are
+        matched longest-first in one pass. Existing quoted tokens, including
+        doubled quote escapes, are preserved without inspecting their contents.
+        """
+        import re
+
+        special = sorted(
+            (f.name for f in scope.fields if '"' not in f.name and not re.fullmatch(r"[^\W\d]\w*", f.name)),
+            key=len, reverse=True,
+        )
+        if not special:
+            return text
+        quoted = r"""(?:'(?:[^']|'')*'|"(?:[^"]|"")*")"""
+        fields = r'(?<!["\w])(?:' + "|".join(re.escape(name) for name in special) + r')(?!["\w])'
+        pattern = re.compile(f"(?P<quoted>{quoted})|(?P<field>{fields})")
+        return pattern.sub(
+            lambda match: match.group(0) if match.group("quoted") is not None else '"' + match.group(0) + '"',
+            text,
+        )
+
     def _column(self, name: Any, scope: Scope, field: str, notes: list[ResolutionNote] | None) -> ColumnExpr:
         resolved = self.fields.resolve(name, scope, field=field, notes=notes)
         return ColumnExpr(field=resolved.ref(), logical_type=resolved.logical_type)

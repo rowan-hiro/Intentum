@@ -2,30 +2,21 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from ..errors import InvalidIntentError
+from ..naming import is_cjk, is_identifier, normalize, slugify, tokens
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-
-def normalize(text: str) -> str:
-    """Lowercase snake_case form used for lenient name matching."""
-    return "_".join(_TOKEN_RE.findall(text.lower()))
-
-
-def tokens(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
-
-
-def slugify(text: str) -> str:
-    slug = normalize(text)
-    if not slug:
-        raise InvalidIntentError(f"Cannot derive a valid name from {text!r}.", field="name")
-    if slug[0].isdigit():
-        slug = f"d_{slug}"
-    return slug
+__all__ = [
+    "ResolutionNote",
+    "is_cjk",
+    "is_identifier",
+    "normalize",
+    "pick",
+    "reject_unknown_keys",
+    "slugify",
+    "tokens",
+]
 
 
 def pick(mapping: dict[str, Any], *keys: str, default: Any = None) -> Any:
