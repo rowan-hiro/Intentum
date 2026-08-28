@@ -22,7 +22,7 @@ import csv
 import datetime as dt
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -161,7 +161,11 @@ class ValueRenderer:
         if rule.decimals is not None:
             # Half-up on the shortest decimal form: 31783696.815 → 31783696.82,
             # where rounding the binary double itself would give .81.
-            number = number.quantize(Decimal(1).scaleb(-rule.decimals), rounding=ROUND_HALF_UP)
+            # Leave room for the integer digits, requested scale, and a rounding carry.
+            # Do not let the caller's Decimal context constrain valid stored values.
+            precision = max(1, number.adjusted() + 1) + rule.decimals + 1
+            with localcontext(Context(prec=precision, rounding=ROUND_HALF_UP)):
+                number = number.quantize(Decimal(1).scaleb(-rule.decimals))
         text = format(number, "f")
         if rule.strip_trailing_zeros and "." in text:
             text = text.rstrip("0").rstrip(".")

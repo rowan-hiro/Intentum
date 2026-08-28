@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import os
 import re
+import stat
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dc_field
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable, Iterator
 
 from pydantic import ValidationError
@@ -574,20 +577,20 @@ class Backend:
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
-            row_count = self.engine.import_source(spec.source, table)
-            notes: list[ResolutionNote] = []
-            refined = self._refine_temporal_columns(table, physical_columns, spec.hints, notes)
-            if refined:
-                physical_columns = self.engine.describe_table(table)
-                ir = ir.model_copy(update={"refined_types": {name: t.lower() for name, t in refined.items()}})
-                op.canonical_ir = ir.model_dump(mode="json")
-                plan.steps.insert(2, PlanStep("RefineTypes", f"RefineTypes({', '.join(f'{n}:{t.lower()}' for n, t in refined.items())})",
-                                              {"columns": {n: t.lower() for n, t in refined.items()}}))
-                op.execution_plan = plan.to_dict()
-                log_event("ir.canonical", operation_id=op.id, refined_types=refined)
-            log_event("execution.completed", operation_id=op.id, table=table, rows=row_count)
-            now = self.clock()
             try:
+                row_count = self.engine.import_source(spec.source, table)
+                notes: list[ResolutionNote] = []
+                refined = self._refine_temporal_columns(table, physical_columns, spec.hints, notes)
+                if refined:
+                    physical_columns = self.engine.describe_table(table)
+                    ir = ir.model_copy(update={"refined_types": {name: t.lower() for name, t in refined.items()}})
+                    op.canonical_ir = ir.model_dump(mode="json")
+                    plan.steps.insert(2, PlanStep("RefineTypes", f"RefineTypes({', '.join(f'{n}:{t.lower()}' for n, t in refined.items())})",
+                                                  {"columns": {n: t.lower() for n, t in refined.items()}}))
+                    op.execution_plan = plan.to_dict()
+                    log_event("ir.canonical", operation_id=op.id, refined_types=refined)
+                log_event("execution.completed", operation_id=op.id, table=table, rows=row_count)
+                now = self.clock()
                 with self.store.transaction():
                     columns = self._build_columns(dataset_id, physical_columns, spec.hints)
                     metadata: dict[str, Any] = {
@@ -1058,8 +1061,11 @@ class Backend:
 
         unmatched_columns: list[dict[str, Any]] = []
         for fact in document.columns:
-            scoped = find_dataset(fact.scope) if fact.scope else None
-            candidates = [scoped] if scoped is not None else targets
+            if fact.scope is None:
+                candidates = targets
+            else:
+                scoped = find_dataset(fact.scope)
+                candidates = [scoped] if scoped is not None else []
             hit = False
             for ds in candidates:
                 column = self._find_column(ds, fact.name)
@@ -1235,12 +1241,31 @@ class Backend:
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
             target.parent.mkdir(parents=True, exist_ok=True)
-            if spec is None:
-                rows = self.engine.export_table(version.physical_table, target, fmt)
-            else:
-                columns, data = self.engine.read_table(version.physical_table)
-                rows = write_formatted_csv(target, columns, data, spec)
-            content_hash = self.workspace.content_hash(target)
+            # Publish only a complete file, staged on the target's filesystem.
+            # A failed render leaves the original target untouched.
+            with TemporaryDirectory(prefix=".intentum-export-", dir=target.parent) as staging_dir:
+                staged = Path(staging_dir) / target.name
+                if spec is None:
+                    rows = self.engine.export_table(version.physical_table, staged, fmt)
+                else:
+                    columns, data = self.engine.read_table(version.physical_table)
+                    rows = write_formatted_csv(staged, columns, data, spec)
+                content_hash = self.workspace.content_hash(staged)
+                if overwrite:
+                    try:
+                        target_mode = stat.S_IMODE(target.stat().st_mode)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        staged.chmod(target_mode)
+                    staged.replace(target)
+                else:
+                    try:
+                        # Linking is atomic and refuses a target created after our initial check.
+                        os.link(staged, target)
+                    except FileExistsError as exc:
+                        raise ConflictError(f"{target} already exists.", field="path",
+                                            hint="Pass overwrite=true to replace it.") from exc
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
             now = self.clock()
             with self.store.transaction():

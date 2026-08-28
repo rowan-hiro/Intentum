@@ -1,7 +1,11 @@
 """export_result: a managed dataset is written to a file at the system boundary."""
 
 import csv
+import stat
+from decimal import Decimal, localcontext
 from pathlib import Path
+
+import pytest
 
 AGG = {"group_by": ["region"], "metric": "revenue", "sort": "-revenue"}
 
@@ -154,3 +158,94 @@ def test_format_spec_reproduces_the_same_bytes(backend, tmp_path: Path):
     assert first["content_hash"] == second["content_hash"]
     plain = backend.export_result("bs", str(tmp_path / "c.csv"))
     assert plain["content_hash"] != first["content_hash"]
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (1e30, "1000000000000000000000000000000.00"),
+    (Decimal("123456789012345678901234567890.125"), "123456789012345678901234567890.13"),
+    (Decimal("-99999999999999999999999999999.995"), "-100000000000000000000000000000.00"),
+])
+def test_formatted_export_handles_large_numbers(backend, tmp_path, value, expected):
+    source = tmp_path / "large.parquet"
+    backend.engine.conn.sql("SELECT ? AS value", params=[value]).write_parquet(str(source))
+    assert backend.import_dataset(str(source))["status"] == "success"
+    target = tmp_path / "output.csv"
+
+    with localcontext() as context:
+        context.prec = 6
+        response = backend.export_result("large", str(target), format_spec={"decimals": 2})
+
+    assert response["status"] == "success", response
+    assert rendered(target) == ["value", expected]
+    assert response["content_hash"] == backend.workspace.content_hash(target)
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_formatted_export_failure_preserves_target_and_cleans_up(backend, orders, tmp_path, monkeypatch, overwrite):
+    from agent_backend.core.export.format import ValueRenderer
+
+    target = tmp_path / "export" / "orders.csv"
+    target.parent.mkdir()
+    original = b"previous complete export\n"
+    if overwrite:
+        target.write_bytes(original)
+    render_row = ValueRenderer.render_row
+    calls = 0
+
+    def fail_after_one_row(renderer, row):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("Injected export write failure")
+        return render_row(renderer, row)
+
+    with monkeypatch.context() as failure:
+        failure.setattr(ValueRenderer, "render_row", fail_after_one_row)
+        response = backend.export_result("orders", str(target), format_spec={"decimals": 2}, overwrite=overwrite)
+
+    assert response["status"] == "error", response
+    assert list(target.parent.iterdir()) == ([target] if overwrite else [])
+    if overwrite:
+        assert target.read_bytes() == original
+    assert "dataset.exported" not in [event["event"] for event in backend.get_provenance("orders")["audit"]]
+    retry = backend.export_result("orders", str(target), format_spec={"decimals": 2}, overwrite=overwrite)
+    assert retry["status"] == "success", retry
+    assert len(rendered(target)) == 13
+
+
+def test_export_does_not_overwrite_target_created_during_rendering(backend, orders, tmp_path, monkeypatch):
+    from agent_backend.core.export.format import ValueRenderer
+
+    target = tmp_path / "export" / "orders.csv"
+    target.parent.mkdir()
+    original = b"another completed export\n"
+    render_row = ValueRenderer.render_row
+
+    def create_target_then_render(renderer, row):
+        if not target.exists():
+            target.write_bytes(original)
+        return render_row(renderer, row)
+
+    monkeypatch.setattr(ValueRenderer, "render_row", create_target_then_render)
+    response = backend.export_result("orders", str(target), format_spec={"decimals": 2})
+
+    assert response["code"] == "CONFLICT", response
+    assert target.read_bytes() == original
+    assert list(target.parent.iterdir()) == [target]
+
+
+@pytest.mark.parametrize(("fmt", "format_spec"), [
+    ("csv", {"decimals": 2}),
+    ("csv", None),
+    ("parquet", None),
+])
+def test_export_overwrite_preserves_private_target_permissions(backend, orders, tmp_path, fmt, format_spec):
+    target = tmp_path / f"private.{fmt}"
+    target.write_bytes(b"previous private export\n")
+    target.chmod(0o600)
+
+    response = backend.export_result("orders", str(target), format=fmt, format_spec=format_spec, overwrite=True)
+
+    assert response["status"] == "success", response
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.read_bytes() != b"previous private export\n"

@@ -170,3 +170,17 @@ Steps 4-5 scoped from evidence and handed off as outcome 2026-08-28-005: export 
 Status: Accepted → Accepted
 
 Steps 4 and 5 of the sequence are done. Body amended with 'Evidence from the second measurement': scripted layer extended to four structured-only public-reference tasks (task_10, task_44, task_127, task_329), all four pass the official evaluator; model-driven layer 3/3 on task_10 (was 2/3, 27 to 17 mean turns) and 3/3 on task_127. The six failing runs on task_44 and task_329 are attributed: four exported correct values with one column too many, thirteen refusals were strftime written pattern-first, the rest were date-part vocabulary and path finding. Next sequence step is that ordering, not distinct/union/window, which no measured task has required.
+
+<!-- driftseal-reconciliation: 3e03a522-fc92-49b4-adc7-07ebc5a4b58c -->
+### 2026-08-28T08:25:15.441Z — Outcome `2026-08-28-006`
+
+Status: Accepted → Accepted
+
+Corrected loose-expression quoting to preserve literal and quoted-identifier tokens, including doubled escapes and overlapping field names. Explicit knowledge scopes that do not match the selected datasets are now reported as unmatched instead of being applied globally. No deferred vocabulary or benchmark work was added.
+
+<!-- driftseal-reconciliation: 66497238-f752-4a5a-ae94-db10e28e73e0 -->
+### 2026-08-28T08:27:26.181Z — Outcome `2026-08-28-006`
+
+Status: Accepted → Accepted
+
+Reconciled after the overwrite-permission follow-up: scope-safe knowledge attachment and token-safe loose expressions are unchanged; deferred scenario and vocabulary work remains deferred.

@@ -122,6 +122,32 @@ def test_attach_metadata_scoped_to_one_dataset(backend, macro):
     response = backend.attach_metadata(str(macro), dataset="ed_retail")
     assert [a["name"] for a in response["applied"]] == ["ed_retail"]
     assert {u["name"] for u in response["unmatched"]["tables"]} == {"ed_moneyauthoritybs"}
+    end_date = next(c for c in backend.describe_dataset("ed_retail")["schema"] if c["name"] == "EndDate")
+    assert not end_date.get("description")
+    assert any(c["name"] == "enddate" and c["scope"] == "ed_moneyauthoritybs"
+               for c in response["unmatched"]["columns"])
+
+
+@pytest.mark.parametrize("dataset", [None, "actual"])
+def test_missing_knowledge_scope_never_updates_other_tables(backend, tmp_path, dataset):
+    source = write_csv(tmp_path / "actual.csv", "amount", ["12"])
+    assert backend.import_dataset(str(source))["status"] == "success"
+    document = tmp_path / "knowledge.md"
+    document.write_text(
+        "# Knowledge\n\n## Missing (`missing_table`)\n\nMissing table description.\n\n"
+        "| Column | Description | Unit |\n|---|---|---|\n"
+        "| amount | Amount belonging only to the missing table | USD |\n",
+        encoding="utf-8",
+    )
+
+    response = backend.attach_metadata(str(document), dataset=dataset)
+
+    assert response["status"] == "success", response
+    assert response["applied"] == []
+    assert [(c["scope"], c["name"]) for c in response["unmatched"]["columns"]] == [("missing_table", "amount")]
+    amount = backend.describe_dataset("actual")["schema"][0]
+    assert not amount.get("description") and not amount.get("unit")
+    assert backend.integrity_report()["ok"]
 
 
 def test_attach_metadata_source_forms_and_errors(backend, macro):
