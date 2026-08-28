@@ -33,6 +33,40 @@ Implement in this order: first gaps 1, 2 and 3 (Unicode-safe identifiers, import
 * Gaps 4 and 5 may be re-scoped after the smoke test; their MADR-worthy sub-decisions (e.g. how ties are expressed) are recorded when made
 * task_10 must be scored with the official evaluator, not the champion repo's local scorer, whose semantics differ (partial credit, order ignored)
 
+### Evidence from the task_10 smoke test (2026-08-28, scripted-agent layer)
+
+The scripted agent solved task_10 in six MCP tool calls and the official
+evaluator marked it correct (242/242 rows, order-sensitive). Two findings
+constrain steps 4 and 5:
+
+1. **Export needs a numeric format specification (step 5).** The same table
+   scored 1.0 with the official evaluator and 0.45 with the champion repo's
+   scorer. The only difference was text: DuckDB writes the double
+   `31783696.815` as `31783696.814999998`; the champion scorer rounds to two
+   decimals half-up and reads `.81` against gold `.82`, while the official
+   evaluator compares at the task config's four decimal places and accepts.
+   The task text itself prescribes "round to at most 4 decimals, strip
+   trailing zeros, integers keep one decimal", so `export_result` must take an
+   output-format specification (per-column rounding / trailing-zero policy)
+   applied at the boundary, rather than leaving number-to-text rendering to
+   the engine or pushing it into the transform as string manipulation.
+   A minimal `export_result` without formatting was added during the smoke
+   because no prediction file could exist otherwise; it is the seed of step 5,
+   not its completion.
+2. **SQLite date columns import as `VARCHAR` (step 4/5 candidate).** DuckDB's
+   SQLite scanner maps dynamically typed date text to `VARCHAR`, so
+   `EndDate` shows as `string` in `describe_dataset` although it holds ISO
+   timestamps. Sorting still came out right because ISO strings sort
+   lexicographically, but an agent reading the schema would not expect a
+   date to be a string, and date functions would refuse the column. Import
+   should refine such columns to `date`/`timestamp` when every non-null value
+   parses, recording the refinement as a resolution note.
+
+A third observation is not a backend gap: the Chinese table name in the
+question (货币当局资产负债表) does not resolve because the workspace's
+knowledge document is English; the scripted agent searched in English.
+Whether a model does that in one round is what the LLM-driven layer measures.
+
 ## Decision History
 
 <!-- driftseal-reconciliation: c1815772-878f-428d-a6a2-6da3854a15dd -->
@@ -48,3 +82,10 @@ Steps 1-3 implemented: core/naming.py (Unicode identifiers), import_workspace + 
 Status: Accepted → Accepted
 
 task_10 smoke (scripted-agent layer) done: examples/dataspace_smoke.py drives the task through six MCP tool calls; the vendored official evaluator (HKUSTDial/DataSpace 6491caa) marks it correct (242/242 rows, order-sensitive). A minimal export_result was needed to produce prediction.csv and was added. Finding for step 5: DuckDB prints 31783696.815 as 31783696.814999998, so export needs a numeric format spec; SQLite date columns arrive as VARCHAR. LLM-driven layer and steps 4-5 remain.
+
+<!-- driftseal-reconciliation: d3930c91-93c1-45fb-b8f9-a49684a81eeb -->
+### 2026-08-28T05:47:05.789Z — Outcome `2026-08-28-003`
+
+Status: Accepted → Accepted
+
+Body amended with 'Evidence from the task_10 smoke test': (1) export_result needs a numeric format specification (31783696.815 rendered as 31783696.814999998 scored 0.45 on the champion scorer, 1.0 officially); (2) SQLite date columns import as VARCHAR and should be refined to date/timestamp on import. Both constrain steps 4-5.
