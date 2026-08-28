@@ -23,7 +23,7 @@ _TOKEN_RE = re.compile(
   | (?P<string>'(?:[^']|'')*')
   | (?P<qident>"(?:[^"]|"")*")
   | (?P<ident>[^\W\d]\w*)
-  | (?P<op><=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|,)
+  | (?P<op>\|\||<=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|,)
     """,
     re.VERBOSE,
 )
@@ -164,6 +164,11 @@ class ExpressionParser:
                 self._advance()
                 right = self._parse_multiplicative()
                 left = {"op": token.text, "left": left, "right": right}
+            elif token.kind == "op" and token.text == "||":
+                # SQL string concatenation, expressed as the allowlisted concat function.
+                self._advance()
+                right = self._parse_multiplicative()
+                left = {"function": "concat", "args": [left, right]}
             else:
                 return left
 

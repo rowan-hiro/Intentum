@@ -95,3 +95,55 @@ def test_import_parquet(backend, tmp_path: Path):
     response = backend.import_dataset(str(target))
     assert response["status"] == "success", response
     assert response["dataset"]["columns"] == ["id", "kind", "score"]
+
+
+# -- temporal refinement (MADR 0006) ---------------------------------------
+
+def _sqlite_dates(path: Path) -> Path:
+    """A SQLite table whose date columns are stored as text, as real sources do."""
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE bs (EndDate TEXT, Stamp TEXT, Note TEXT, TotalAssets REAL)")
+    con.executemany("INSERT INTO bs VALUES (?, ?, ?, ?)", [
+        ("2002-01-31", "2002-01-31 00:00:00", "ok", 4531103.0),
+        ("2002-02-28", "2002-02-28 12:30:00", "fine", 4600000.0),
+        (None, None, None, None),
+    ])
+    con.commit()
+    con.close()
+    return path
+
+
+def test_import_refines_text_dates_to_temporal_types(backend, tmp_path: Path):
+    response = backend.import_dataset(str(_sqlite_dates(tmp_path / "bs.db")), table="bs")
+    assert response["status"] == "success", response
+    types = {c["name"]: c["type"] for c in response["schema"]}
+    assert types == {"EndDate": "date", "Stamp": "timestamp", "Note": "string", "TotalAssets": "float"}
+    refined = {n["field"]: (n["reference"], n["resolved_to"]) for n in response["resolution"]}
+    assert refined["schema.EndDate"] == ("varchar", "date")
+    assert refined["schema.Stamp"] == ("varchar", "timestamp")
+
+    # the refinement is part of the recorded intent, and temporal functions now work
+    operation = backend.get_operation(response["operation_id"])
+    assert operation["canonical_ir"]["refined_types"] == {"EndDate": "date", "Stamp": "timestamp"}
+    assert any(s["kind"] == "RefineTypes" for s in operation["execution_plan"]["steps"])
+    assert backend.transform_dataset("bs", {"derive": {"y": "year(enddate)"}})["status"] == "success"
+
+
+def test_type_hints_win_over_refinement(backend, tmp_path: Path):
+    response = backend.import_dataset(str(_sqlite_dates(tmp_path / "bs.db")), table="bs",
+                                      schema_hints={"EndDate": {"type": "string"}})
+    types = {c["name"]: c["type"] for c in response["schema"]}
+    assert types["EndDate"] == "string" and types["Stamp"] == "timestamp"
+    assert all(n["field"] != "schema.EndDate" for n in response.get("resolution", []))
+
+
+def test_refinement_needs_every_value_to_be_a_valid_iso_date(backend, tmp_path: Path):
+    path = write_csv(tmp_path / "mixed.csv", "day,almost,empty",
+                     ["2002-01-31,2002-02-31,", "2002-02-28,2002-01-31,"])
+    response = backend.import_dataset(str(path))
+    types = {c["name"]: c["type"] for c in response["schema"]}
+    # 'day' is inferred by the csv reader itself; 'almost' holds 2002-02-31, which is no date
+    assert types["day"] == "date" and types["almost"] == "string"
+    assert types["empty"] in ("string", "unknown")

@@ -22,6 +22,13 @@ from ...core.models.entities import LogicalType
 
 SUPPORTED_FORMATS = ("csv", "parquet", "json", "sqlite")
 
+# The documented patterns for import-time temporal refinement (MADR 0006). A text
+# column becomes temporal only when every non-null value matches one of these and
+# casts cleanly; locale-dependent orders such as 03/04/2026 stay text on purpose.
+ISO_DATE_PATTERN = r"\d{4}-\d{2}-\d{2}"
+ISO_TIMESTAMP_PATTERN = r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z?"
+TEMPORAL_TYPES = ("DATE", "TIMESTAMP")
+
 
 @dataclass(frozen=True)
 class TableSource:
@@ -80,9 +87,12 @@ class AnalyticsEngine(Protocol):
     def query(self, sql: str, limit: int | None = None) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def count_rows_of_query(self, sql: str) -> int: ...
     def describe_table(self, table: str) -> list[tuple[str, str]]: ...
+    def probe_temporal_type(self, table: str, column: str) -> str | None: ...
+    def cast_column(self, table: str, column: str, physical_type: str) -> None: ...
     def table_exists(self, table: str) -> bool: ...
     def row_count(self, table: str) -> int: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
+    def read_table(self, table: str) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def drop_table(self, table: str) -> None: ...
     def list_tables(self) -> list[str]: ...
     def export_table(self, table: str, path: Path, fmt: str) -> int: ...
@@ -234,6 +244,45 @@ class DuckDBEngine:
     def describe_table(self, table: str) -> list[tuple[str, str]]:
         return self._describe_sql(f"SELECT * FROM {quote_ident(table)}")
 
+    def probe_temporal_type(self, table: str, column: str) -> str | None:
+        """DATE or TIMESTAMP when every non-null value of a text column is one.
+
+        DATE only when every value is a bare date; a column that mixes dates and
+        timestamps becomes TIMESTAMP. Deterministic by construction: a value must
+        match the documented ISO pattern *and* cast cleanly, so a column holding
+        2002-02-31 stays textual. An all-null column is left alone.
+        """
+        col = quote_ident(column)
+        sql = (
+            f"SELECT count({col}), "
+            f"count(*) FILTER (WHERE regexp_full_match({col}, {_literal(ISO_DATE_PATTERN)})), "
+            f"count(*) FILTER (WHERE regexp_full_match({col}, {_literal(ISO_TIMESTAMP_PATTERN)})), "
+            f"count(try_cast({col} AS TIMESTAMP)) "
+            f"FROM {quote_ident(table)}"
+        )
+        try:
+            row = self.conn.execute(sql).fetchone()
+        except duckdb.Error:
+            return None
+        if not row:
+            return None
+        non_null, dates, timestamps, castable = (int(v or 0) for v in row)
+        if non_null == 0 or castable != non_null:
+            return None
+        if dates == non_null:
+            return "DATE"
+        if dates + timestamps == non_null:
+            return "TIMESTAMP"
+        return None
+
+    def cast_column(self, table: str, column: str, physical_type: str) -> None:
+        if physical_type not in TEMPORAL_TYPES:
+            raise InvalidSchemaError(f"Refusing to cast {column!r} to {physical_type!r}.", field="schema_hints")
+        try:
+            self.conn.execute(f"ALTER TABLE {quote_ident(table)} ALTER COLUMN {quote_ident(column)} TYPE {physical_type}")
+        except duckdb.Error as exc:
+            raise ExecutionFailedError(f"Could not cast column {column!r} to {physical_type}: {exc}") from exc
+
     def table_exists(self, table: str) -> bool:
         row = self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ? AND table_schema = 'main'", [table]
@@ -246,6 +295,10 @@ class DuckDBEngine:
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)
+
+    def read_table(self, table: str) -> tuple[list[str], list[tuple[Any, ...]]]:
+        """Every row of a table as typed Python values (used by formatted exports)."""
+        return self.query(f"SELECT * FROM {quote_ident(table)}")
 
     def drop_table(self, table: str) -> None:
         self.conn.execute(f"DROP TABLE IF EXISTS {quote_ident(table)}")

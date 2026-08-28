@@ -38,6 +38,7 @@ from .errors import (
     PermissionDeniedError,
 )
 from .execution import Executor
+from .export import ExportFormat, write_formatted_csv
 from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SortStep, TransformIR
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
@@ -574,6 +575,16 @@ class Backend:
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
             row_count = self.engine.import_source(spec.source, table)
+            notes: list[ResolutionNote] = []
+            refined = self._refine_temporal_columns(table, physical_columns, spec.hints, notes)
+            if refined:
+                physical_columns = self.engine.describe_table(table)
+                ir = ir.model_copy(update={"refined_types": {name: t.lower() for name, t in refined.items()}})
+                op.canonical_ir = ir.model_dump(mode="json")
+                plan.steps.insert(2, PlanStep("RefineTypes", f"RefineTypes({', '.join(f'{n}:{t.lower()}' for n, t in refined.items())})",
+                                              {"columns": {n: t.lower() for n, t in refined.items()}}))
+                op.execution_plan = plan.to_dict()
+                log_event("ir.canonical", operation_id=op.id, refined_types=refined)
             log_event("execution.completed", operation_id=op.id, table=table, rows=row_count)
             now = self.clock()
             try:
@@ -617,6 +628,7 @@ class Backend:
                                    "kind": str(spec.artifact.kind), "locator": spec.locator},
                         "summary": f"Imported {spec.describe()} as {spec.name} ({row_count} rows, {len(columns)} columns).",
                     }
+                    response = self._with_notes(response, notes)
                     self._complete(op, response, key, ir.logical_fingerprint(), now)
             except Exception:
                 self.executor.rollback_table(table)
@@ -1167,6 +1179,7 @@ class Backend:
         path: str,
         *,
         format: str = "csv",
+        format_spec: dict[str, Any] | None = None,
         overwrite: bool = False,
         principal: str | None = None,
     ) -> dict[str, Any]:
@@ -1174,7 +1187,8 @@ class Backend:
 
         The file is an *export*, not authoritative state: the dataset keeps
         living in the backend, and the audit trail records where a copy went
-        and what it contained (content hash, rows).
+        and what it contained (content hash, rows). ``format_spec`` decides how
+        values are rendered as text (MADR 0005); the dataset itself stays typed.
         """
         notes: list[ResolutionNote] = []
         ds = self.datasets.resolve(dataset, field="dataset", notes=notes)
@@ -1183,11 +1197,16 @@ class Backend:
             raise InvalidSchemaError(f"Unsupported export format {fmt!r}; supported formats are csv and parquet.", field="format")
         if not isinstance(path, str) or not path.strip():
             raise InvalidIntentError("path must be a file path.", field="path")
+        spec = self._export_format(format_spec, fmt)
         target = Path(path).expanduser()
         version = self.store.get_version(ds.id, ds.version)
         if version is None:
             raise InvalidStateError(f"Dataset {ds.name} has no physical version.", field="dataset")
-        intent = _jsonable({"dataset": dataset, "path": path, "format": fmt, "overwrite": overwrite})
+        spec_payload = spec.model_dump(mode="json", exclude_none=True) if spec is not None else None
+        if spec_payload is not None and not spec_payload.get("columns"):
+            spec_payload.pop("columns", None)
+        intent = _jsonable({"dataset": dataset, "path": path, "format": fmt, "format_spec": format_spec,
+                            "overwrite": overwrite})
         with self._operation(OperationKind.EXPORT, intent, principal) as op:
             # Refusals are recorded as failed operations so attempts to write outside the sandbox are auditable.
             if self.export_root is not None:
@@ -1203,20 +1222,24 @@ class Backend:
                 target = resolved
             if target.exists() and not overwrite:
                 raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
-            plan = ExecutionPlan(
-                steps=[
-                    PlanStep("Scan", f"Scan({ds.name} v{ds.version})", {"table": version.physical_table}),
-                    PlanStep("WriteFile", f"WriteFile({target.name}, {fmt})", {"path": str(target)}),
-                    PlanStep("Audit", "Audit(dataset.exported)"),
-                ],
-                physical_inputs={ds.id: version.physical_table}, output_table=None,
-            )
-            op.canonical_ir = {"operation": "export", "dataset_id": ds.id, "version": ds.version, "path": str(target), "format": fmt}
+            steps = [PlanStep("Scan", f"Scan({ds.name} v{ds.version})", {"table": version.physical_table})]
+            if spec is not None:
+                detail = f"{len(spec.columns)} column rule(s)" if spec.columns else "file defaults"
+                steps.append(PlanStep("FormatValues", f"FormatValues({detail})", {"format_spec": spec_payload}))
+            steps.append(PlanStep("WriteFile", f"WriteFile({target.name}, {fmt})", {"path": str(target)}))
+            steps.append(PlanStep("Audit", "Audit(dataset.exported)"))
+            plan = ExecutionPlan(steps=steps, physical_inputs={ds.id: version.physical_table}, output_table=None)
+            op.canonical_ir = {"operation": "export", "dataset_id": ds.id, "version": ds.version, "path": str(target),
+                               "format": fmt, "format_spec": spec_payload}
             op.execution_plan = plan.to_dict()
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
             target.parent.mkdir(parents=True, exist_ok=True)
-            rows = self.engine.export_table(version.physical_table, target, fmt)
+            if spec is None:
+                rows = self.engine.export_table(version.physical_table, target, fmt)
+            else:
+                columns, data = self.engine.read_table(version.physical_table)
+                rows = write_formatted_csv(target, columns, data, spec)
             content_hash = self.workspace.content_hash(target)
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
             now = self.clock()
@@ -1224,7 +1247,7 @@ class Backend:
                 self.audit.record(event_type="dataset.exported", entity_type="dataset", entity_id=ds.id,
                                   operation_id=op.id, now=now, actor=principal,
                                   details={"path": str(target), "format": fmt, "rows": rows, "content_hash": content_hash,
-                                           "version": ds.version})
+                                           "version": ds.version, "format_spec": spec_payload})
                 response = {
                     "status": "success",
                     "operation_id": op.id,
@@ -1234,12 +1257,39 @@ class Backend:
                     "rows": rows,
                     "columns": [c.name for c in ds.columns],
                     "content_hash": content_hash,
-                    "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}.",
+                    "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}."
+                               + (" Values were rendered with the given format specification." if spec is not None else ""),
                     "plan": plan.to_text(),
                 }
+                if spec_payload is not None:
+                    response["format_spec"] = spec_payload
                 self._complete(op, response, None, None, now)
             log_event("state.committed", operation_id=op.id, dataset_id=ds.id, exported=str(target))
             return self._with_notes(response, notes)
+
+    @staticmethod
+    def _export_format(format_spec: Any, fmt: str) -> ExportFormat | None:
+        """Validate a format specification the way the IR is validated."""
+        if format_spec is None:
+            return None
+        if not isinstance(format_spec, dict):
+            raise InvalidIntentError("format_spec must be an object.", field="format_spec")
+        if fmt != "csv":
+            raise InvalidIntentError(
+                f"format_spec renders values as text; {fmt} keeps typed values, so it takes no specification.",
+                field="format_spec",
+                hint="Export as csv to apply a format specification.",
+            )
+        try:
+            return ExportFormat.model_validate(format_spec)
+        except ValidationError as err:
+            raise InvalidSchemaError(
+                "format_spec did not match the expected shape.",
+                field="format_spec",
+                details={"errors": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in err.errors()]},
+                hint='Example: {"decimals": 4, "strip_trailing_zeros": true, "integer_min_decimals": 1, '
+                     '"columns": {"end_date": {"date_format": "%Y-%m-%d"}}}',
+            ) from err
 
     # ======================================================================
     # Integrity
@@ -1481,6 +1531,28 @@ class Backend:
                                          details={"allowed_keys": ["description", "aliases", "semantic_role", "type", "unit"]})
             hints[str(name)] = _jsonable(patch)
         return hints
+
+    def _refine_temporal_columns(self, table: str, physical_columns: list[tuple[str, str]],
+                                 hints: dict[str, dict[str, Any]], notes: list[ResolutionNote]) -> dict[str, str]:
+        """Promote text columns whose values are all ISO dates/timestamps (MADR 0006).
+
+        Source drivers report what they can store, not what the data means:
+        DuckDB's SQLite scanner maps date text to VARCHAR. An explicit ``type``
+        hint always wins, and every refinement is reported as a resolution note.
+        """
+        hinted = {name.casefold() for name, patch in hints.items() if "type" in patch}
+        refined: dict[str, str] = {}
+        for name, physical in physical_columns:
+            if physical_to_logical(physical) != LogicalType.STRING or name.casefold() in hinted:
+                continue
+            target = self.engine.probe_temporal_type(table, name)
+            if target is None:
+                continue
+            self.engine.cast_column(table, name, target)
+            refined[name] = target
+            notes.append(ResolutionNote(f"schema.{name}", physical.lower(), target.lower(),
+                                        "every non-null value is an ISO date/timestamp"))
+        return refined
 
     @staticmethod
     def _check_column_names(names: list[str]) -> None:

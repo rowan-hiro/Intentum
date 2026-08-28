@@ -237,8 +237,8 @@ async def run_once(task: str, question: str, context_dir: Path, run_dir: Path, c
 # ----------------------------------------------------------------------------
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
-    def mean(values: list[float]) -> float | None:
-        return round(statistics.fmean(values), 2) if values else None
+    def mean(values: list[float], digits: int = 2) -> float | None:
+        return round(statistics.fmean(values), digits) if values else None
 
     codes: Counter = Counter()
     tools: Counter = Counter()
@@ -256,7 +256,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "prompt_tokens_mean": mean([r["usage"].get("prompt_tokens", 0) for r in results]),
         "completion_tokens_mean": mean([r["usage"].get("completion_tokens", 0) for r in results]),
         "reasoning_tokens_mean": mean([r["usage"].get("reasoning_tokens", 0) for r in results]),
-        "cost_usd_mean": mean([r["cost_usd"] for r in results]),
+        "cost_usd_mean": mean([r["cost_usd"] for r in results], 6),
         "elapsed_s_mean": mean([r["elapsed_s"] for r in results]),
         "stop_reasons": dict(Counter(r["stop_reason"] for r in results)),
         "tool_status_codes": dict(codes),

@@ -58,8 +58,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "{table, records} wrapper) or a SQLite table (pass `table` when the file has several). "
                              "The backend inspects the source, infers the schema, keeps a managed copy, loads it, "
                              "assigns an id and records provenance atomically. Optional `schema_hints` is an object "
-                             "keyed by column name with description/aliases/semantic_role/type/unit. Safe to retry: "
-                             "identical content and name replays the original result.")
+                             "keyed by column name with description/aliases/semantic_role/type/unit. Text columns "
+                             "whose values are all ISO dates or timestamps become date/timestamp columns; a `type` "
+                             "hint overrides that. Safe to retry: identical content and name replays the original "
+                             "result.")
     def import_dataset(
         path: str,
         name: str | None = None,
@@ -97,8 +99,11 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "form such as {\"filter\": \"amount > 100\", \"group_by\": [\"region\"], \"metric\": "
                              "\"revenue\", \"sort\": \"-revenue\", \"limit\": 10}. Step types: select, filter, "
                              "aggregate (group_by + measures[{function, field, alias}]), sort, limit, rename, "
-                             "derive ({name, expression}), join ({right, on, how}). Field names may be approximate; "
-                             "the response lists how each was resolved, or returns needs_resolution with candidates.")
+                             "derive ({name, expression}), join ({right, on, how}); a step may also be written "
+                             "without `type` when its key names it, e.g. [{\"filter\": \"...\"}, {\"sort\": \"-amount\"}], "
+                             "and select and derive accept \"field as alias\". Field names may be approximate; "
+                             "the response lists how each was resolved, or returns needs_resolution with candidates. "
+                             "Transforms compute values; how they are rendered as text is export_result's business.")
     def transform_dataset(
         source: str,
         transform: dict[str, Any] | list[dict[str, Any]],
@@ -131,9 +136,17 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                  description="Write a managed dataset to a file (csv or parquet) at a path you name, e.g. a result "
                              "file another system expects. Paths are confined to the configured export root. The "
                              "dataset stays managed; the export is audited with its content hash. Existing files "
-                             "are not replaced unless `overwrite` is true.")
-    def export_result(dataset: str, path: str, format: str = "csv", overwrite: bool = False) -> dict[str, Any]:
-        return backend.export_result(dataset, path, format=format, overwrite=overwrite)
+                             "are not replaced unless `overwrite` is true. Rendering values as text belongs here, "
+                             "not in a transform: optional `format_spec` (csv only) holds file-level defaults plus "
+                             "per-column overrides under `columns`, with keys `decimals` (rounded half-up), "
+                             "`strip_trailing_zeros`, `integer_min_decimals` (whole numbers keep at least N "
+                             "decimals), `date_format` / `timestamp_format` (strftime patterns such as %Y-%m-%d) "
+                             "and `null_text`. Example: {\"decimals\": 4, \"strip_trailing_zeros\": true, "
+                             "\"integer_min_decimals\": 1, \"columns\": {\"end_date\": {\"date_format\": \"%Y-%m-%d\"}}}. "
+                             "The specification is recorded with the operation, so the file is reproducible.")
+    def export_result(dataset: str, path: str, format: str = "csv", format_spec: dict[str, Any] | None = None,
+                      overwrite: bool = False) -> dict[str, Any]:
+        return backend.export_result(dataset, path, format=format, format_spec=format_spec, overwrite=overwrite)
 
     @server.tool(name="publish_dataset", annotations=annotations("write"),
                  description="Mark a dataset as stable and reusable after validating it (description present, "

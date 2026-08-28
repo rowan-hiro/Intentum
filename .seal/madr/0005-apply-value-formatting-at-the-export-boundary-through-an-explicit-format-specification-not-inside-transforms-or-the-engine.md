@@ -4,7 +4,7 @@ Date: 2026-08-28
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -31,3 +31,12 @@ export_result takes an optional format specification applied only when writing t
 * export_result grows a small, well-typed sub-schema that must be validated like the IR
 * Two exports of the same dataset can differ in text while the dataset is unchanged; the audit trail must carry the specification
 * Some evaluators compare typed values and would accept unformatted output; the specification still matters for human-facing files and for scorers that compare text
+
+## Decision History
+
+<!-- driftseal-reconciliation: ca7f6bc7-bd6b-4313-ac44-44ad2db9446a -->
+### 2026-08-28T07:56:58.848Z — Outcome `2026-08-28-005`
+
+Status: Proposed → Accepted
+
+Implemented: export_result takes a validated format specification (file-level defaults plus per-column overrides; decimals rounded half-up on the shortest decimal form, strip_trailing_zeros, integer_min_decimals, date_format/timestamp_format with locale-dependent directives refused, null_text), recorded in the operation's canonical IR, in the plan as a FormatValues step, and in the dataset.exported audit event next to the content hash; two exports of the same version with the same specification are byte-identical. The MCP tool description states that rendering belongs to export. Evidence: task_10's champion-scorer score went 0.45 to 1.0 with the data unchanged, and the model-driven layer went 2/3 to 3/3 with mean turns 27 to 17 because the rendering loop ended.

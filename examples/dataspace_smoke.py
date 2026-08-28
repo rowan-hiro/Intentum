@@ -1,6 +1,7 @@
-"""DataSpace smoke test: drive one benchmark task end to end through the MCP tool surface.
+"""DataSpace smoke test: drive benchmark tasks end to end through the MCP tool surface.
 
     uv run python examples/dataspace_smoke.py --task task_10 [--check]
+    uv run python examples/dataspace_smoke.py --task all --check
 
 Layer 1 of the smoke plan: a *scripted* agent (no LLM) issues the intents an
 agent would issue — import the workspace, attach the knowledge document, find
@@ -49,6 +50,13 @@ def _last(trace: list[dict[str, Any]], tool: str) -> dict[str, Any]:
     return next(t["response"] for t in reversed(trace) if t["tool"] == tool)
 
 
+def _cell(trace: list[dict[str, Any]], tool: str, column: str, row: int = 0) -> Any:
+    """One value out of a preview, the way an agent reads its own result."""
+    result = _last(trace, tool)["result"]
+    index = [c["name"] for c in result["columns"]].index(column)
+    return result["rows"][row][index]
+
+
 def task_10_script(context_dir: Path, prediction_path: Path) -> list[Step]:
     """按报告期从早到晚列出货币当局资产负债表中总资产金额非空的记录，返回报告期和总资产金额（单位：亿元）。"""
     return [
@@ -66,11 +74,104 @@ def task_10_script(context_dir: Path, prediction_path: Path) -> list[Step]:
             "name": "task_10_answer",
             "description": "Monetary authority balance sheet records with non-null total assets, by reporting period",
         }),
-        lambda trace: ("export_result", {"dataset": "task_10_answer", "path": str(prediction_path), "overwrite": True}),
+        # The question prescribes the rendering: at most 4 decimals, no trailing
+        # zeros, whole amounts keep one decimal. That is an export rule (MADR 0005).
+        lambda trace: ("export_result", {
+            "dataset": "task_10_answer", "path": str(prediction_path), "overwrite": True,
+            "format_spec": {"decimals": 4, "strip_trailing_zeros": True, "integer_min_decimals": 1},
+        }),
     ]
 
 
-SCRIPTS: dict[str, Callable[[Path, Path], list[Step]]] = {"task_10": task_10_script}
+def task_44_script(context_dir: Path, prediction_path: Path) -> list[Step]:
+    """What procedures did patient 025-44842 receive at the latest treatment timestamp, by treatment id?"""
+    # The patient is only named in the cost table; treatments are linked through
+    # cost.eventid, so every step below runs on the joined relation.
+    linked = [
+        {"join": {"right": "cost", "on": {"treatmentid": "eventid"}}},
+        {"filter": "uniquepid = '025-44842' and eventtype = 'treatment'"},
+    ]
+    return [
+        lambda trace: ("import_workspace", {"path": str(context_dir)}),
+        lambda trace: ("describe_dataset", {"dataset": "treatment", "sample_rows": 2}),
+        lambda trace: ("transform_dataset", {
+            "source": "treatment",
+            "transform": linked + [{"sort": "-treatmenttime"}, {"limit": 1}],
+        }),
+        lambda trace: ("materialize_result", {
+            "source": "treatment",
+            "transform": linked + [
+                {"filter": {"field": "treatmenttime", "op": "=", "value": _cell(trace, "transform_dataset", "treatmenttime")}},
+                {"sort": "treatmentid"},
+                {"select": ["treatmentname"]},
+            ],
+            "name": "task_44_answer",
+            "description": "Procedures at the patient's latest treatment timestamp, in treatment id order",
+        }),
+        lambda trace: ("export_result", {"dataset": "task_44_answer", "path": str(prediction_path), "overwrite": True}),
+    ]
+
+
+def task_127_script(context_dir: Path, prediction_path: Path) -> list[Step]:
+    """What was the maximum recorded respiration value for patient 027-146876 on 2103-07-12?"""
+    return [
+        lambda trace: ("import_workspace", {"path": str(context_dir)}),
+        lambda trace: ("describe_dataset", {"dataset": "vitalperiodic", "sample_rows": 2}),
+        lambda trace: ("transform_dataset", {
+            "source": "patient",
+            "transform": {"filter": "uniquepid = '027-146876'", "select": ["patientunitstayid"]},
+        }),
+        lambda trace: ("materialize_result", {
+            "source": "vitalperiodic",
+            "transform": [
+                {"filter": f"patientunitstayid = {_cell(trace, 'transform_dataset', 'patientunitstayid')} "
+                           f"and strftime(observationtime, '%Y-%m-%d') = '2103-07-12'"},
+                {"aggregate": [{"function": "max", "field": "respiration", "alias": "maximum_respiration"}]},
+            ],
+            "name": "task_127_answer",
+            "description": "Maximum respiration recorded for the patient on 2103-07-12",
+        }),
+        lambda trace: ("export_result", {"dataset": "task_127_answer", "path": str(prediction_path), "overwrite": True}),
+    ]
+
+
+def task_329_script(context_dir: Path, prediction_path: Path) -> list[Step]:
+    """Daily maximum enteral formula volume/bolus amt (ml) for patient 033-22108 in the current encounter."""
+    label = "enteral formula volume/bolus amt (ml)"
+    return [
+        lambda trace: ("import_workspace", {"path": str(context_dir)}),
+        lambda trace: ("transform_dataset", {
+            "source": "patient",
+            "transform": {"filter": "uniquepid = '033-22108'", "select": ["patientunitstayid"]},
+        }),
+        # Two managed datasets: the daily totals, then the maximum over them.
+        lambda trace: ("materialize_result", {
+            "source": "intakeoutput",
+            "transform": [
+                {"filter": f"patientunitstayid = {_cell(trace, 'transform_dataset', 'patientunitstayid')} "
+                           f"and celllabel = '{label}'"},
+                {"derive": "strftime(intakeoutputtime, '%Y-%m-%d') as day"},
+                {"group_by": ["day"], "measures": [{"function": "sum", "field": "cellvaluenumeric", "alias": "daily_total"}]},
+            ],
+            "name": "task_329_daily_totals",
+            "description": "Enteral formula volume per calendar day for the patient",
+        }),
+        lambda trace: ("materialize_result", {
+            "source": "task_329_daily_totals",
+            "transform": {"aggregate": [{"function": "max", "field": "daily_total", "alias": "daily_maximum"}]},
+            "name": "task_329_answer",
+            "description": "Largest daily enteral formula volume for the patient",
+        }),
+        lambda trace: ("export_result", {"dataset": "task_329_answer", "path": str(prediction_path), "overwrite": True}),
+    ]
+
+
+SCRIPTS: dict[str, Callable[[Path, Path], list[Step]]] = {
+    "task_10": task_10_script,
+    "task_44": task_44_script,
+    "task_127": task_127_script,
+    "task_329": task_329_script,
+}
 
 
 # ----------------------------------------------------------------------------
@@ -141,36 +242,21 @@ def official_verdict(summary: dict[str, Any], task: str) -> dict[str, Any] | Non
     return None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="DataSpace smoke test through the MCP tool surface")
-    parser.add_argument("--task", default="task_10")
-    parser.add_argument("--benchmark", default=os.environ.get("DATASPACE_BENCHMARK",
-                        str(Path("~/dev/kddcup2026_champion/DataSpace-Benchmark").expanduser())))
-    parser.add_argument("--champion", default=os.environ.get("KDDCUP_CHAMPION", str(Path("~/dev/kddcup2026_champion").expanduser())))
-    parser.add_argument("--out", default=None, help="output directory (default examples/dataspace/runs/<task>)")
-    parser.add_argument("--check", action="store_true", help="exit non-zero unless the official evaluator marks the task correct")
-    args = parser.parse_args()
-
-    benchmark = Path(args.benchmark)
-    task = args.task
+def run_task(task: str, benchmark: Path, champion: Path, out_root: Path | None) -> dict[str, Any]:
     context_dir = benchmark / "input" / task / "context"
     if not context_dir.is_dir():
-        print(f"benchmark task not found: {context_dir}")
-        return 2
-    if task not in SCRIPTS:
-        print(f"no scripted agent for {task}; available: {sorted(SCRIPTS)}")
-        return 2
+        raise SystemExit(f"benchmark task not found: {context_dir}")
     question = json.loads((benchmark / "input" / task / "task.json").read_text(encoding="utf-8"))["question"]
 
-    out_dir = Path(args.out) if args.out else ROOT / "examples" / "dataspace" / "runs" / task
+    out_dir = out_root if out_root is not None else ROOT / "examples" / "dataspace" / "runs" / task
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     pred_root = out_dir / "predictions"
     prediction_path = pred_root / task / "prediction.csv"
 
-    print(f"task {task}: {question}")
-    backend = Backend(out_dir / "workspace")
+    print(f"\n=== {task}: {question}")
+    backend = Backend(out_dir / "workspace", export_root=out_dir)
     started = time.perf_counter()
     try:
         server = create_server(backend)
@@ -199,21 +285,47 @@ def main() -> int:
               f"error={entry.get('error')} task_accuracy={official['summary'].get('task_accuracy')}")
         if official["returncode"] != 0:
             print(official["stderr"] or official["stdout"])
-        champion = run_champion_scorer(pred_root, benchmark, task, Path(args.champion))
-        result["champion_scorer"] = champion
-        if champion and champion.get("result"):
-            r = champion["result"]
-            print(f"champion scorer: score={r.get('score')} recall={r.get('recall')} matched={r.get('matched_cols')}/{r.get('gold_cols')} pred_cols={r.get('pred_cols')}")
-        elif champion:
-            print("champion scorer unavailable:", champion.get("stderr", "")[-300:])
+        result["champion_scorer"] = run_champion_scorer(pred_root, benchmark, task, champion)
+        scored = (result["champion_scorer"] or {}).get("result")
+        if scored:
+            print(f"champion scorer: score={scored.get('score')} recall={scored.get('recall')} "
+                  f"matched={scored.get('matched_cols')}/{scored.get('gold_cols')} pred_cols={scored.get('pred_cols')}")
+        elif result["champion_scorer"]:
+            print("champion scorer unavailable:", result["champion_scorer"].get("stderr", "")[-300:])
     else:
         print("no prediction produced")
         result["official"] = {"correct": False}
 
     (out_dir / "smoke_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(f"wrote {out_dir / 'smoke_result.json'}")
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="DataSpace smoke test through the MCP tool surface")
+    parser.add_argument("--task", default="task_10", help="task id, comma-separated ids, or 'all'")
+    parser.add_argument("--benchmark", default=os.environ.get("DATASPACE_BENCHMARK",
+                        str(Path("~/dev/kddcup2026_champion/DataSpace-Benchmark").expanduser())))
+    parser.add_argument("--champion", default=os.environ.get("KDDCUP_CHAMPION", str(Path("~/dev/kddcup2026_champion").expanduser())))
+    parser.add_argument("--out", default=None, help="output directory (default examples/dataspace/runs/<task>)")
+    parser.add_argument("--check", action="store_true", help="exit non-zero unless the official evaluator marks every task correct")
+    args = parser.parse_args()
+
+    tasks = sorted(SCRIPTS, key=lambda t: int(t.split("_")[1])) if args.task == "all" else [t.strip() for t in args.task.split(",")]
+    unknown = [t for t in tasks if t not in SCRIPTS]
+    if unknown:
+        print(f"no scripted agent for {unknown}; available: {sorted(SCRIPTS)}")
+        return 2
+
+    benchmark, champion = Path(args.benchmark), Path(args.champion)
+    results = [run_task(t, benchmark, champion, Path(args.out) / t if args.out else None) for t in tasks]
+    if len(results) > 1:
+        print("\n=== summary ===")
+        for result in results:
+            print(f"  {result['task']}: passed={result['official'].get('correct')} "
+                  f"tool_calls={result['tool_calls']} elapsed={result['elapsed_s']}s")
     if args.check:
-        return 0 if result["official"].get("correct") else 1
+        return 0 if all(r["official"].get("correct") for r in results) else 1
     return 0
 
 

@@ -45,6 +45,8 @@ Key properties, all enforced in software rather than in prompts:
 | Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too |
 | Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match |
 | Schema and type correctness | shared type rules in `core/ir/typing.py`, applied twice (resolver inference, validator re-check) |
+| Semantic types at import | text columns whose non-null values are all ISO dates/timestamps become `date`/`timestamp` (a source driver reports what it can store, not what the data means); an explicit `type` hint wins, and the refinement is a resolution note and part of the recorded IR |
+| Value rendering | a property of the exported file, not of the data: `export_result` takes a validated `format_spec`; transforms compute, they do not format |
 | Ambiguity | `AmbiguousReferenceError` → `status: needs_resolution` with candidates |
 | Write-ahead operation record | operation row is inserted `pending` before any work, updated with IR and plan before execution, and finalized in the commit transaction |
 | Atomicity | DuckDB `CREATE TABLE AS` is atomic; metadata commit is one SQLite transaction; failure between the two drops the table |
@@ -121,11 +123,39 @@ sort → limit → rename:
 ```
 
 Step types: `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`,
-`derive`, `join`. Expressions may be strings (`"quantity * unit_price"`,
+`derive`, `join`. A step may also be written without `type` when its key names
+it, so `[{"filter": "amount > 100"}, {"sort": "-amount"}, {"limit": 3}]` is a
+pipeline; `select` and `derive` accept SQL-style aliasing
+(`"end_date as report_period"`, `"quantity * unit_price as line_total"`), and
+`derive` accepts several `{name, expression}` pairs at once.
+
+Expressions may be strings (`"quantity * unit_price"`,
 `"amount > 100 and region = 'West'"`) or object trees; identifiers are always
 resolved against the current schema and functions come from an allowlist
-(`abs round floor ceil upper lower trim length concat coalesce year month day
-is_null contains starts_with ends_with`). There is no SQL passthrough.
+(`abs round floor ceil upper lower trim length substr substring left right
+concat coalesce year month day strftime is_null contains starts_with
+ends_with`; `||` is read as `concat`). There is no SQL passthrough.
+
+### Exporting an answer
+
+`export_result` writes a managed dataset to a file at the boundary of the
+system. How values become text is decided there, by an optional `format_spec`
+that is validated like the IR (unknown keys refused) and recorded in the
+operation and the audit event, so the file is reproducible:
+
+```json
+{"dataset": "task_10_answer", "path": "prediction.csv",
+ "format_spec": {"decimals": 4, "strip_trailing_zeros": true, "integer_min_decimals": 1,
+                 "columns": {"end_date": {"timestamp_format": "%Y-%m-%d"}}}}
+```
+
+Keys are file-level defaults plus per-column overrides: `decimals` (rounded
+half-up on the shortest decimal form, so `31783696.815` → `31783696.82` and not
+the `.81` the binary double would give), `strip_trailing_zeros`,
+`integer_min_decimals`, `date_format` / `timestamp_format` (strftime patterns,
+locale-dependent directives refused) and `null_text`. The dataset itself keeps
+its types; two differently formatted exports of the same version differ only in
+the file.
 
 ### Failure semantics
 
@@ -160,6 +190,7 @@ agent_backend/
 │   ├── validation/         IR validator (independent re-check)
 │   ├── planner/            explicit execution plan
 │   ├── execution/          IR → SQL compiler, executor
+│   ├── export/             export format specification (value rendering at the file boundary)
 │   ├── lineage/            lineage recording and traversal
 │   └── audit/              audit trail
 ├── storage/
@@ -170,7 +201,7 @@ agent_backend/
 │   ├── server/             MCPServer entry point (`agent-backend-mcp`)
 │   └── tools/              thin tool definitions
 tests/                      agent-unreliability and end-to-end tests
-examples/                   orders.csv, demo.py, mcp_config.json
+examples/                   orders.csv, demo.py, mcp_config.json, DataSpace smoke layers
 ```
 
 ## 3. Running the prototype
@@ -322,6 +353,17 @@ the canonical IR, the full execution plan and the generated SQL.
 - `test_knowledge.py`: knowledge.md parsing (table and bullet styles, scoped
   and global facts, units), `attach_metadata` application, overwrite
   semantics, unmatched reporting, source forms.
+- `test_loose_shapes.py`: the intent shapes a model actually produced in the
+  DataSpace runs — steps named by their key instead of `type`, `sort` with
+  `order` as the key list, `"field as alias"` in `select` and `derive`,
+  `derive` as a list, `||`, string slicing and `strftime`.
+- `test_export.py`: export to csv/parquet, overwrite and export-root refusals,
+  and the format specification: half-up rounding on the shortest decimal form,
+  trailing zeros, whole numbers keeping a decimal, date patterns, null text,
+  validation of unknown keys/columns/directives, and byte-identical re-export.
+- `test_import.py` also covers temporal refinement: text dates promoted to
+  `date`/`timestamp`, `type` hints winning over it, and values that only look
+  like dates (`2002-02-31`) staying text.
 
 Each state-changing test finishes by checking `Backend.integrity_report()`,
 which cross-checks metadata versions, DuckDB tables, row counts, orphan tables
@@ -336,18 +378,24 @@ identifiers, `import_workspace` and `attach_metadata` are done; a real
 `task_10` workspace (8 csv, 8 sqlite tables, 1 wrapper json, knowledge.md)
 imports in ~2 s and the task's query runs through the semantic steps.
 
-0. **DataSpace `task_10` smoke test** — done for both layers:
-   `examples/dataspace_smoke.py` (scripted agent, six MCP tool calls) passes
-   the official evaluator (vendored in `examples/dataspace/`), and
+0. **DataSpace smoke tests** — four public-reference tasks (`task_10`,
+   `task_44`, `task_127`, `task_329`) run in both layers.
+   `examples/dataspace_smoke.py --task all --check` (scripted agent, five or
+   six MCP tool calls per task) passes the official evaluator on all four;
    `examples/dataspace_agent.py` (qwen3.5-35b-a3b through the MCP tools, no
-   SQL or dialect rules in the prompt) passes 2 of 3 runs; see
-   `examples/dataspace/README.md` for the traces and findings. Next: accept
-   the loose step shapes the model actually used, extend the expression
-   vocabulary (string slicing, temporal formatting, `distinct`, `union`,
-   window/rank with ties) and give `export_result` an output-format
-   specification (rounding, trailing zeros — the need both layers surfaced).
-   A validated read-only `raw_query` fallback step is recorded as MADR 0002
-   for the long tail. DataSpace is a validation scenario, not the goal
+   SQL or dialect rules in the prompt) passes 3/3 on `task_10` (was 2/3, and
+   27 → 17 mean turns after the export format specification ended the
+   rendering loop) and 3/3 on `task_127`. The six failing runs on
+   `task_44`/`task_329` are measured and attributed in
+   `examples/dataspace/README.md`: four exported the correct values with one
+   column too many, thirteen refusals were `strftime` written pattern-first,
+   the rest were date-part vocabulary and path finding. Next in frequency
+   order: accept `strftime` in either argument order, make the answer-table
+   contract visible at the export boundary, a small date-part vocabulary with
+   `group_by` over a derived expression, `IN` with bracket lists, and an
+   aggregate step nested under its own key. A validated read-only `raw_query`
+   fallback step is recorded as MADR 0002 for the long tail; nothing measured
+   so far has needed it. DataSpace is a validation scenario, not the goal
    (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in

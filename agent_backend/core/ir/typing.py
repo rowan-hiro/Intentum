@@ -42,6 +42,8 @@ _num = ArgSpec(NUMERIC)
 _str = ArgSpec(STRINGY)
 _tmp = ArgSpec(TEMPORAL)
 _any = ArgSpec(ANY)
+_count = ArgSpec(frozenset({LogicalType.INTEGER}))
+_count_opt = ArgSpec(frozenset({LogicalType.INTEGER}), optional=True)
 
 
 def _same(types: list[LogicalType]) -> LogicalType:
@@ -75,11 +77,18 @@ FUNCTIONS: dict[str, FunctionSpec] = {
         FunctionSpec("lower", (_str,), _string),
         FunctionSpec("trim", (_str,), _string),
         FunctionSpec("length", (_str,), _int),
+        FunctionSpec("substr", (_str, _count, _count_opt), _string),
+        FunctionSpec("substring", (_str, _count, _count_opt), _string),
+        FunctionSpec("left", (_str, _count), _string),
+        FunctionSpec("right", (_str, _count), _string),
         FunctionSpec("concat", (_any, _any), _string, variadic=True),
         FunctionSpec("coalesce", (_any, _any), _same, variadic=True),
         FunctionSpec("year", (_tmp,), _int),
         FunctionSpec("month", (_tmp,), _int),
         FunctionSpec("day", (_tmp,), _int),
+        # Rendering a value as text belongs to export (MADR 0005); strftime is here so a
+        # date part can be *computed* (a month key to group by), not to format an answer.
+        FunctionSpec("strftime", (_tmp, _str), _string),
         FunctionSpec("is_null", (_any,), _bool, sql="({0} IS NULL)"),
         FunctionSpec("contains", (_str, _str), _bool),
         FunctionSpec("starts_with", (_str, _str), _bool),

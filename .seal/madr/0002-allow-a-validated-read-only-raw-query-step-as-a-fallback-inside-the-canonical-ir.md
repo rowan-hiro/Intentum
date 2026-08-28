@@ -42,3 +42,10 @@ Add a raw_query step type to the canonical IR rather than a separate execute_sql
 Status: Proposed → Proposed
 
 Still deferred after the task_10 smoke: across one scripted and three model-driven runs no query shape required SQL; every refusal was a loose-shape or formatting issue now scoped to MADRs 0005/0006 and outcome 2026-08-28-005. Revisit after the next structured-only tasks are measured.
+
+<!-- driftseal-reconciliation: 7842e592-8bfc-4920-9596-368fe930352e -->
+### 2026-08-28T07:57:20.159Z — Outcome `2026-08-28-005`
+
+Status: Proposed → Proposed
+
+Still deferred after the second measurement. Across four scripted tasks and twelve model-driven runs no answer required SQL: the scripted layer expresses all four tasks with join, filter, derive, aggregate, sort, limit and select, and every model refusal was a loose shape, an argument order, a missing date-part function or an output-contract mistake. Revisit if a measured task needs a window, a tie-aware extremum or a union.

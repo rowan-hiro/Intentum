@@ -96,6 +96,37 @@ Official result 2/3 passed; mean 27 turns, ≈ $0.004 and 81 s per run
   to write `/tmp/...` was refused with `PERMISSION_DENIED` and the model
   recovered inside the allowed root.
 
+### Evidence from the second measurement (2026-08-28, after steps 4-5)
+
+Steps 4 and 5 are implemented: the export format specification (MADR 0005),
+import-time temporal refinement (MADR 0006), the loose step shapes the model
+had used, and a string/date vocabulary. The scripted layer now covers four
+structured-only public-reference tasks (task_10, task_44, task_127, task_329)
+and passes the official evaluator on all four. task_10's champion-scorer score
+moved from 0.45 to 1.0 with no change to the data, which isolates the export
+specification as the cause. The model-driven layer went from 2/3 to 3/3 on
+task_10 with mean turns 27 → 17 and mean prompt tokens 489k → 339k: the
+formatting loop that consumed the baseline's passing runs is gone, and no
+refusal in twelve runs was one of the accepted loose shapes. task_127 passes
+3/3 in 9-13 turns.
+
+The two harder tasks fail for reasons the measurement can name, none of them
+expressiveness — the scripted layer answers both in five calls:
+
+1. four of the six failing runs exported the *correct values* with one column
+   too many, which the evaluator rejects outright; the answer table is a
+   contract the tool surface never states;
+2. thirteen refusals were `strftime` written pattern-first (Python's order,
+   which DuckDB also accepts) against an allowlist that takes only
+   `(temporal, pattern)`;
+3. the rest were date-part vocabulary (`date`, `to_char`, `strptime`, casts
+   inside expressions, `group_by` over a derived expression) and, in task_44,
+   finding that the patient id is reachable only through `cost.eventid`.
+
+That ordering — argument order, answer-table contract, date parts, then the
+long tail — is the input to the next outcome. Full tables and traces are in
+`examples/dataspace/README.md`.
+
 ## Decision History
 
 <!-- driftseal-reconciliation: c1815772-878f-428d-a6a2-6da3854a15dd -->
@@ -132,3 +163,10 @@ LLM layer of the task_10 smoke run: qwen3.5-35b-a3b through the MCP tools, 3 run
 Status: Accepted → Accepted
 
 Steps 4-5 scoped from evidence and handed off as outcome 2026-08-28-005: export format specification (MADR 0005), import-time temporal refinement (MADR 0006), loose step shapes and string/date vocabulary; distinct/union/window remain unscheduled until a task requires them; next tasks to measure: two or three structured-only public-reference tasks.
+
+<!-- driftseal-reconciliation: 27931ee7-a89b-4706-8967-9278dec35668 -->
+### 2026-08-28T07:57:14.066Z — Outcome `2026-08-28-005`
+
+Status: Accepted → Accepted
+
+Steps 4 and 5 of the sequence are done. Body amended with 'Evidence from the second measurement': scripted layer extended to four structured-only public-reference tasks (task_10, task_44, task_127, task_329), all four pass the official evaluator; model-driven layer 3/3 on task_10 (was 2/3, 27 to 17 mean turns) and 3/3 on task_127. The six failing runs on task_44 and task_329 are attributed: four exported correct values with one column too many, thirteen refusals were strftime written pattern-first, the rest were date-part vocabulary and path finding. Next sequence step is that ordering, not distinct/union/window, which no measured task has required.

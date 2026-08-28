@@ -4,7 +4,7 @@ Date: 2026-08-28
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -32,3 +32,12 @@ During import, after loading, the backend probes each string column: if every no
 * Import does one extra scan per string column
 * A column whose values are dates today but free text tomorrow changes type between versions; the version record makes that visible
 * Non-ISO date formats remain string until a pattern is added deliberately
+
+## Decision History
+
+<!-- driftseal-reconciliation: f23591d7-0a1a-4ef7-bce1-703ad43e8357 -->
+### 2026-08-28T07:57:06.628Z — Outcome `2026-08-28-005`
+
+Status: Proposed → Accepted
+
+Implemented: at import every text column whose non-null values all match the documented ISO patterns and cast cleanly is promoted to date or timestamp (all bare dates give date, a mix gives timestamp), the physical column is cast, the refinement is returned as a resolution note and recorded in the import's canonical IR under refined_types, excluded from the idempotency fingerprint because it is derived from the source. Explicit type hints win; a column holding 2002-02-31 stays text. Measured cost on the task_127 workspace (10 datasets, 854k vitalperiodic rows): 53 s with the probe against 49 s without. Evidence: task_10's EndDate and task_329's intakeoutputtime now arrive as timestamp from SQLite and json text, and no run needed an agent-side cast to sort or compare a date.
