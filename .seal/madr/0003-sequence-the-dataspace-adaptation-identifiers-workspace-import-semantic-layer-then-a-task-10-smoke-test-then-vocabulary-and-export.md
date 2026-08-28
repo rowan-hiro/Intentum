@@ -125,3 +125,10 @@ Body amended with 'Evidence from the task_10 smoke test': (1) export_result need
 Status: Accepted → Accepted
 
 LLM layer of the task_10 smoke run: qwen3.5-35b-a3b through the MCP tools, 3 runs, 2/3 passed officially, mean 27 turns and ~$0.004 per run. Evidence subsection added to the body: discovery is not the problem; the failure was a unit-reading error by the agent; passing runs looped on formatting (confirms export-format specification, step 5); five loose step shapes to accept in step 4; export sandbox root added as a new invariant.
+
+<!-- driftseal-reconciliation: e4409656-a943-4cf3-895d-d8ec8e1a7cd5 -->
+### 2026-08-28T07:02:23.296Z — Outcome `2026-08-28-005`
+
+Status: Accepted → Accepted
+
+Steps 4-5 scoped from evidence and handed off as outcome 2026-08-28-005: export format specification (MADR 0005), import-time temporal refinement (MADR 0006), loose step shapes and string/date vocabulary; distinct/union/window remain unscheduled until a task requires them; next tasks to measure: two or three structured-only public-reference tasks.

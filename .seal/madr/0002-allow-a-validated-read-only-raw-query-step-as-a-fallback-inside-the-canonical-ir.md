@@ -33,3 +33,12 @@ Add a raw_query step type to the canonical IR rather than a separate execute_sql
 * Placeholder binding means raw_query SQL is portable across dataset versions and replayable against a snapshot
 * Every raw_query use is countable; a high rate on a query shape is a signal to promote it to a semantic step
 * Prompt guidance for SQL dialect details partially returns for the fallback path only; the primary path stays SQL-free
+
+## Decision History
+
+<!-- driftseal-reconciliation: 1a62dc04-a1ee-4bdb-ae1b-c73c87dd11c6 -->
+### 2026-08-28T07:02:23.103Z — Outcome `2026-08-28-005`
+
+Status: Proposed → Proposed
+
+Still deferred after the task_10 smoke: across one scripted and three model-driven runs no query shape required SQL; every refusal was a loose-shape or formatting issue now scoped to MADRs 0005/0006 and outcome 2026-08-28-005. Revisit after the next structured-only tasks are measured.
