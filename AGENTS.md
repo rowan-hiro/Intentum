@@ -1,5 +1,45 @@
 # Agent instructions
 
+## Project structure
+
+Intentum is a Python 3.11+ data backend that turns an agent's semantic intent
+into validated, deterministic data operations. The main transform flow is
+resolve -> canonical IR -> validate -> plan -> execute -> commit, coordinated
+by `Backend`. Business logic lives in `core/`, persistence in `storage/`, and
+the MCP interface in `mcp/`, all under `agent_backend/`.
+
+| Path | Responsibility |
+| --- | --- |
+| `agent_backend/__init__.py` | Public Python API: `Backend`, `BackendError`, and `ErrorCode`. |
+| `agent_backend/core/backend.py` | Semantic operations, operation lifecycle, idempotency, metadata commits, and failure compensation. |
+| `agent_backend/core/access.py` | Access policy protocol and built-in policies. |
+| `agent_backend/core/errors.py` | Error codes and structured responses, including ambiguity and recovery hints. |
+| `agent_backend/core/logging.py` | Structured events for the execution stages. |
+| `agent_backend/core/models/` | Dataset, column, version, operation, lineage, and audit entities. |
+| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, and shared type rules. |
+| `agent_backend/core/resolver/` | Resolve loose dataset, field, expression, and transform references into canonical IR. |
+| `agent_backend/core/validation/` | Independently validate IR types, schemas, input versions, and dataset state. |
+| `agent_backend/core/planner/` | Build explicit, inspectable execution plans. |
+| `agent_backend/core/execution/` | Compile IR to internal SQL, execute plans, and roll back physical tables on failure. |
+| `agent_backend/core/lineage/` | Record lineage edges and traverse upstream and downstream dependencies. |
+| `agent_backend/core/audit/` | Record and retrieve audit events for entities and operations. |
+| `agent_backend/storage/metadata/` | `MetadataStore` protocol and SQLite implementation. |
+| `agent_backend/storage/duckdb/` | `AnalyticsEngine` protocol and DuckDB implementation. |
+| `agent_backend/storage/files/` | Managed workspace paths and imported source-file copies. |
+| `agent_backend/mcp/server/main.py` | MCP server creation and the `agent-backend-mcp` CLI entry point over stdio. |
+| `agent_backend/mcp/tools/registry.py` | Semantic MCP tool definitions that delegate to `Backend`. |
+| `tests/` | pytest coverage for imports, resolution, transforms, lifecycle, idempotency, failures, MCP, and end-to-end flows. |
+| `tests/conftest.py` | Shared temporary workspace, backend, sample orders, and deterministic clock fixtures. |
+| `examples/` | Sample `orders.csv`, runnable `demo.py`, and MCP client configuration in `mcp_config.json`. |
+| `pyproject.toml` | Package metadata, dependencies, CLI entry point, build configuration, and test settings. |
+| `uv.lock` | Locked dependency resolution for uv. |
+| `README.md` | Detailed architecture, transform language, setup, MCP usage, examples, and next steps. |
+| `.seal/` | DriftSeal outcome history and MADR records; follow the protocols below. |
+
+Runtime data belongs to the configured backend workspace: `metadata.sqlite`
+stores metadata, `analytics.duckdb` stores analytical tables, and `files/`
+holds imported sources. These are runtime artifacts, not source directories.
+
 <!-- driftseal -->
 <!-- driftseal-version: 2.1 -->
 <!-- driftseal-log-language: en -->
