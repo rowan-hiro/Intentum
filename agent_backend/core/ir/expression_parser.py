@@ -22,8 +22,8 @@ _TOKEN_RE = re.compile(
   | (?P<number>\d+(?:\.\d+)?)
   | (?P<string>'(?:[^']|'')*')
   | (?P<qident>"(?:[^"]|"")*")
-  | (?P<ident>[A-Za-z_][A-Za-z0-9_]*)
-  | (?P<op><=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|,)
+  | (?P<ident>[^\W\d]\w*)
+  | (?P<op>\|\||<=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|,)
     """,
     re.VERBOSE,
 )
@@ -47,6 +47,7 @@ def _tokenize(text: str) -> list[_Token]:
             raise InvalidTransformError(
                 f"Unexpected character {text[pos]!r} at position {pos} in expression {text!r}.",
                 field="expression",
+                hint='Wrap field names that contain spaces or punctuation in double quotes, e.g. "unit price" * 2.',
             )
         kind = match.lastgroup or ""
         value = match.group(kind)
@@ -163,6 +164,11 @@ class ExpressionParser:
                 self._advance()
                 right = self._parse_multiplicative()
                 left = {"op": token.text, "left": left, "right": right}
+            elif token.kind == "op" and token.text == "||":
+                # SQL string concatenation, expressed as the allowlisted concat function.
+                self._advance()
+                right = self._parse_multiplicative()
+                left = {"function": "concat", "args": [left, right]}
             else:
                 return left
 
