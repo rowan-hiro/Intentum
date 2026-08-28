@@ -1,0 +1,13 @@
+order_id,order_date,region,customer,product,quantity,unit_price,amount
+1001,2026-08-26,West,Acme Corp,Widget,10,12.50,125.00
+1002,2026-08-26,East,Globex,Gadget,3,99.00,297.00
+1003,2026-08-26,North,Initech,Widget,7,12.50,87.50
+1004,2026-08-26,West,Umbrella,Gizmo,1,450.00,450.00
+1005,2026-08-26,South,Hooli,Gadget,5,99.00,495.00
+1006,2026-08-26,East,Acme Corp,Gizmo,2,450.00,900.00
+1007,2026-08-26,North,Globex,Widget,20,12.50,250.00
+1008,2026-08-26,South,Initech,Gadget,4,99.00,396.00
+1009,2026-08-26,West,Hooli,Widget,15,12.50,187.50
+1010,2026-08-26,East,Umbrella,Gadget,6,99.00,594.00
+1011,2026-08-26,North,Acme Corp,Gizmo,1,450.00,450.00
+1012,2026-08-26,South,Globex,Widget,8,12.50,100.00
