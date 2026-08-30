@@ -135,6 +135,44 @@ The tool errors, by kind:
 | a rename of a guessed auto-alias (`max_cellvaluenumeric`) | 1 | `task_329` run 1 |
 | `attach_metadata` with a path that does not exist | 1 | `task_329` run 2 |
 
+### The champion pipeline on the same two tasks
+
+For scale, the KDD Cup 2026 champion pipeline (`zhezh/kddcup2026_champion`,
+`upstream/main` at `bdc874f`, full SQL through a `solver.py` the model edits,
+same model and gateway) was run once on the same two tasks on 2026-08-30 and
+scored with the same evaluator:
+
+| task | official | output columns | turns | input tokens | wall clock |
+|---|---|---|---|---|---|
+| `task_44` | **passed** | `treatmentname` (4 rows) | 14 | 211k | 781 s, of which 693 s document extraction |
+| `task_329` | failed (extra column) | `intake_date, daily_max_amount` → `2105-12-30, 60.0` | 12 | 183k | 145 s |
+
+Against Intentum's third measurement (`task_44` 0/3 at 26.3 turns / 351k,
+`task_329` 0/3 at 15.0 turns / 164k), three things stand out:
+
+1. **`task_329` fails the same way with full SQL.** The champion's solver
+   template has a `# 目标输出列:` line the model fills in before writing the
+   query — a declaration step of its own — and the model filled it with
+   `intake_date, daily_max_amount`, the same two columns three Intentum runs
+   declared as their contract. The extra column is the model's reading of the
+   question, not a property of either backend.
+2. **`task_44` passed on a reading, not on a capability.** The champion's
+   reasoning trace says "只需要输出 procedure（treatmentname）" and the SQL
+   selects one column; on the same question Intentum's runs declared and
+   exported `treatmentid, treatmentname, treatmenttime`. One champion run
+   against three Intentum runs (one of which never exported) does not show
+   the champion reads more accurately, only that it read correctly this time.
+   The path it took — `treatment` joined to `patient`, then
+   `treatmenttime = (SELECT MAX(...))` — is the subquery shape Intentum
+   refused five times, i.e. the semi-join listed below.
+3. **Turns and tokens are in the same range.** `task_329`: 15.0 turns / 164k
+   for Intentum against 12 / 183k; `task_44`: 26.3 / 351k against 14 / 211k,
+   the gap there being the subquery detour.
+
+So the vocabulary and the contract are not what separates the two on these
+tasks; the semi-join is, and the reading of the question is a shared limit of
+the model.
+
 ### Next, from this measurement
 
 Two of these are general and cheap: read a compound object's `select` after

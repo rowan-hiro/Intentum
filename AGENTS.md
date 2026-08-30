@@ -39,6 +39,7 @@ the MCP interface in `mcp/`, all under `agent_backend/`.
 | `pyproject.toml` | Package metadata, dependencies, CLI entry point, build configuration, and test settings. |
 | `uv.lock` | Locked dependency resolution for uv. |
 | `README.md` | Detailed architecture, transform language, setup, MCP usage, examples, and next steps. |
+| `HANDOFF.md` | What a new agent reads, and in what order: documents, the last outcomes, the MADRs. |
 | `.seal/` | DriftSeal outcome history and MADR records; follow the protocols below. |
 
 Runtime data belongs to the configured backend workspace: `metadata.sqlite`
