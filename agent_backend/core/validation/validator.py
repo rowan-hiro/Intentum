@@ -36,6 +36,7 @@ from ..ir.typing import (
     function_result_type,
     literal_type,
     unary_result_type,
+    validate_function_arguments,
 )
 from ..models.entities import Dataset, DatasetStatus, LogicalType
 from ..naming import is_identifier
@@ -189,6 +190,7 @@ class IRValidator:
             self._declared(t, expr.logical_type, where)
             return t
         if isinstance(expr, FunctionExpr):
+            validate_function_arguments(expr.name, expr.args)
             t = function_result_type(expr.name, [self._expr_type(a, by_name, where) for a in expr.args])
             self._declared(t, expr.logical_type, where)
             return t

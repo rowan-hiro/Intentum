@@ -92,6 +92,20 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
     def attach_metadata(source: str, dataset: str | None = None, overwrite: bool = False) -> dict[str, Any]:
         return backend.attach_metadata(source, dataset=dataset, overwrite=overwrite)
 
+    @server.tool(name="declare_output", annotations=annotations("write"),
+                 description="Declare the shape of the deliverable before you work towards it: `columns` is the "
+                             "ordered list of column names the answer file must carry, exactly and only those "
+                             "(strings, or {\"name\", \"type\"} objects with type integer/float/string/boolean/"
+                             "date/timestamp); optional `rows` is \"one\", \"at_least_one\" or "
+                             "{\"one_per\": [key columns]}; optional `description`. Do this while the requirement "
+                             "is in front of you: the backend keeps the contract and export_result refuses a dataset "
+                             "that does not match it, so you cannot drift away from it later. One contract is "
+                             "current per workspace; declaring a different shape while one is open needs `reason`, "
+                             "which is recorded as an amendment. Re-declaring the same shape changes nothing.")
+    def declare_output(columns: list[Any] | dict[str, Any] | str, rows: str | int | dict[str, Any] | None = None,
+                       description: str | None = None, reason: str | None = None) -> dict[str, Any]:
+        return backend.declare_output(columns, rows=rows, description=description, reason=reason)
+
     @server.tool(name="transform_dataset", annotations=annotations("write"),
                  description="Run a semantic transform on a dataset and preview the result (or persist it when "
                              "`output_name` is given). `source` is a dataset reference (id, name, alias or loose "
@@ -100,10 +114,15 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "\"revenue\", \"sort\": \"-revenue\", \"limit\": 10}. Step types: select, filter, "
                              "aggregate (group_by + measures[{function, field, alias}]), sort, limit, rename, "
                              "derive ({name, expression}), join ({right, on, how}); a step may also be written "
-                             "without `type` when its key names it, e.g. [{\"filter\": \"...\"}, {\"sort\": \"-amount\"}], "
-                             "and select and derive accept \"field as alias\". Field names may be approximate; "
-                             "the response lists how each was resolved, or returns needs_resolution with candidates. "
-                             "Transforms compute values; how they are rendered as text is export_result's business.")
+                             "without `type` when its key names it, e.g. [{\"filter\": \"...\"}, {\"sort\": \"-amount\"}] "
+                             "or {\"aggregate\": {\"group_by\": [...], \"measures\": [...]}}; select and derive accept "
+                             "\"field as alias\", and group_by accepts a named expression such as "
+                             "\"date_trunc('day', ts) as day\". Expressions: comparison, arithmetic, and/or/not, "
+                             "in (a, b) or in [a, b], and the functions abs round floor ceil upper lower trim length "
+                             "substr left right concat (or ||) coalesce year month day date date_trunc strftime "
+                             "is_null contains starts_with ends_with. Field names may be approximate; the response "
+                             "lists how each was resolved, or returns needs_resolution with candidates. Transforms "
+                             "compute values; how they are rendered as text is export_result's business.")
     def transform_dataset(
         source: str,
         transform: dict[str, Any] | list[dict[str, Any]],
@@ -134,7 +153,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
 
     @server.tool(name="export_result", annotations=annotations("write"),
                  description="Write a managed dataset to a file (csv or parquet) at a path you name, e.g. a result "
-                             "file another system expects. Paths are confined to the configured export root. The "
+                             "file another system expects. The file carries exactly the dataset's columns, in "
+                             "order: shape the dataset first (select/rename) so it has exactly the columns the "
+                             "answer asks for. When an output contract was declared with declare_output, the "
+                             "dataset is checked against it (columns, order, types, row cardinality) before "
+                             "anything is written and a mismatch is returned as CONTRACT_MISMATCH with the "
+                             "transform that would repair it; a matching export closes the contract with the "
+                             "evidence in the audit trail. Paths are confined to the configured export root. The "
                              "dataset stays managed; the export is audited with its content hash. Existing files "
                              "are not replaced unless `overwrite` is true. Rendering values as text belongs here, "
                              "not in a transform: optional `format_spec` (csv only) holds file-level defaults plus "
@@ -181,6 +206,14 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "intent that was executed, input datasets, source artifact, upstream lineage and audit trail.")
     def get_provenance(dataset: str) -> dict[str, Any]:
         return backend.get_provenance(dataset)
+
+    @server.tool(name="get_output_contract", annotations=annotations("read"),
+                 description="Show the output contract this workspace currently holds (or one by `contract_id`): "
+                             "the declared columns, row cardinality, revision, whether an export has satisfied it, "
+                             "and its history of declarations and amendments. Use it to re-anchor on what the "
+                             "deliverable must look like.")
+    def get_output_contract(contract_id: str | None = None) -> dict[str, Any]:
+        return backend.get_output_contract(contract_id=contract_id)
 
     @server.tool(name="get_operation", annotations=annotations("read"),
                  description="Inspect a recorded operation: original intent, canonical IR, execution plan, result or error.")

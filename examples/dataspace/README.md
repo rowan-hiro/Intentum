@@ -38,6 +38,116 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+## 2026-08-30 · after the output contract and the vocabulary from the second measurement
+
+What changed since the second measurement, in the order that measurement
+asked for it: `declare_output` and the contract check in `export_result`
+(MADR 0007), `strftime` accepted with the pattern first, a type error that
+names the signature, `date`/`date_trunc`, `group_by` over a named expression,
+`in [a, b]`, and `{"aggregate": {...}}` with the body nested under its own
+key.
+
+### Scripted layer
+
+Every scripted task now declares its output contract as its first call, so
+the export at the end is held to it.
+
+| task | tool calls | elapsed | official evaluator | champion scorer | contract |
+|---|---|---|---|---|---|
+| `task_10` | 7 | 2.8 s | **passed** | 1.0 | `[EndDate, TotalAssets]`, at least one row — satisfied |
+| `task_44` | 6 | 5.2 s | **passed** | 1.0 | `[treatmentname]`, at least one row — satisfied |
+| `task_127` | 6 | 52.3 s | **passed** | 1.0 | `[maximum_respiration]`, one row — satisfied |
+| `task_329` | 6 | 8.7 s | **passed** | 1.0 | `[daily_maximum]`, one row — satisfied |
+
+`task_329` groups by `"date(intakeoutputtime) as day"` directly, the shape
+the model reached for in the second measurement and was refused.
+
+### Model-driven layer (qwen3.5-35b-a3b through the MCP tools, 3 runs per task)
+
+Same model and gateway as the second measurement; the prompt is still only
+the MCP server's instructions (which now say to declare the output first),
+the question, the workspace path and the tool schemas. Only the two tasks
+that failed last time were re-run.
+
+| task | official | mean turns | mean prompt tokens | mean cost | tool errors (3 runs) |
+|---|---|---|---|---|---|
+| `task_44` | 0/3 (was 0/3) | **26.3** (was 29.3) | **351k** (was 390k) | $0.0034 (was $0.0038) | **8** (was 11) |
+| `task_329` | 0/3 (was 0/3) | **15.0** (was 22.0) | **164k** (was 262k) | $0.0015 (was $0.0024) | **9** (was 26) |
+
+Per run:
+
+| task | run | official | champion | turns | tool calls | tool errors | prompt tokens | cost | stop | contract declared at turn |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | failed (no file) | — | 30 | 29 | 3 | 412k | $0.0042 | max turns | never |
+| `task_44` | 2 | failed (extra columns) | 0.93 | 30 | 30 | 4 | 432k | $0.0041 | max turns | 28 |
+| `task_44` | 3 | failed (extra columns) | 0.93 | 19 | 18 | 1 | 210k | $0.0020 | said DONE | 16 |
+| `task_329` | 1 | failed (extra column) | 0.95 | 24 | 22 | 8 | 302k | $0.0027 | said DONE | 13 |
+| `task_329` | 2 | failed (extra column) | 0.95 | 11 | 10 | 1 | 97k | $0.0009 | said DONE | 8 |
+| `task_329` | 3 | failed (extra column) | 0.95 | 10 | 9 | 0 | 94k | $0.0009 | said DONE | 7 |
+
+### What the vocabulary changes did
+
+They removed the refusals they were built for. The thirteen
+`strftime`-pattern-first refusals of the second measurement are gone (zero
+`TYPE_MISMATCH` in six runs); every `task_329` run wrote
+`date_trunc('day', intakeoutputtime)` and `{"aggregate": {"group_by": …,
+"measures": …}}` and both were accepted; two runs of `task_329` reached the
+right daily maximum in nine and ten tool calls with zero or one error. Turns,
+tokens and cost fell on both tasks.
+
+### Where the six runs actually failed
+
+Five of six exported the **correct values with extra columns** again
+(`treatmentid, treatmenttime` next to `treatmentname`; `date` next to the
+maximum), and the sixth never exported. This time, though, every run that
+exported had **declared exactly those extra columns in its contract** — the
+contract check passed because the deliverable matched what the agent had
+written down. That is the boundary of MADR 0007 and 0008 observed, not a
+defect in it: the backend held the export to the declaration, and the
+declaration encoded a misreading of the question ("by treatment id" read as
+"include the id", "daily maximum … during the encounter" read as "one row per
+day"). A wrong first reading is enforced as faithfully as a right one, and it
+belongs to the model, not to the backend.
+
+Two things in that are worth acting on:
+
+1. **The contract was never declared fresh.** The server instructions say to
+   declare the output while the requirement is in front of you; the model
+   declared at turns 7–28, after exploration and in `task_44` immediately
+   before materializing — the degenerate "contract declared at the last
+   moment" that 0007 names. Whether an early declaration would have read the
+   question better is untested; it is the next experiment, and it belongs in
+   the scenario framing under `examples/`, not in core.
+2. **The one `CONTRACT_MISMATCH` was repaired in one turn.** `task_329` run 1
+   tried to export the un-aggregated table against a contract naming
+   `max_ml`; the error named the missing and the extra column, and the next
+   two calls materialized the aggregate and exported it.
+
+The tool errors, by kind:
+
+| refusal | count | where |
+|---|---|---|
+| `select` naming an aggregate output inside a compound object (`{"aggregate": …, "select": ["date", "max_ml"], "sort": "-date"}`): the compact form applies `select` before `aggregate`, so `max_ml` does not exist yet | 6 | `task_329` run 1 |
+| a SQL subquery inside a filter (`patientunitstayid IN (SELECT … FROM cost WHERE …)`) — the agent wants to filter by another dataset's values | 5 | `task_44`, all runs |
+| `group_by` with no measure, meaning "distinct values" | 2 | `task_44` run 2 |
+| `"distinct": true` as a step key | 1 | `task_44` run 2 |
+| an expression with an alias inside `select` (`"date_trunc('day', t) as date"`) | 1 | `task_329` run 1 |
+| a rename of a guessed auto-alias (`max_cellvaluenumeric`) | 1 | `task_329` run 1 |
+| `attach_metadata` with a path that does not exist | 1 | `task_329` run 2 |
+
+### Next, from this measurement
+
+Two of these are general and cheap: read a compound object's `select` after
+`aggregate` when it names aggregate outputs (or honour the written key order
+outright), and accept `group_by` without measures as a distinct-values step.
+The subquery-in-filter shape is the deferred consequence of MADR 0008 made
+concrete — the agent wants to *reference* another dataset's values rather
+than copy them — and calls for a semi-join (`filter … in (dataset.column)`),
+not for `raw_query` (MADR 0002). The column-count failure itself is a reading
+of the question, which the backend cannot judge; the experiment that follows
+is to make the scenario prompt ask for the declaration first and see whether
+a fresh declaration reads the question differently.
+
 ## 2026-08-28 · after the export specification, temporal refinement and the loose shapes
 
 ### Scripted layer

@@ -3,6 +3,8 @@ from .entities import (
     ArtifactKind,
     AuditEvent,
     Column,
+    ContractColumn,
+    ContractStatus,
     Dataset,
     DatasetStatus,
     DatasetVersion,
@@ -11,7 +13,9 @@ from .entities import (
     Operation,
     OperationKind,
     OperationStatus,
+    OutputContract,
     Relationship,
+    RowCardinality,
     SemanticRole,
 )
 
@@ -20,6 +24,8 @@ __all__ = [
     "ArtifactKind",
     "AuditEvent",
     "Column",
+    "ContractColumn",
+    "ContractStatus",
     "Dataset",
     "DatasetStatus",
     "DatasetVersion",
@@ -28,6 +34,8 @@ __all__ = [
     "Operation",
     "OperationKind",
     "OperationStatus",
+    "OutputContract",
     "Relationship",
+    "RowCardinality",
     "SemanticRole",
 ]

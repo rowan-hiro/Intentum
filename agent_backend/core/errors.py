@@ -20,6 +20,7 @@ class ErrorCode(StrEnum):
     INVALID_STATE = "INVALID_STATE"
     TYPE_MISMATCH = "TYPE_MISMATCH"
     CONFLICT = "CONFLICT"
+    CONTRACT_MISMATCH = "CONTRACT_MISMATCH"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     INTERNAL = "INTERNAL"
@@ -118,6 +119,17 @@ class TypeMismatchError(BackendError):
 
 class ConflictError(BackendError):
     code = ErrorCode.CONFLICT
+    recoverable = True
+
+
+class ContractMismatchError(BackendError):
+    """The result does not have the shape the agent declared for it (MADR 0007).
+
+    Recoverable in two ways, both spelled out in the hint: reshape the dataset,
+    or amend the contract with a reason.
+    """
+
+    code = ErrorCode.CONTRACT_MISMATCH
     recoverable = True
 
 

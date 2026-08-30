@@ -23,6 +23,7 @@ the MCP interface in `mcp/`, all under `agent_backend/`.
 | `agent_backend/core/planner/` | Build explicit, inspectable execution plans. |
 | `agent_backend/core/execution/` | Compile IR to internal SQL, execute plans, and roll back physical tables on failure. |
 | `agent_backend/core/export/` | Export format specification: how typed values are rendered as text at the file boundary. |
+| `agent_backend/core/contracts/` | Output contracts: read a declared deliverable shape into canonical form and check a dataset against it. |
 | `agent_backend/core/knowledge/` | Parse knowledge.md-style semantic-layer documents into table and column facts. |
 | `agent_backend/core/lineage/` | Record lineage edges and traverse upstream and downstream dependencies. |
 | `agent_backend/core/audit/` | Record and retrieve audit events for entities and operations. |
@@ -97,7 +98,7 @@ names, flags, status tokens, ids, and lane names in English.
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 `.seal/outcomes/events.jsonl` (or its configured equivalent) directly. Use
 `reclaim`/`unreclaim` for visibility markers and `absorb` after merge
-collisions. These operations preserve append-only single-lineage history.
+collisions or when Decision History outcome references are stale. These operations preserve append-only single-lineage history.
 
 Seal root: `.seal/` (override with `$DRIFTSEAL_HOME`); outcome log:
 `.seal/outcomes/events.jsonl`; commit `.seal/` with the code.
@@ -123,7 +124,7 @@ Keep MADR section headings, status tokens, and ids in English.
 Use `proposed|accepted|rejected|deferred|deprecated|superseded` statuses. Link
 existing MADRs from `begin` or `extend`, then reconcile each linked record
 with `driftseal decision update` before successful or partial closure. After a
-merge, `driftseal absorb` remaps colliding ids; it never auto-merges concurrent
-edits of a shared MADR.
+merge, `driftseal absorb` remaps colliding ids and repairs managed Decision History
+outcome references; it never auto-merges concurrent edits of a shared MADR.
 Commit `.seal/madr/` with the code.
 <!-- /driftseal-decisions -->

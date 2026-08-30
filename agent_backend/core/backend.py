@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import json
 import os
 import re
 import stat
@@ -29,10 +30,12 @@ from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
+from .contracts import contract_summary, parse_contract, repair_transform, verify_columns, verify_rows
 from .errors import (
     AmbiguousReferenceError,
     BackendError,
     ConflictError,
+    ContractMismatchError,
     ErrorCode,
     ExecutionFailedError,
     InvalidIntentError,
@@ -51,6 +54,7 @@ from .models.entities import (
     Artifact,
     ArtifactKind,
     Column,
+    ContractStatus,
     Dataset,
     DatasetStatus,
     DatasetVersion,
@@ -58,7 +62,9 @@ from .models.entities import (
     Operation,
     OperationKind,
     OperationStatus,
+    OutputContract,
     Relationship,
+    RowCardinality,
     SemanticRole,
 )
 from .naming import normalize, slugify, tokens
@@ -321,6 +327,26 @@ class Backend:
         if op and op.canonical_ir:
             body["canonical_intent"] = op.canonical_ir
         return self._with_notes(body, notes)
+
+    @semantic_operation("get_output_contract")
+    def get_output_contract(self, *, contract_id: str | None = None, principal: str | None = None) -> dict[str, Any]:
+        """The output contract the workspace currently holds (or one by id), with its history."""
+        if contract_id is not None:
+            contract = self.store.get_contract(str(contract_id))
+            if contract is None:
+                raise NotFoundError(f"Output contract {contract_id!r} does not exist.", field="contract_id",
+                                    candidates=[c.id for c in self.store.list_contracts(limit=10)])
+        else:
+            contract = self.store.latest_contract()
+        if contract is None:
+            return {"status": "success", "contract": None,
+                    "summary": "No output contract has been declared in this workspace."}
+        return {
+            "status": "success",
+            "contract": contract_summary(contract),
+            "history": self.audit.for_entity(contract.id),
+            "summary": self._contract_sentence(contract),
+        }
 
     @semantic_operation("get_operation")
     def get_operation(self, operation_id: str, *, principal: str | None = None) -> dict[str, Any]:
@@ -1232,7 +1258,13 @@ class Backend:
                                          hint="Give the file to write, for example a path ending in .csv.")
             if target.exists() and not overwrite:
                 raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
+            # The contract the agent declared while the requirement was fresh is the
+            # reference; the export attempted now is the thing checked (MADR 0007, 0008).
+            contract = self.store.latest_contract()
             steps = [PlanStep("Scan", f"Scan({ds.name} v{ds.version})", {"table": version.physical_table})]
+            if contract is not None:
+                steps.append(PlanStep("VerifyContract", f"VerifyContract({self._contract_shape(contract)})",
+                                      {"contract_id": contract.id, "revision": contract.revision}))
             if spec is not None:
                 detail = f"{len(spec.columns)} column rule(s)" if spec.columns else "file defaults"
                 steps.append(PlanStep("FormatValues", f"FormatValues({detail})", {"format_spec": spec_payload}))
@@ -1240,10 +1272,14 @@ class Backend:
             steps.append(PlanStep("Audit", "Audit(dataset.exported)"))
             plan = ExecutionPlan(steps=steps, physical_inputs={ds.id: version.physical_table}, output_table=None)
             op.canonical_ir = {"operation": "export", "dataset_id": ds.id, "version": ds.version, "path": str(target),
-                               "format": fmt, "format_spec": spec_payload}
+                               "format": fmt, "format_spec": spec_payload,
+                               "contract": {"id": contract.id, "revision": contract.revision} if contract else None}
             op.execution_plan = plan.to_dict()
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
+            # Verified before anything is read or written: a mismatch costs no work
+            # and leaves an existing target untouched.
+            evidence = self._verify_contract(contract, ds, version) if contract is not None else None
             renderer: ValueRenderer | None = None
             columns: list[str] = []
             data: list[Any] = []
@@ -1267,10 +1303,22 @@ class Backend:
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
             now = self.clock()
             with self.store.transaction():
+                exported_details = {"path": str(target), "format": fmt, "rows": rows, "content_hash": content_hash,
+                                    "version": ds.version, "format_spec": spec_payload}
+                if contract is not None and evidence is not None:
+                    contract.status = ContractStatus.SATISFIED
+                    contract.satisfied_by = op.id
+                    contract.dataset_id = ds.id
+                    contract.dataset_version = ds.version
+                    contract.updated_at = now
+                    self.store.update_contract(contract)
+                    self.audit.record(event_type="output_contract.satisfied", entity_type="output_contract",
+                                      entity_id=contract.id, operation_id=op.id, now=now, actor=principal,
+                                      details={**evidence, "dataset": ds.name, "path": str(target), "format": fmt,
+                                               "content_hash": content_hash})
+                    exported_details["contract"] = evidence
                 self.audit.record(event_type="dataset.exported", entity_type="dataset", entity_id=ds.id,
-                                  operation_id=op.id, now=now, actor=principal,
-                                  details={"path": str(target), "format": fmt, "rows": rows, "content_hash": content_hash,
-                                           "version": ds.version, "format_spec": spec_payload})
+                                  operation_id=op.id, now=now, actor=principal, details=exported_details)
                 response = {
                     "status": "success",
                     "operation_id": op.id,
@@ -1286,9 +1334,166 @@ class Backend:
                 }
                 if spec_payload is not None:
                     response["format_spec"] = spec_payload
+                if contract is not None and evidence is not None:
+                    response["contract"] = {**contract_summary(contract), "verified": evidence}
+                    response["summary"] += f" Output contract {contract.id} (revision {contract.revision}) is satisfied."
                 self._complete(op, response, None, None, now)
             log_event("state.committed", operation_id=op.id, dataset_id=ds.id, exported=str(target))
             return self._with_notes(response, notes)
+
+    @semantic_operation("declare_output")
+    def declare_output(
+        self,
+        columns: Any,
+        *,
+        rows: Any = None,
+        description: str | None = None,
+        reason: str | None = None,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
+        """Declare the shape of the deliverable before (or while) working towards it.
+
+        The declaration is trusted as given (MADR 0008) and held by the backend;
+        every ``export_result`` is then checked against it (MADR 0007). One
+        contract is current per workspace: declaring while one is open and
+        unsatisfied is an amendment and needs a ``reason``, which is recorded.
+        Re-declaring the same shape changes nothing and is not an error.
+        """
+        spec = parse_contract(columns, rows, description)
+        intent = _jsonable({"columns": columns, "rows": rows, "description": description, "reason": reason})
+        with self._operation(OperationKind.DECLARE_OUTPUT, intent, principal) as op:
+            op.canonical_ir = {
+                "operation": "declare_output",
+                "columns": [{"name": c.name, "type": str(c.logical_type) if c.logical_type else None} for c in spec.columns],
+                "rows": str(spec.rows) if spec.rows else None,
+                "row_keys": spec.row_keys,
+            }
+            current = self.store.latest_contract()
+            now = self.clock()
+            if current is not None and current.status == ContractStatus.OPEN:
+                if spec.same_shape_as(current):
+                    with self.store.transaction():
+                        response = {
+                            "status": "success", "operation_id": op.id, "contract": contract_summary(current),
+                            "unchanged": True,
+                            "summary": f"Output contract {current.id} already declares this shape (revision "
+                                       f"{current.revision}); nothing changed. {self._contract_sentence(current)}",
+                        }
+                        self._complete(op, response, None, None, now)
+                    return response
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ConflictError(
+                        f"Output contract {current.id} is open and declares {self._contract_shape(current)}; "
+                        "changing it is an amendment and needs a reason.",
+                        field="reason",
+                        details={"contract": contract_summary(current)},
+                        hint="Pass reason='why the requirement changed' to amend the open contract, or export what it declares.",
+                    )
+                before = contract_summary(current)
+                current.columns = spec.columns
+                current.rows = spec.rows
+                current.row_keys = spec.row_keys
+                if spec.description:
+                    current.description = spec.description
+                current.revision += 1
+                current.operation_id = op.id
+                current.updated_at = now
+                with self.store.transaction():
+                    self.store.update_contract(current)
+                    self.audit.record(event_type="output_contract.amended", entity_type="output_contract",
+                                      entity_id=current.id, operation_id=op.id, now=now, actor=principal,
+                                      details={"reason": reason.strip(), "before": before,
+                                               "after": contract_summary(current), "revision": current.revision})
+                    response = {
+                        "status": "success", "operation_id": op.id, "contract": contract_summary(current),
+                        "amended": True, "reason": reason.strip(),
+                        "summary": f"Output contract {current.id} amended to revision {current.revision}: "
+                                   f"{self._contract_sentence(current)}",
+                    }
+                    self._complete(op, response, None, None, now)
+                log_event("state.committed", operation_id=op.id, contract_id=current.id, amended=True)
+                return response
+            contract = OutputContract(id=self.store.allocate_id("oc"), columns=spec.columns, rows=spec.rows,
+                                      row_keys=spec.row_keys, description=spec.description, operation_id=op.id,
+                                      created_at=now, updated_at=now)
+            with self.store.transaction():
+                self.store.insert_contract(contract)
+                details: dict[str, Any] = {"contract": contract_summary(contract)}
+                if current is not None:
+                    details["supersedes"] = current.id
+                self.audit.record(event_type="output_contract.declared", entity_type="output_contract",
+                                  entity_id=contract.id, operation_id=op.id, now=now, actor=principal, details=details)
+                response = {
+                    "status": "success", "operation_id": op.id, "contract": contract_summary(contract),
+                    "summary": f"Output contract {contract.id} declared: {self._contract_sentence(contract)}",
+                }
+                self._complete(op, response, None, None, now)
+            log_event("state.committed", operation_id=op.id, contract_id=contract.id)
+            return response
+
+    def _verify_contract(self, contract: OutputContract, ds: Dataset, version: DatasetVersion) -> dict[str, Any]:
+        """Hold a dataset to the contract; the evidence returned goes into the audit event."""
+        actual = [(c.name, c.logical_type) for c in ds.columns]
+        problems = verify_columns(contract, actual)
+        distinct: int | None = None
+        names = {n for n, _ in actual}
+        if contract.rows == RowCardinality.ONE_PER and all(k in names for k in contract.row_keys) and version.row_count > 0:
+            distinct = self.engine.count_distinct_rows(version.physical_table, contract.row_keys)
+        if contract.rows != RowCardinality.ONE_PER or distinct is not None or version.row_count == 0:
+            problems += verify_rows(contract, version.row_count, distinct)
+        if problems:
+            repair = repair_transform(contract, problems)
+            if repair is not None:
+                first = (f"Reshape it with materialize_result(source={ds.name!r}, transform={json.dumps(repair, ensure_ascii=False)}) "
+                         "and export that dataset, or")
+            else:
+                first = "Produce a dataset with the declared shape and export that, or"
+            details: dict[str, Any] = {
+                "contract": contract_summary(contract),
+                "actual": {"dataset": ds.name, "version": ds.version, "rows": version.row_count,
+                           "columns": [{"name": n, "type": str(t)} for n, t in actual]},
+                "problems": [p.to_dict() for p in problems],
+            }
+            if repair is not None:
+                details["repair"] = repair
+            raise ContractMismatchError(
+                f"{ds.name} does not have the shape declared in output contract {contract.id}: "
+                + " ".join(p.message for p in problems),
+                field="dataset",
+                candidates=[n for n, _ in actual],
+                details=details,
+                hint=first + " call declare_output again with a reason if the requirement itself changed.",
+            )
+        evidence: dict[str, Any] = {"contract_id": contract.id, "revision": contract.revision,
+                                    "columns": [n for n, _ in actual], "rows": version.row_count}
+        if contract.rows is not None:
+            evidence["cardinality"] = str(contract.rows)
+        if distinct is not None:
+            evidence["distinct_keys"] = distinct
+        return evidence
+
+    @staticmethod
+    def _contract_shape(contract: OutputContract) -> str:
+        text = f"{contract.id} rev {contract.revision}: columns [{', '.join(c.name for c in contract.columns)}]"
+        if contract.rows == RowCardinality.ONE_PER:
+            text += f", one row per [{', '.join(contract.row_keys)}]"
+        elif contract.rows is not None:
+            text += f", rows {contract.rows.replace('_', ' ')}"
+        return text
+
+    @staticmethod
+    def _contract_sentence(contract: OutputContract) -> str:
+        columns = ", ".join(c.name + (f" ({c.logical_type})" if c.logical_type else "") for c in contract.columns)
+        text = f"the exported file must carry exactly the columns [{columns}] in this order"
+        if contract.rows == RowCardinality.ONE:
+            text += " and exactly one row"
+        elif contract.rows == RowCardinality.AT_LEAST_ONE:
+            text += " and at least one row"
+        elif contract.rows == RowCardinality.ONE_PER:
+            text += f" and one row per [{', '.join(contract.row_keys)}]"
+        if contract.status == ContractStatus.SATISFIED:
+            return text + f"; satisfied by {contract.satisfied_by}."
+        return text + "; export_result will refuse anything else."
 
     @staticmethod
     def _publish_export(staged: Path, target: Path, overwrite: bool) -> None:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..errors import BackendError, InvalidIntentError, InvalidTransformError
+from ..errors import BackendError, InvalidIntentError, InvalidTransformError, NotFoundError
 from ..ir import (
     AggregateFunction,
     AggregateStep,
@@ -59,6 +59,20 @@ _STEP_TYPE_ALIASES = {
     "derive": "derive", "compute": "derive", "mutate": "derive", "add_column": "derive",
     "join": "join", "merge": "join",
 }
+# The keys each step handler accepts, besides "type". A single-key untyped step
+# whose value is an object made only of these keys carries the step body nested
+# under its own name: {"aggregate": {"group_by": [...], "measures": [...]}}.
+_STEP_BODY_KEYS: dict[str, set[str]] = {
+    "select": {"select", "fields", "columns"},
+    "filter": {"filter", "where", "predicate", "condition", "expression", "expr"},
+    "aggregate": {"group_by", "groupby", "by", "measures", "metrics", "metric", "aggregate"},
+    "sort": {"sort", "by", "keys", "order_by", "sort_by", "direction", "order", "field", "fields", "column", "columns"},
+    "limit": {"limit", "n", "count", "offset", "top", "head"},
+    "rename": {"rename", "mappings", "from", "to"},
+    "derive": {"derive", "compute", "name", "as", "alias", "expression", "expr", "formula"},
+    "join": {"join", "right", "with", "dataset", "on", "how", "kind", "columns", "select"},
+}
+_AGGREGATE_BODY_KEYS = {"group_by", "groupby", "by", "measures", "metrics", "metric"}
 _IMPLICIT_ORDER = ("join", "filter", "derive", "select", "aggregate", "sort", "limit", "rename")
 _IMPLICIT_KEYS = {
     "join": {"join"},
@@ -73,6 +87,10 @@ _IMPLICIT_KEYS = {
 
 
 _ALIAS_RE = re.compile(r"""^(?P<head>.+?)\s+as\s+(?P<alias>"[^"]+"|'[^']+'|[^\s"']+)\s*$""", re.IGNORECASE)
+
+
+def _looks_like_expression(text: str) -> bool:
+    return any(ch in text for ch in "()+-*/%<>=|'") and not text.strip().startswith('"')
 
 
 def split_alias(text: str) -> tuple[str, str | None]:
@@ -166,6 +184,11 @@ class TransformResolver:
             raise InvalidTransformError(f"Each step must be an object, got {step!r}.", field="transform")
         raw = pick(step, "type", "op", "operation")
         if raw is None:
+            if len(step) == 1:
+                (key, value), = step.items()
+                step_type = _STEP_TYPE_ALIASES.get(str(key).lower())
+                if step_type and isinstance(value, dict) and value and set(value) <= _STEP_BODY_KEYS[step_type]:
+                    return [{"type": step_type, **value}]
             return self._implicit_steps(step)
         step_type = _STEP_TYPE_ALIASES.get(str(raw).lower())
         if step_type is None:
@@ -222,7 +245,7 @@ class TransformResolver:
         return (produced if isinstance(produced, list) else [produced]), scope
 
     def _step_select(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "select", "fields", "columns"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["select"] | {"type"}, where)
         raw = pick(loose, "select", "fields", "columns")
         items = [raw] if isinstance(raw, (str, dict)) else raw
         if not isinstance(items, list) or not items:
@@ -283,7 +306,7 @@ class TransformResolver:
         return field, alias
 
     def _step_filter(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "filter", "where", "predicate", "condition", "expression", "expr"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["filter"] | {"type"}, where)
         raw = pick(loose, "filter", "where", "predicate", "condition", "expression", "expr")
         if raw is None:
             raise InvalidTransformError("filter needs a predicate.", field=where)
@@ -295,10 +318,19 @@ class TransformResolver:
         return FilterStep(predicate=predicate, output_schema=scope.refs()), scope
 
     def _step_aggregate(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "group_by", "groupby", "by", "measures", "metrics", "metric", "aggregate"}, where)
+        if isinstance(loose.get("aggregate"), dict) and set(loose["aggregate"]) & _AGGREGATE_BODY_KEYS:
+            # {"aggregate": {"group_by": ..., "measures": ...}}: the body nested under its own key
+            loose = {**loose["aggregate"], **{k: v for k, v in loose.items() if k != "aggregate"}}
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["aggregate"] | {"type"}, where)
         raw_group = pick(loose, "group_by", "groupby", "by", default=[])
-        group_names = [raw_group] if isinstance(raw_group, str) else list(raw_group or [])
-        group_fields = [self.fields.resolve(n, scope, field=f"{where}.group_by", notes=notes) for n in group_names]
+        group_items = [raw_group] if isinstance(raw_group, (str, dict)) else list(raw_group or [])
+        pre_steps: list[Step] = []
+        group_fields: list[ScopeField] = []
+        for item in group_items:
+            field, derived, scope = self._group_key(item, scope, where, notes)
+            if derived is not None:
+                pre_steps.append(derived)
+            group_fields.append(field)
         self._check_unique([f.name for f in group_fields], f"{where}.group_by")
 
         raw_measures = pick(loose, "measures", "metrics", "metric", "aggregate", default=[])
@@ -316,7 +348,38 @@ class TransformResolver:
         out_fields = [ScopeField(name=f.name, logical_type=f.logical_type, column_id=f.column_id, aliases=f.aliases, semantic_role=f.semantic_role) for f in group_fields]
         out_fields += [ScopeField(name=m.alias, logical_type=m.logical_type, semantic_role=SemanticRole.MEASURE) for m in measures]
         new_scope = scope.with_fields(out_fields)
-        return AggregateStep(group_by=[f.ref() for f in group_fields], measures=measures, output_schema=new_scope.refs()), new_scope
+        step = AggregateStep(group_by=[f.ref() for f in group_fields], measures=measures, output_schema=new_scope.refs())
+        return pre_steps + [step], new_scope
+
+    def _group_key(self, item: Any, scope: Scope, where: str, notes: list[ResolutionNote]):
+        """A grouping key: a field, or an expression that is derived first and grouped by its alias.
+
+        ``"strftime(t, '%Y-%m-%d') as day"`` or ``{"day": "strftime(t, '%Y-%m-%d')"}``
+        become a derive step ahead of the aggregate; the aggregate then groups by
+        ``day`` like any other field. An expression without a name is refused
+        rather than named on the agent's behalf.
+        """
+        field_where = f"{where}.group_by"
+        if isinstance(item, dict):
+            name, expression = self._derive_pair(item, field_where)
+        elif isinstance(item, str):
+            head, alias = split_alias(item)
+            if alias is None:
+                try:
+                    return self.fields.resolve(item, scope, field=field_where, notes=notes), None, scope
+                except NotFoundError:
+                    if not _looks_like_expression(item):
+                        raise
+                    raise InvalidTransformError(
+                        f"group_by cannot use the expression {item!r} without a name.", field=field_where,
+                        hint=f'Name it: "{item} as day", or derive it first and group by the new field.',
+                    ) from None
+            name, expression = alias, head
+        else:
+            raise InvalidTransformError(f"Invalid group_by key {item!r}.", field=field_where)
+        derived, new_scope = self._derive_one(name, expression, scope, field_where, notes)
+        notes.append(ResolutionNote(field_where, str(item), derived.name, "derived before grouping"))
+        return new_scope.get(derived.name), derived, new_scope
 
     def _measure(self, loose: Any, scope: Scope, where: str, notes: list[ResolutionNote]) -> Measure:
         if isinstance(loose, str):
@@ -356,8 +419,7 @@ class TransformResolver:
         return Measure(function=function, field=field.ref(), alias=slugify(alias or f"{function}_{field.name}"), logical_type=result_type)
 
     def _step_sort(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "sort", "by", "keys", "order_by", "sort_by", "direction", "order",
-                                    "field", "fields", "column", "columns"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["sort"] | {"type"}, where)
         raw = pick(loose, "sort", "by", "keys", "order_by", "sort_by", "field", "fields", "column", "columns")
         if "order" in loose:
             # "order" is a direction when it is asc/desc, otherwise the list of keys.
@@ -400,7 +462,7 @@ class TransformResolver:
         return SortStep(keys=keys, output_schema=scope.refs()), scope
 
     def _step_limit(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "limit", "n", "count", "offset", "top", "head"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["limit"] | {"type"}, where)
         raw = pick(loose, "limit", "n", "count", "top", "head")
         if isinstance(raw, dict):
             reject_unknown_keys(raw, {"limit", "n", "count", "offset"}, where)
@@ -418,7 +480,7 @@ class TransformResolver:
         return LimitStep(limit=limit, offset=offset, output_schema=scope.refs()), scope
 
     def _step_rename(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "rename", "mappings", "from", "to"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["rename"] | {"type"}, where)
         raw = pick(loose, "rename", "mappings")
         pairs: list[tuple[Any, Any]] = []
         if raw is None and "from" in loose:
@@ -454,7 +516,7 @@ class TransformResolver:
         return RenameStep(mappings=mappings, output_schema=new_scope.refs()), new_scope
 
     def _step_derive(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "derive", "compute", "name", "as", "alias", "expression", "expr", "formula"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["derive"] | {"type"}, where)
         raw = pick(loose, "derive", "compute")
         name = pick(loose, "name", "as", "alias")
         expression = pick(loose, "expression", "expr", "formula")
@@ -530,7 +592,7 @@ class TransformResolver:
         return DeriveStep(name=new_name, expression=expr, logical_type=expr.logical_type, output_schema=new_scope.refs()), new_scope
 
     def _step_join(self, loose, scope, where, context, notes, used):
-        reject_unknown_keys(loose, {"type", "join", "right", "with", "dataset", "on", "how", "kind", "columns", "select"}, where)
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["join"] | {"type"}, where)
         raw_right = pick(loose, "right", "with", "dataset", "join")
         if isinstance(raw_right, dict) and ("on" in raw_right or "how" in raw_right):
             loose = {**raw_right, **{k: v for k, v in loose.items() if k not in ("join", "right", "with", "dataset")}}

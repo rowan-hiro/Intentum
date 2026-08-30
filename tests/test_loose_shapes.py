@@ -103,3 +103,80 @@ def test_strftime_computes_a_date_part(backend, orders):
     assert rows(response) == [["2026-08", 12]]
     wrong = backend.transform_dataset("orders", {"derive": {"month": "strftime(region, '%Y-%m')"}})
     assert wrong["code"] == "TYPE_MISMATCH"
+
+
+# -- shapes from the second measurement (examples/dataspace/README.md, 2026-08-28) --
+
+def test_strftime_accepts_the_pattern_first_and_says_so(backend, orders):
+    """Thirteen refusals in the task_329 runs were strftime('%Y-%m-%d', column)."""
+    response = backend.transform_dataset(
+        "orders", {"derive": {"day": "strftime('%Y-%m-%d', order_date)"}, "select": ["day"], "limit": 1}
+    )
+    assert rows(response) == [["2026-08-26"]]
+    assert [n["reason"] for n in response["resolution"]] == ["arguments reordered to the function's signature"]
+    ir = backend.get_operation(response["operation_id"])["canonical_ir"]
+    args = ir["steps"][0]["expression"]["args"]
+    assert [a["kind"] for a in args] == ["column", "literal"]  # one canonical order in the IR
+
+
+def test_type_error_on_a_function_names_its_signature(backend, orders):
+    wrong = backend.transform_dataset("orders", {"derive": {"m": "strftime(region, '%Y-%m')"}})
+    assert wrong["code"] == "TYPE_MISMATCH"
+    assert "strftime(temporal, string)" in wrong["message"]
+    assert wrong["details"] == {"signature": "strftime(temporal, string)", "argument": 1, "actual": "string"}
+    arity = backend.transform_dataset("orders", {"derive": {"m": "strftime(order_date)"}})
+    assert arity["code"] == "INVALID_TRANSFORM" and arity["details"]["signature"] == "strftime(temporal, string)"
+
+
+def test_date_and_date_trunc_give_typed_calendar_keys(backend, orders):
+    response = backend.transform_dataset(
+        "orders", {"derive": {"month": "date_trunc('month', order_date)", "d": "date(order_date)"},
+                   "group_by": ["month"], "metric": "count"}
+    )
+    assert rows(response) == [["2026-08-01", 12]]
+    assert [c["type"] for c in response["result"]["columns"]] == ["date", "integer"]
+    swapped = backend.transform_dataset("orders", {"derive": {"month": "date_trunc(order_date, 'month')"}, "select": ["month"], "limit": 1})
+    assert rows(swapped) == [["2026-08-01"]]
+    bad = backend.transform_dataset("orders", {"derive": {"h": "date_trunc('hour', order_date)"}})
+    assert bad["code"] == "INVALID_TRANSFORM" and bad["details"]["allowed_parts"] == ["day", "week", "month", "quarter", "year"]
+
+
+def test_group_by_a_named_expression_derives_it_first(backend, orders):
+    """The model tried to group by the expression text itself; a named expression is the shape that works."""
+    response = backend.transform_dataset(
+        "orders", {"group_by": ["strftime(order_date, '%Y-%m') as month"], "measures": ["count"]}
+    )
+    assert names(response) == ["month", "count"]
+    assert rows(response) == [["2026-08", 12]]
+    assert response["plan"].startswith("Scan(orders v1) → Derive(month = ")
+    assert any(n["reason"] == "derived before grouping" for n in response["resolution"])
+    as_object = backend.transform_dataset(
+        "orders", {"group_by": [{"month": "strftime(order_date, '%Y-%m')"}, "region"], "measures": ["count"], "sort": "region"}
+    )
+    assert names(as_object) == ["month", "region", "count"] and rows(as_object)[0] == ["2026-08", "East", 3]
+    unnamed = backend.transform_dataset("orders", {"group_by": ["strftime(order_date, '%Y-%m')"], "measures": ["count"]})
+    assert unnamed["code"] == "INVALID_TRANSFORM" and " as day" in unnamed["hint"]
+    missing = backend.transform_dataset("orders", {"group_by": ["colour"], "measures": ["count"]})
+    assert missing["code"] == "NOT_FOUND"
+
+
+def test_in_list_with_brackets(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "region in ['East', 'North']", "group_by": ["region"], "metric": "count"})
+    assert sorted(rows(response)) == [["East", 3], ["North", 3]]
+    negated = backend.transform_dataset("orders", {"filter": "quantity not in [1, 2, 3]", "select": ["quantity"]})
+    assert all(q > 3 for (q,) in rows(negated))
+    mixed = backend.transform_dataset("orders", {"filter": "region in ['East', 'North')"})
+    assert mixed["code"] == "INVALID_TRANSFORM" and "Expected ']'" in mixed["message"]
+
+
+def test_step_body_nested_under_its_own_key(backend, orders):
+    """{"aggregate": {"group_by": ..., "measures": ...}}, alone, in a list and inside a compound step."""
+    body = {"group_by": ["region"], "measures": [{"function": "sum", "field": "amount", "alias": "total"}]}
+    alone = backend.transform_dataset("orders", {"aggregate": body})
+    assert names(alone) == ["region", "total"] and len(rows(alone)) == 4
+    listed = backend.transform_dataset("orders", [{"filter": "amount > 300"}, {"aggregate": body}, {"sort": {"field": "total", "direction": "desc"}}, {"limit": {"limit": 1}}])
+    assert rows(listed) == [["East", 1494.0]]
+    compound = backend.transform_dataset("orders", {"filter": "amount > 300", "aggregate": body, "sort": "-total", "limit": 1})
+    assert rows(compound) == [["East", 1494.0]]
+    single_measure = backend.transform_dataset("orders", {"aggregate": {"function": "max", "field": "amount"}})
+    assert names(single_measure) == ["max_amount"] and rows(single_measure) == [[900.0]]

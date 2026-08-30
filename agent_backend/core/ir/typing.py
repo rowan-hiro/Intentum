@@ -12,7 +12,7 @@ from typing import Callable
 
 from ..errors import InvalidTransformError, TypeMismatchError
 from ..models.entities import LogicalType
-from .canonical import AggregateFunction
+from .canonical import AggregateFunction, LiteralExpr
 
 NUMERIC = frozenset({LogicalType.INTEGER, LogicalType.FLOAT})
 TEMPORAL = frozenset({LogicalType.DATE, LogicalType.TIMESTAMP})
@@ -66,6 +66,13 @@ def _bool(_: list[LogicalType]) -> LogicalType:
     return LogicalType.BOOLEAN
 
 
+def _date(_: list[LogicalType]) -> LogicalType:
+    return LogicalType.DATE
+
+
+DATE_TRUNC_PARTS = ("day", "week", "month", "quarter", "year")
+
+
 FUNCTIONS: dict[str, FunctionSpec] = {
     spec.name: spec
     for spec in (
@@ -86,6 +93,10 @@ FUNCTIONS: dict[str, FunctionSpec] = {
         FunctionSpec("year", (_tmp,), _int),
         FunctionSpec("month", (_tmp,), _int),
         FunctionSpec("day", (_tmp,), _int),
+        # Calendar keys stay typed: date() drops the time of day, date_trunc() rounds
+        # down to a calendar unit; both give a DATE a later step can group or sort by.
+        FunctionSpec("date", (_tmp,), _date, sql="CAST({0} AS DATE)"),
+        FunctionSpec("date_trunc", (_str, _tmp), _date, sql="CAST(date_trunc({0}, {1}) AS DATE)"),
         # Rendering a value as text belongs to export (MADR 0005); strftime is here so a
         # date part can be *computed* (a month key to group by), not to format an answer.
         FunctionSpec("strftime", (_tmp, _str), _string),
@@ -101,6 +112,56 @@ def describe_type(t: LogicalType) -> str:
     return str(t)
 
 
+def _describe_arg(arg: ArgSpec) -> str:
+    kind = {NUMERIC: "numeric", STRINGY: "string", TEMPORAL: "temporal", ANY: "any",
+            frozenset({LogicalType.INTEGER}): "integer"}.get(arg.allowed)
+    if kind is None:
+        kind = "|".join(sorted(str(t) for t in arg.allowed))
+    return f"[{kind}]" if arg.optional else kind
+
+
+def signature(name: str) -> str:
+    """The call shape an error message can point at, e.g. ``strftime(temporal, string)``."""
+    spec = FUNCTIONS[name]
+    parts = [_describe_arg(a) for a in spec.args]
+    if spec.variadic:
+        parts.append("...")
+    return f"{name}({', '.join(parts)})"
+
+
+def _fits(spec: FunctionSpec, arg_types: list[LogicalType]) -> bool:
+    return all(
+        t == LogicalType.UNKNOWN or t in spec.args[min(i, len(spec.args) - 1)].allowed
+        for i, t in enumerate(arg_types)
+    )
+
+
+def arguments_are_swapped(name: str, arg_types: list[LogicalType]) -> bool:
+    """True when a two-argument call fits its signature only with the arguments exchanged.
+
+    ``strftime('%Y-%m-%d', x)`` is how Python and DuckDB also accept the call;
+    the canonical IR keeps one order, so the resolver reorders and says so.
+    """
+    spec = FUNCTIONS.get(name)
+    if spec is None or spec.variadic or len(spec.args) != 2 or len(arg_types) != 2:
+        return False
+    return not _fits(spec, arg_types) and _fits(spec, arg_types[::-1])
+
+
+def validate_function_arguments(name: str, args: list) -> None:
+    """Checks on argument *values* the type rules cannot express (a calendar unit must be one we know)."""
+    if name == "date_trunc" and args:
+        part = args[0]
+        if not isinstance(part, LiteralExpr) or not isinstance(part.value, str) or part.value.lower() not in DATE_TRUNC_PARTS:
+            raise InvalidTransformError(
+                f"date_trunc needs a calendar unit as its first argument, one of {list(DATE_TRUNC_PARTS)}; "
+                f"got {part.value!r}." if isinstance(part, LiteralExpr) else
+                f"date_trunc needs a calendar unit literal as its first argument, one of {list(DATE_TRUNC_PARTS)}.",
+                field="expression",
+                details={"allowed_parts": list(DATE_TRUNC_PARTS), "signature": signature(name)},
+            )
+
+
 def function_result_type(name: str, arg_types: list[LogicalType]) -> LogicalType:
     spec = FUNCTIONS.get(name)
     if spec is None:
@@ -114,16 +175,18 @@ def function_result_type(name: str, arg_types: list[LogicalType]) -> LogicalType
         raise InvalidTransformError(
             f"Function {name!r} expects {len(required)}"
             + ("" if len(required) == len(spec.args) and not spec.variadic else " or more")
-            + f" argument(s), got {len(arg_types)}.",
+            + f" argument(s), got {len(arg_types)}. Signature: {signature(name)}.",
             field="expression",
+            details={"signature": signature(name)},
         )
     for index, actual in enumerate(arg_types):
         spec_arg = spec.args[min(index, len(spec.args) - 1)]
         if actual not in spec_arg.allowed and actual != LogicalType.UNKNOWN:
             raise TypeMismatchError(
-                f"Argument {index + 1} of {name!r} has type {actual}, expected one of "
-                f"{sorted(str(t) for t in spec_arg.allowed)}.",
+                f"Argument {index + 1} of {name!r} has type {actual}, expected {_describe_arg(spec_arg)}. "
+                f"Signature: {signature(name)}.",
                 field="expression",
+                details={"signature": signature(name), "argument": index + 1, "actual": str(actual)},
             )
     if spec.name == "coalesce":
         non_unknown = [t for t in arg_types if t != LogicalType.UNKNOWN]

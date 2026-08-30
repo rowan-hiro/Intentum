@@ -7,6 +7,15 @@ deterministically, commits it atomically, and returns a structured result.
 
 > Agent expresses intent. Backend owns correctness.
 
+What the backend owns is consistency, not the truth of the task: it never sees
+the question the agent is answering, so it takes the agent's *fresh* output —
+how it read the requirement, what it just computed — as given, and holds the
+agent to everything it later reproduces from memory. An export is checked
+against the output contract declared at the start; a replayed request against
+its recorded fingerprint. The failure this exists to catch is *knew but did
+not do*; *did not know* belongs to the model and the agent framework
+(`.seal/madr/0004`, `0007`, `0008`).
+
 Research hypothesis under test: a general-purpose agent interacts with a
 structured data system more reliably through a small semantic intent interface
 plus a deterministic backend than by manipulating SQL, JSON, Markdown, metadata
@@ -125,16 +134,23 @@ sort → limit → rename:
 Step types: `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`,
 `derive`, `join`. A step may also be written without `type` when its key names
 it, so `[{"filter": "amount > 100"}, {"sort": "-amount"}, {"limit": 3}]` is a
-pipeline; `select` and `derive` accept SQL-style aliasing
-(`"end_date as report_period"`, `"quantity * unit_price as line_total"`), and
-`derive` accepts several `{name, expression}` pairs at once.
+pipeline and `{"aggregate": {"group_by": [...], "measures": [...]}}` is an
+aggregate step with its body nested under its own key; `select` and `derive`
+accept SQL-style aliasing (`"end_date as report_period"`,
+`"quantity * unit_price as line_total"`), `derive` accepts several
+`{name, expression}` pairs at once, and `group_by` accepts a named expression
+(`"date_trunc('day', observation_time) as day"`), which is derived ahead of
+the aggregate.
 
 Expressions may be strings (`"quantity * unit_price"`,
-`"amount > 100 and region = 'West'"`) or object trees; identifiers are always
-resolved against the current schema and functions come from an allowlist
-(`abs round floor ceil upper lower trim length substr substring left right
-concat coalesce year month day strftime is_null contains starts_with
-ends_with`; `||` is read as `concat`). There is no SQL passthrough.
+`"amount > 100 and region in ['West', 'East']"`) or object trees; identifiers
+are always resolved against the current schema and functions come from an
+allowlist (`abs round floor ceil upper lower trim length substr substring left
+right concat coalesce year month day date date_trunc strftime is_null contains
+starts_with ends_with`; `||` is read as `concat`). A two-argument call written
+the other way round (`strftime('%Y-%m-%d', ts)`) is reordered to its signature
+and reported as a resolution note; a type error names the signature it
+expected. There is no SQL passthrough.
 
 ### Exporting an answer
 
@@ -157,6 +173,34 @@ locale-dependent directives refused) and `null_text`. The dataset itself keeps
 its types; two differently formatted exports of the same version differ only in
 the file.
 
+### Output contracts
+
+The shape of the deliverable is a contract the agent can write down while the
+requirement is in front of it, and the backend holds every export to it
+(MADR 0007):
+
+```json
+{"columns": ["treatmentname"], "rows": {"one_per": ["treatmentname"]}}
+```
+
+`declare_output` records the ordered column names (optionally typed), the row
+cardinality (`one`, `at_least_one`, `{"one_per": [keys]}`) and a description
+as an operation and an audit event. `export_result` then checks the dataset
+against the current contract — names, order, declared types by family, row
+cardinality — before anything is read or written. A mismatch is a recoverable
+`CONTRACT_MISMATCH` that shows the declared and the actual shape, lists the
+problems, and, when the fix is mechanical, carries the transform that repairs
+it (`{"select": [...]}`, with `rename` for near-miss names); a matching export
+records the contract as satisfied with the evidence (columns, rows, content
+hash) in the audit trail. Changing an open contract needs a `reason`, recorded
+as an amendment with the shape before and after; re-declaring the same shape
+changes nothing; a new contract can be declared freely once the previous one is
+satisfied. Exports without a contract behave as before.
+
+This is the trust model of MADR 0008 made concrete: the declaration made
+fresh is the reference, the export attempted twenty turns later is the thing
+that gets checked, and the check runs outside the agent's context.
+
 ### Failure semantics
 
 Every failure is a structured response, never an exception string:
@@ -171,7 +215,8 @@ Every failure is a structured response, never an exception string:
 
 Codes: `NOT_FOUND`, `AMBIGUOUS_REFERENCE` (rendered as `status: needs_resolution`),
 `INVALID_INTENT`, `INVALID_SCHEMA`, `INVALID_TRANSFORM`, `INVALID_STATE`,
-`TYPE_MISMATCH`, `CONFLICT`, `PERMISSION_DENIED`, `EXECUTION_FAILED`, `INTERNAL`.
+`TYPE_MISMATCH`, `CONFLICT`, `CONTRACT_MISMATCH`, `PERMISSION_DENIED`,
+`EXECUTION_FAILED`, `INTERNAL`.
 
 ## 2. Repository structure
 
@@ -191,6 +236,7 @@ agent_backend/
 │   ├── planner/            explicit execution plan
 │   ├── execution/          IR → SQL compiler, executor
 │   ├── export/             export format specification (value rendering at the file boundary)
+│   ├── contracts/          output contracts: declared deliverable shape, checked at export
 │   ├── lineage/            lineage recording and traversal
 │   └── audit/              audit trail
 ├── storage/
@@ -259,8 +305,9 @@ Claude Code: `claude mcp add agent-backend -- uv run --directory /abs/path/to/In
 Tools exposed (all semantic; no SQL, no file or table primitives):
 `list_datasets`, `list_artifacts`, `describe_dataset`, `search_datasets`,
 `import_dataset`, `import_workspace`, `attach_metadata`, `transform_dataset`,
-`materialize_result`, `export_result`, `publish_dataset`, `update_metadata`,
-`delete_dataset`, `restore_dataset`, `get_provenance`, `get_operation`.
+`declare_output`, `materialize_result`, `export_result`, `publish_dataset`,
+`update_metadata`, `delete_dataset`, `restore_dataset`, `get_provenance`,
+`get_operation`, `get_output_contract`.
 
 ## 5. Example MCP calls
 
@@ -282,6 +329,11 @@ Tools exposed (all semantic; no SQL, no file or table primitives):
 //    "columns": ["TotalAssets", "Forex", ...]}, ...],
 //    "unmatched": {"tables": [{"name": "ed_grossdomesticproduct", "line": 88}], "columns": [...]}}
 
+// write the shape of the answer down while the question is in front of you
+{"name": "declare_output", "arguments": {"columns": ["region", "revenue"], "rows": {"one_per": ["region"]}}}
+// → {"status": "success", "operation_id": "op_2", "contract": {"id": "oc_1", "status": "open", "revision": 1, ...},
+//    "summary": "Output contract oc_1 declared: the exported file must carry exactly the columns [region, revenue] ..."}
+
 // preview a transform with fuzzy references
 {"name": "transform_dataset", "arguments": {
   "source": "the orders I imported today",
@@ -300,6 +352,19 @@ Tools exposed (all semantic; no SQL, no file or table primitives):
 
 // retry → idempotent replay, no new dataset
 // → {"status": "success", "idempotent_replay": true, "operation_id": "op_3", "dataset": {"id": "ds_2", ...}}
+
+// export a dataset that carries one column too many → held to the contract, nothing written
+{"name": "export_result", "arguments": {"dataset": "regional_sales_with_counts", "path": "prediction.csv"}}
+// → {"status": "error", "code": "CONTRACT_MISMATCH", "recoverable": true,
+//    "message": "regional_sales_with_counts does not have the shape declared in output contract oc_1: column 'orders' is not in the contract.",
+//    "details": {"contract": {...}, "actual": {...}, "problems": [{"kind": "extra", "column": "orders", ...}],
+//                "repair": {"select": ["region", "revenue"]}},
+//    "hint": "Reshape it with materialize_result(source='regional_sales_with_counts', transform={\"select\": [\"region\", \"revenue\"]}) and export that dataset, or call declare_output again with a reason if the requirement itself changed."}
+
+// the matching export satisfies the contract and records the evidence
+{"name": "export_result", "arguments": {"dataset": "regional_sales", "path": "prediction.csv"}}
+// → {"status": "success", "rows": 4, "columns": ["region", "revenue"], "content_hash": "...",
+//    "contract": {"id": "oc_1", "status": "satisfied", "verified": {"columns": ["region", "revenue"], "rows": 4, "cardinality": "one_per", "distinct_keys": 4}}}
 
 // ambiguity
 {"name": "transform_dataset", "arguments": {"source": "sales", "transform": {"select": ["region"]}}}
@@ -356,7 +421,16 @@ the canonical IR, the full execution plan and the generated SQL.
 - `test_loose_shapes.py`: the intent shapes a model actually produced in the
   DataSpace runs — steps named by their key instead of `type`, `sort` with
   `order` as the key list, `"field as alias"` in `select` and `derive`,
-  `derive` as a list, `||`, string slicing and `strftime`.
+  `derive` as a list, `||`, string slicing and `strftime`; from the second
+  measurement, `strftime` with the pattern first, type errors naming the
+  signature, `date`/`date_trunc`, `group_by` over a named expression, `in
+  [a, b]`, and a step body nested under its own key.
+- `test_contracts.py`: output contracts — declaration, identical
+  re-declaration, amendment with a reason and its audit trail, validation of
+  the declared shape; export held to the contract for extra, missing,
+  renamed, misordered and mistyped columns and for row cardinality, with the
+  repair transform carried in the error; evidence recorded on satisfaction;
+  exports without a contract unchanged.
 - `test_export.py`: export to csv/parquet, overwrite and export-root refusals,
   and the format specification: half-up rounding on the shortest decimal form,
   trailing zeros, whole numbers keeping a decimal, date patterns, null text,
@@ -380,23 +454,24 @@ imports in ~2 s and the task's query runs through the semantic steps.
 
 0. **DataSpace smoke tests** — four public-reference tasks (`task_10`,
    `task_44`, `task_127`, `task_329`) run in both layers.
-   `examples/dataspace_smoke.py --task all --check` (scripted agent, five or
-   six MCP tool calls per task) passes the official evaluator on all four;
-   `examples/dataspace_agent.py` (qwen3.5-35b-a3b through the MCP tools, no
-   SQL or dialect rules in the prompt) passes 3/3 on `task_10` (was 2/3, and
-   27 → 17 mean turns after the export format specification ended the
-   rendering loop) and 3/3 on `task_127`. The six failing runs on
-   `task_44`/`task_329` are measured and attributed in
-   `examples/dataspace/README.md`: four exported the correct values with one
-   column too many, thirteen refusals were `strftime` written pattern-first,
-   the rest were date-part vocabulary and path finding. Next in frequency
-   order: accept `strftime` in either argument order, make the answer-table
-   contract visible at the export boundary, a small date-part vocabulary with
-   `group_by` over a derived expression, `IN` with bracket lists, and an
-   aggregate step nested under its own key. A validated read-only `raw_query`
-   fallback step is recorded as MADR 0002 for the long tail; nothing measured
-   so far has needed it. DataSpace is a validation scenario, not the goal
-   (MADR 0004).
+   `examples/dataspace_smoke.py --task all --check` (scripted agent, six or
+   seven MCP tool calls per task, each declaring its output contract first)
+   passes the official evaluator on all four; `examples/dataspace_agent.py`
+   (qwen3.5-35b-a3b through the MCP tools, no SQL or dialect rules in the
+   prompt) passes 3/3 on `task_10` and `task_127`. The third measurement
+   (2026-08-30, `examples/dataspace/README.md`) re-ran `task_44` and
+   `task_329` after the output contract and the vocabulary the second
+   measurement asked for: the `strftime` refusals are gone, turns and tokens
+   fell on both tasks, and five of six runs again exported the correct values
+   with extra columns — this time columns the agent had *declared*, so the
+   contract check passed on a misread question, and the declarations came
+   late (turns 7–28) rather than fresh. Next: honour `select` after
+   `aggregate` in compound objects, `group_by` without measures as distinct,
+   a semi-join so a filter can reference another dataset instead of a SQL
+   subquery (five refusals), and, in the scenario prompt, asking for the
+   declaration first. A validated read-only `raw_query` fallback step is
+   recorded as MADR 0002 for the long tail; nothing measured so far has
+   needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in
    place, only the operation is missing.

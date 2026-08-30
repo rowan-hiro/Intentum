@@ -56,6 +56,7 @@ class OperationKind(StrEnum):
     DELETE = "delete_dataset"
     RESTORE = "restore_dataset"
     EXPORT = "export_result"
+    DECLARE_OUTPUT = "declare_output"
 
 
 class OperationStatus(StrEnum):
@@ -185,6 +186,45 @@ class Operation(_Entity):
     parent_operation_id: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
+
+
+class ContractStatus(StrEnum):
+    OPEN = "open"
+    SATISFIED = "satisfied"
+
+
+class RowCardinality(StrEnum):
+    ONE = "one"
+    AT_LEAST_ONE = "at_least_one"
+    ONE_PER = "one_per"
+
+
+class ContractColumn(_Entity):
+    name: str
+    logical_type: LogicalType | None = None
+
+
+class OutputContract(_Entity):
+    """The declared shape of the deliverable an agent is working towards.
+
+    Declared while the requirement is fresh, held by the backend, and checked
+    against every export (MADR 0007). ``revision`` counts explicit amendments;
+    ``satisfied_by`` names the latest export that matched it.
+    """
+
+    id: str
+    status: ContractStatus = ContractStatus.OPEN
+    columns: list[ContractColumn]
+    rows: RowCardinality | None = None
+    row_keys: list[str] = Field(default_factory=list)
+    description: str = ""
+    revision: int = 1
+    operation_id: str
+    satisfied_by: str | None = None
+    dataset_id: str | None = None
+    dataset_version: int | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class AuditEvent(_Entity):
