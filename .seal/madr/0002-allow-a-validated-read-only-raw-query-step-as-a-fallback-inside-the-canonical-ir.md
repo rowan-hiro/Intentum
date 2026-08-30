@@ -51,3 +51,10 @@ Still deferred after the task_10 smoke: across one scripted and three model-driv
 Status: Proposed → Proposed
 
 Still deferred after the second measurement. Across four scripted tasks and twelve model-driven runs no answer required SQL: the scripted layer expresses all four tasks with join, filter, derive, aggregate, sort, limit and select, and every model refusal was a loose shape, an argument order, a missing date-part function or an output-contract mistake. Revisit if a measured task needs a window, a tie-aware extremum or a union.
+
+<!-- driftseal-reconciliation: 06c3d536-6de9-4005-8676-1ec12a4c5fa5 -->
+### 2026-08-30T03:48:36.270Z — Outcome `2026-08-28-010`
+
+Status: Proposed → Proposed
+
+Still not needed after the third measurement. The one SQL shape the model reached for, a subquery inside a filter (five times on task_44), is a request to reference another dataset's values, which a semi-join step expresses inside the IR with full provenance; raw_query would hide exactly the reference the trust model (0008) wants visible. Remains proposed.

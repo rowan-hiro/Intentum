@@ -31,3 +31,12 @@ Intentum remains an independent, general backend. Benchmarks are used to validat
 * Some benchmark-driven improvements will be slower to land because they must first be restated generally
 * examples/ carries scenario-specific code, vendored evaluators and prompts; the core carries none
 * A second validation scenario should be added when convenient to keep the abstraction honest
+
+## Decision History
+
+<!-- driftseal-reconciliation: 92994ae6-a73f-422d-a782-4ac094d19382 -->
+### 2026-08-30T03:29:25.267Z — Outcome `2026-08-28-010`
+
+Status: Accepted → Accepted
+
+Boundary sharpened by 0007 and 0008 and stated in README: the backend guards consistency with what the agent declared (knew but did not do), not correctness against a task it never sees (did not know), which belongs to the model and the agent framework. Nothing in core names a benchmark; the contract, the date functions, the argument-order rule, bracket IN lists and nested step bodies were each restated as general requirements before entering core.

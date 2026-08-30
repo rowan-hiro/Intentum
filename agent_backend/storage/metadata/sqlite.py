@@ -14,6 +14,8 @@ from ...core.models.entities import (
     ArtifactKind,
     AuditEvent,
     Column,
+    ContractColumn,
+    ContractStatus,
     Dataset,
     DatasetStatus,
     DatasetVersion,
@@ -22,7 +24,9 @@ from ...core.models.entities import (
     Operation,
     OperationKind,
     OperationStatus,
+    OutputContract,
     Relationship,
+    RowCardinality,
     SemanticRole,
 )
 
@@ -122,6 +126,21 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_audit_entity ON audit_events(entity_id);
+CREATE TABLE IF NOT EXISTS output_contracts (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    columns_json TEXT NOT NULL,
+    rows TEXT,
+    row_keys_json TEXT NOT NULL DEFAULT '[]',
+    description TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    operation_id TEXT NOT NULL,
+    satisfied_by TEXT,
+    dataset_id TEXT,
+    dataset_version INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
     operation_id TEXT NOT NULL,
@@ -553,7 +572,9 @@ class SqliteMetadataStore:
             clauses.append("operation_id = ?")
             params.append(operation_id)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = self.conn.execute(f"SELECT * FROM audit_events{where} ORDER BY created_at, id", params).fetchall()
+        rows = self.conn.execute(
+            f"SELECT * FROM audit_events{where} ORDER BY created_at, CAST(substr(id, 4) AS INTEGER)", params
+        ).fetchall()
         return [
             AuditEvent(
                 id=r["id"],
@@ -567,6 +588,74 @@ class SqliteMetadataStore:
             )
             for r in rows
         ]
+
+    # -- output contracts ------------------------------------------------
+    @staticmethod
+    def _row_to_contract(r: sqlite3.Row) -> OutputContract:
+        return OutputContract(
+            id=r["id"],
+            status=ContractStatus(r["status"]),
+            columns=[ContractColumn(name=c["name"], logical_type=LogicalType(c["type"]) if c.get("type") else None)
+                     for c in json.loads(r["columns_json"])],
+            rows=RowCardinality(r["rows"]) if r["rows"] else None,
+            row_keys=json.loads(r["row_keys_json"]),
+            description=r["description"],
+            revision=int(r["revision"]),
+            operation_id=r["operation_id"],
+            satisfied_by=r["satisfied_by"],
+            dataset_id=r["dataset_id"],
+            dataset_version=r["dataset_version"],
+            created_at=_dt(r["created_at"]),
+            updated_at=_dt(r["updated_at"]),
+        )
+
+    @staticmethod
+    def _contract_values(c: OutputContract) -> tuple[Any, ...]:
+        columns = [{"name": col.name, **({"type": str(col.logical_type)} if col.logical_type else {})} for col in c.columns]
+        return (
+            c.id,
+            str(c.status),
+            json.dumps(columns, ensure_ascii=False),
+            str(c.rows) if c.rows else None,
+            json.dumps(c.row_keys, ensure_ascii=False),
+            c.description,
+            c.revision,
+            c.operation_id,
+            c.satisfied_by,
+            c.dataset_id,
+            c.dataset_version,
+            _iso(c.created_at),
+            _iso(c.updated_at),
+        )
+
+    def insert_contract(self, contract: OutputContract) -> None:
+        self.conn.execute(
+            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, description, revision, "
+            "operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            self._contract_values(contract),
+        )
+
+    def update_contract(self, contract: OutputContract) -> None:
+        values = self._contract_values(contract)
+        self.conn.execute(
+            "UPDATE output_contracts SET status=?, columns_json=?, rows=?, row_keys_json=?, description=?, revision=?, "
+            "operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, created_at=?, updated_at=? WHERE id=?",
+            values[1:] + (contract.id,),
+        )
+
+    def get_contract(self, contract_id: str) -> OutputContract | None:
+        row = self.conn.execute("SELECT * FROM output_contracts WHERE id = ?", (contract_id,)).fetchone()
+        return self._row_to_contract(row) if row else None
+
+    def latest_contract(self) -> OutputContract | None:
+        row = self.conn.execute("SELECT * FROM output_contracts ORDER BY created_at DESC, CAST(substr(id, 4) AS INTEGER) DESC LIMIT 1").fetchone()
+        return self._row_to_contract(row) if row else None
+
+    def list_contracts(self, limit: int = 50) -> list[OutputContract]:
+        rows = self.conn.execute(
+            "SELECT * FROM output_contracts ORDER BY created_at DESC, CAST(substr(id, 4) AS INTEGER) DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [self._row_to_contract(r) for r in rows]
 
     # -- idempotency -----------------------------------------------------
     def get_idempotent_response(self, key: str) -> dict[str, Any] | None:

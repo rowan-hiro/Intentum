@@ -63,3 +63,10 @@ Independent review found that atomic formatted overwrite could widen a private t
 Status: Accepted → Accepted
 
 Two corrections from the post-merge review, both inside the accepted decision rather than changing it: a format_spec column key now matches an exact column name before any lenient form and refuses a key that fits several columns (previously a key naming one column exactly could be applied to another whose normalized form collided), and a date_format pattern also renders timestamp values instead of being silently ignored. Lenient column matches are now reported as resolution notes. For provenance: the specification itself was implemented by outcome 2026-08-28-006, whose recorded head range e494004..0ffce62 stops one commit short of the work, which landed in commit 187bc29 created after that outcome was closed.
+
+<!-- driftseal-reconciliation: 39ebb39d-8a48-4c2f-a3a8-b440501e3e52 -->
+### 2026-08-30T03:29:25.088Z — Outcome `2026-08-28-010`
+
+Status: Accepted → Accepted
+
+Unchanged in intent. export_result gained a VerifyContract plan step ahead of FormatValues (0007); rendering is still decided only by format_spec, and the contract checks shape, never text.

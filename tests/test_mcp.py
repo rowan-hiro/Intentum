@@ -26,6 +26,7 @@ def test_tool_surface_is_semantic(server):
         "list_datasets", "list_artifacts", "describe_dataset", "search_datasets", "import_dataset",
         "import_workspace", "attach_metadata", "transform_dataset", "materialize_result", "export_result",
         "publish_dataset", "update_metadata", "delete_dataset", "restore_dataset", "get_provenance", "get_operation",
+        "declare_output", "get_output_contract",
     }
     assert not (names & FORBIDDEN)
     transform = next(t for t in tools if t.name == "transform_dataset")
@@ -52,3 +53,19 @@ def test_end_to_end_through_mcp(server):
 def test_errors_are_structured_not_raised(server):
     response = call(server, "describe_dataset", dataset="missing")
     assert response["status"] == "error" and response["code"] == "NOT_FOUND"
+
+
+def test_output_contract_through_mcp(server, tmp_path):
+    from tests.conftest import ORDERS_CSV
+
+    assert call(server, "import_dataset", path=str(ORDERS_CSV))["status"] == "success"
+    declared = call(server, "declare_output", columns=["region", "revenue"], rows={"one_per": ["region"]})
+    assert declared["status"] == "success" and declared["contract"]["id"] == "oc_1", declared
+    assert call(server, "declare_output", columns="region")["code"] == "CONFLICT"
+    call(server, "materialize_result", source="orders", transform={"group_by": ["region"], "measures": ["revenue", "count"]}, name="wide")
+    refused = call(server, "export_result", dataset="wide", path=str(tmp_path / "p.csv"))
+    assert refused["code"] == "CONTRACT_MISMATCH" and refused["details"]["repair"] == {"select": ["region", "revenue"]}
+    call(server, "materialize_result", source="wide", transform=refused["details"]["repair"], name="answer")
+    assert call(server, "export_result", dataset="answer", path=str(tmp_path / "p.csv"))["contract"]["status"] == "satisfied"
+    shown = call(server, "get_output_contract")
+    assert [e["event"] for e in shown["history"]] == ["output_contract.declared", "output_contract.satisfied"]

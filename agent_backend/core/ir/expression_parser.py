@@ -23,7 +23,7 @@ _TOKEN_RE = re.compile(
   | (?P<string>'(?:[^']|'')*')
   | (?P<qident>"(?:[^"]|"")*")
   | (?P<ident>[^\W\d]\w*)
-  | (?P<op>\|\||<=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|,)
+  | (?P<op>\|\||<=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|\[|\]|,)
     """,
     re.VERBOSE,
 )
@@ -147,11 +147,16 @@ class ExpressionParser:
                 self._expect("kw", "null")
                 node: dict[str, Any] = {"function": "is_null", "args": [left]}
                 return {"not": node} if negated else node
-            self._expect("op", "(")
+            # The list may be written (a, b) as in SQL or [a, b] as in most other languages.
+            if self._accept("op", "["):
+                closer = "]"
+            else:
+                self._expect("op", "(")
+                closer = ")"
             values = [self._parse_additive()]
             while self._accept("op", ","):
                 values.append(self._parse_additive())
-            self._expect("op", ")")
+            self._expect("op", closer)
             node = {"op": "in", "left": left, "right": values}
             return {"not": node} if negated else node
         return left

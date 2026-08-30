@@ -186,3 +186,10 @@ Corrected loose-expression quoting to preserve literal and quoted-identifier tok
 Status: Accepted → Accepted
 
 Reconciled after the overwrite-permission follow-up: scope-safe knowledge attachment and token-safe loose expressions are unchanged; deferred scenario and vocabulary work remains deferred.
+
+<!-- driftseal-reconciliation: 694f5a4c-6127-4e4f-b18e-8de00f1f5406 -->
+### 2026-08-30T03:48:36.069Z — Outcome `2026-08-28-010`
+
+Status: Accepted → Accepted
+
+Third measurement (2026-08-30) after the output contract and the vocabulary from the second: scripted layer 4/4 with a contract declared first on every task; model layer task_44 0/3 (turns 29.3 to 26.3, errors 11 to 8) and task_329 0/3 (turns 22.0 to 15.0, errors 26 to 9), strftime refusals 13 to 0, date_trunc and the nested aggregate body accepted in every task_329 run. Five of six runs exported correct values with extra columns that the agent had itself declared, so the failure moved from drift (caught by the contract) to reading (outside the backend). Sequence for the next step, in frequency order: select after aggregate in compound objects, group_by without measures as distinct, a semi-join for filters that reference another dataset (five subquery refusals), and asking for the declaration first in the scenario prompt.

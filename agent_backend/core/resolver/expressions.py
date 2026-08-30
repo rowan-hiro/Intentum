@@ -21,10 +21,13 @@ from ..ir.expression_parser import parse_expression
 from ..ir.typing import (
     COMPARISON_OPS,
     TEMPORAL,
+    arguments_are_swapped,
     binary_result_type,
     function_result_type,
     literal_type,
+    signature,
     unary_result_type,
+    validate_function_arguments,
 )
 from ..models.entities import LogicalType
 from .common import ResolutionNote, pick
@@ -85,6 +88,13 @@ class ExpressionResolver:
         if "function" in loose or "fn" in loose:
             name = str(pick(loose, "function", "fn")).lower()
             args = [self.resolve(a, scope, field=field, notes=notes) for a in loose.get("args", [])]
+            if arguments_are_swapped(name, [a.logical_type for a in args]):
+                # The call fits its signature the other way round; the IR keeps one order.
+                args = [args[1], args[0]]
+                if notes is not None:
+                    notes.append(ResolutionNote(field, f"{name}({args[1].logical_type}, {args[0].logical_type})",
+                                                signature(name), "arguments reordered to the function's signature"))
+            validate_function_arguments(name, args)
             return FunctionExpr(name=name, args=args, logical_type=function_result_type(name, [a.logical_type for a in args]))
         if "cast" in loose:
             target = self._parse_type(loose.get("to") or loose.get("type"))

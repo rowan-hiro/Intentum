@@ -4,9 +4,10 @@
     uv run python examples/dataspace_smoke.py --task all --check
 
 Layer 1 of the smoke plan: a *scripted* agent (no LLM) issues the intents an
-agent would issue — import the workspace, attach the knowledge document, find
-the right dataset, materialize the answer, export it — purely as MCP tool
-calls. The resulting prediction.csv is scored with the official DataSpace
+agent would issue — import the workspace, attach the knowledge document,
+declare the shape of the answer, find the right dataset, materialize the
+answer, export it — purely as MCP tool calls. The declaration is made first,
+as the contract protocol asks (MADR 0007), so every export below is held to it. The resulting prediction.csv is scored with the official DataSpace
 evaluator (examples/dataspace/evaluate.py) and, when the champion repository
 is available, with its local column-signature scorer. The full tool-call
 trace and both scores are written to smoke_result.json.
@@ -60,6 +61,8 @@ def _cell(trace: list[dict[str, Any]], tool: str, column: str, row: int = 0) -> 
 def task_10_script(context_dir: Path, prediction_path: Path) -> list[Step]:
     """按报告期从早到晚列出货币当局资产负债表中总资产金额非空的记录，返回报告期和总资产金额（单位：亿元）。"""
     return [
+        lambda trace: ("declare_output", {"columns": ["EndDate", "TotalAssets"], "rows": "at_least_one",
+                                          "description": "reporting period and total assets, oldest first"}),
         lambda trace: ("import_workspace", {"path": str(context_dir)}),
         lambda trace: ("attach_metadata", {"source": "knowledge.md"}),
         lambda trace: ("search_datasets", {"query": "monetary authority balance sheet total assets"}),
@@ -92,6 +95,8 @@ def task_44_script(context_dir: Path, prediction_path: Path) -> list[Step]:
         {"filter": "uniquepid = '025-44842' and eventtype = 'treatment'"},
     ]
     return [
+        lambda trace: ("declare_output", {"columns": ["treatmentname"], "rows": "at_least_one",
+                                          "description": "procedures at the latest treatment timestamp, in treatment id order"}),
         lambda trace: ("import_workspace", {"path": str(context_dir)}),
         lambda trace: ("describe_dataset", {"dataset": "treatment", "sample_rows": 2}),
         lambda trace: ("transform_dataset", {
@@ -115,6 +120,7 @@ def task_44_script(context_dir: Path, prediction_path: Path) -> list[Step]:
 def task_127_script(context_dir: Path, prediction_path: Path) -> list[Step]:
     """What was the maximum recorded respiration value for patient 027-146876 on 2103-07-12?"""
     return [
+        lambda trace: ("declare_output", {"columns": ["maximum_respiration"], "rows": "one"}),
         lambda trace: ("import_workspace", {"path": str(context_dir)}),
         lambda trace: ("describe_dataset", {"dataset": "vitalperiodic", "sample_rows": 2}),
         lambda trace: ("transform_dataset", {
@@ -139,6 +145,7 @@ def task_329_script(context_dir: Path, prediction_path: Path) -> list[Step]:
     """Daily maximum enteral formula volume/bolus amt (ml) for patient 033-22108 in the current encounter."""
     label = "enteral formula volume/bolus amt (ml)"
     return [
+        lambda trace: ("declare_output", {"columns": ["daily_maximum"], "rows": "one"}),
         lambda trace: ("import_workspace", {"path": str(context_dir)}),
         lambda trace: ("transform_dataset", {
             "source": "patient",
@@ -150,8 +157,8 @@ def task_329_script(context_dir: Path, prediction_path: Path) -> list[Step]:
             "transform": [
                 {"filter": f"patientunitstayid = {_cell(trace, 'transform_dataset', 'patientunitstayid')} "
                            f"and celllabel = '{label}'"},
-                {"derive": "strftime(intakeoutputtime, '%Y-%m-%d') as day"},
-                {"group_by": ["day"], "measures": [{"function": "sum", "field": "cellvaluenumeric", "alias": "daily_total"}]},
+                {"aggregate": {"group_by": ["date(intakeoutputtime) as day"],
+                               "measures": [{"function": "sum", "field": "cellvaluenumeric", "alias": "daily_total"}]}},
             ],
             "name": "task_329_daily_totals",
             "description": "Enteral formula volume per calendar day for the patient",
