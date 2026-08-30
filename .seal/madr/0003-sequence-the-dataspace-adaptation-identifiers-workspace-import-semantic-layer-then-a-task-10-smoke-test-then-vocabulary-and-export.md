@@ -193,3 +193,10 @@ Reconciled after the overwrite-permission follow-up: scope-safe knowledge attach
 Status: Accepted → Accepted
 
 Third measurement (2026-08-30) after the output contract and the vocabulary from the second: scripted layer 4/4 with a contract declared first on every task; model layer task_44 0/3 (turns 29.3 to 26.3, errors 11 to 8) and task_329 0/3 (turns 22.0 to 15.0, errors 26 to 9), strftime refusals 13 to 0, date_trunc and the nested aggregate body accepted in every task_329 run. Five of six runs exported correct values with extra columns that the agent had itself declared, so the failure moved from drift (caught by the contract) to reading (outside the backend). Sequence for the next step, in frequency order: select after aggregate in compound objects, group_by without measures as distinct, a semi-join for filters that reference another dataset (five subquery refusals), and asking for the declaration first in the scenario prompt.
+
+<!-- driftseal-reconciliation: bf982192-42da-44f4-af34-e4f435b99876 -->
+### 2026-08-30T04:16:52.860Z — Outcome `2026-08-30-001`
+
+Status: Accepted → Accepted
+
+Champion comparison recorded (2026-08-30): upstream/main at bdc874f, one run per task, same model: task_44 passed with one column at 14 turns / 211k input tokens, task_329 failed with the same extra date column the Intentum runs declared, at 12 turns / 183k. The remaining capability gap on these tasks is the semi-join; the reading of the question is a shared limit of the model.

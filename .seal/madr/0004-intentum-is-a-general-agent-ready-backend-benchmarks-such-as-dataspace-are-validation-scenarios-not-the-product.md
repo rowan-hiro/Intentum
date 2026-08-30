@@ -40,3 +40,10 @@ Intentum remains an independent, general backend. Benchmarks are used to validat
 Status: Accepted → Accepted
 
 Boundary sharpened by 0007 and 0008 and stated in README: the backend guards consistency with what the agent declared (knew but did not do), not correctness against a task it never sees (did not know), which belongs to the model and the agent framework. Nothing in core names a benchmark; the contract, the date functions, the argument-order rule, bracket IN lists and nested step bodies were each restated as general requirements before entering core.
+
+<!-- driftseal-reconciliation: 20105a6a-070c-497b-972a-abcbb0d96c8f -->
+### 2026-08-30T04:16:53.048Z — Outcome `2026-08-30-001`
+
+Status: Accepted → Accepted
+
+The champion comparison supports the boundary: the full-SQL pipeline misreads task_329 the same way, so the extra column is the model's reading, not a property of the backend; the general step it points at (a semi-join) is restated in the README before it enters core.
