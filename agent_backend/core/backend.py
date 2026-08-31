@@ -1900,7 +1900,7 @@ class Backend:
                 verbs = {"sum": "summing", "avg": "averaging", "min": "taking min of", "max": "taking max of",
                          "count": "counting", "count_distinct": "counting distinct"}
                 parts = [f"{verbs[str(m.function)]} {m.field.name if m.field else 'rows'} as {m.alias}" for m in step.measures]
-                text = ", ".join(parts)
+                text = ", ".join(parts) if parts else "taking distinct groups"
                 if step.group_by:
                     text += " grouped by " + ", ".join(f.name for f in step.group_by)
                 clauses.append(text)

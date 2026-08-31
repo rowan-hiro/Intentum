@@ -120,10 +120,39 @@ def test_wrong_value_type_in_filter(backend, orders):
     assert response["code"] == "TYPE_MISMATCH"
 
 
-def test_missing_measure_is_invalid_transform(backend, orders):
-    response = backend.transform_dataset("orders", {"type": "aggregate", "group_by": ["region"]})
+def test_group_by_without_measures_returns_distinct_groups(backend, orders):
+    response = backend.transform_dataset("orders", {"type": "aggregate", "group_by": ["region"]}, explain=True)
+
+    assert sorted(rows(response)) == [["East"], ["North"], ["South"], ["West"]]
+    assert response["explain"]["canonical_ir"]["steps"][0]["measures"] == []
+    assert "HashAggregate(region)" in response["plan"]
+    assert 'GROUP BY "region"' in response["explain"]["sql"]
+
+
+def test_aggregate_without_groups_or_measures_is_invalid_transform(backend, orders):
+    response = backend.transform_dataset("orders", {"type": "aggregate"})
     assert response["code"] == "INVALID_TRANSFORM"
-    assert "measures" in response["hint"]
+    assert "group_by" in response["message"] and "measure" in response["message"]
+
+
+def test_validator_rejects_canonical_aggregate_without_groups_or_measures(backend, orders):
+    import pytest
+
+    from agent_backend.core.errors import InvalidTransformError
+    from agent_backend.core.ir import TransformIR
+
+    response = backend.transform_dataset("orders", [], explain=True)
+    ir_dict = response["explain"]["canonical_ir"]
+    ir_dict["steps"] = [{
+        "type": "aggregate",
+        "group_by": [],
+        "measures": [],
+        "output_schema": ir_dict["input_schema"],
+    }]
+    ir = TransformIR.model_validate(ir_dict)
+
+    with pytest.raises(InvalidTransformError, match="group_by"):
+        backend.validator.validate_transform(ir)
 
 
 def test_unknown_step_type_and_unknown_keys(backend, orders):

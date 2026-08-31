@@ -149,7 +149,7 @@ class Measure(IRModel):
 class AggregateStep(_StepBase):
     type: Literal["aggregate"] = "aggregate"
     group_by: list[FieldRef] = Field(default_factory=list)
-    measures: list[Measure] = Field(min_length=1)
+    measures: list[Measure] = Field(default_factory=list)
 
 
 class SortKey(IRModel):
