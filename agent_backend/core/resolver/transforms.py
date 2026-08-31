@@ -391,11 +391,11 @@ class TransformResolver:
         raw_measures = pick(loose, "measures", "metrics", "metric", "aggregate", default=[])
         if isinstance(raw_measures, (str, dict)):
             raw_measures = [raw_measures]
-        if not raw_measures:
+        if not raw_measures and not group_fields:
             raise InvalidTransformError(
-                "aggregate needs at least one measure.",
+                "aggregate needs at least one group_by field or measure.",
                 field=where,
-                hint='Example: "measures": [{"function": "sum", "field": "amount", "alias": "revenue"}]',
+                hint='Example: "group_by": ["region"], or "measures": [{"function": "sum", "field": "amount", "alias": "revenue"}]',
             )
         measures = [self._measure(m, scope, f"{where}.measures[{i}]", notes) for i, m in enumerate(raw_measures)]
         self._check_unique([f.name for f in group_fields] + [m.alias for m in measures], where)

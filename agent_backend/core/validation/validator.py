@@ -109,6 +109,8 @@ class IRValidator:
                 raise TypeMismatchError(f"filter predicate must be boolean, got {t}.", field=where)
             return scope
         if isinstance(step, AggregateStep):
+            if not step.group_by and not step.measures:
+                raise InvalidTransformError("aggregate needs at least one group_by field or measure.", field=where)
             group = [require(f, "group_by") for f in step.group_by]
             out = list(group)
             for m in step.measures:
