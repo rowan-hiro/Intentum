@@ -22,6 +22,7 @@ from ..ir import (
     LimitStep,
     LiteralExpr,
     RenameStep,
+    SemiJoinStep,
     SelectStep,
     SortStep,
     TransformIR,
@@ -78,6 +79,10 @@ class SqlCompiler:
             left_cols = [f"l.{q(f.name)}" for f in step.output_schema[: len(step.output_schema) - len(step.right_fields)]]
             right_cols = [f"r.{q(jo.field.name)} AS {q(jo.output_name)}" for jo in step.right_fields]
             return f"SELECT {', '.join(left_cols + right_cols)} FROM {prev} AS l {how} {q(right_table)} AS r ON {on}"
+        if isinstance(step, SemiJoinStep):
+            right_table = physical_inputs[step.right.dataset_id]
+            on = " AND ".join(f"l.{q(c.left.name)} = r.{q(c.right.name)}" for c in step.on)
+            return f"SELECT l.* FROM {prev} AS l WHERE EXISTS (SELECT 1 FROM {q(right_table)} AS r WHERE {on})"
         raise TypeError(f"cannot compile step {type(step).__name__}")
 
     @staticmethod

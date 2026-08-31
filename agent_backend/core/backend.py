@@ -46,7 +46,7 @@ from .errors import (
 )
 from .execution import Executor
 from .export import ExportFormat, ValueRenderer, write_formatted_csv
-from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SortStep, TransformIR
+from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SemiJoinStep, SortStep, TransformIR
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
@@ -1914,6 +1914,8 @@ class Backend:
                 clauses.append(f"deriving {step.name} = {_expr_text(step.expression)}")
             elif isinstance(step, JoinStep):
                 clauses.append(f"{step.how}-joining {step.right.name} on " + ", ".join(f"{c.left.name} = {c.right.name}" for c in step.on))
+            elif isinstance(step, SemiJoinStep):
+                clauses.append(f"keeping rows matched by {step.right.name} on " + ", ".join(f"{c.left.name} = {c.right.name}" for c in step.on))
         body = "; ".join(clauses) if clauses else "copying all rows"
         if name:
             return f"Created {name} from {ir.source.name} by {body}."

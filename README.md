@@ -120,8 +120,10 @@ if exactly one) → `NOT_FOUND` with the list of available fields.
 ### Transform language
 
 `transform` is one step object, a list of steps, or a compact object whose keys
-are applied in the fixed order join → filter → derive → select → aggregate →
-sort → limit → rename:
+are applied in the default order join → semi_join → filter → derive → select →
+aggregate → sort → limit → rename. If that compact object's `select` names a
+measure produced by its aggregate, the projection moves after the aggregate;
+an explicit list of steps always keeps the written order:
 
 ```json
 {"filter": "quantity >= 5 and region in ('West','East')",
@@ -132,7 +134,7 @@ sort → limit → rename:
 ```
 
 Step types: `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`,
-`derive`, `join`. A step may also be written without `type` when its key names
+`derive`, `join`, `semi_join`. A step may also be written without `type` when its key names
 it, so `[{"filter": "amount > 100"}, {"sort": "-amount"}, {"limit": 3}]` is a
 pipeline and `{"aggregate": {"group_by": [...], "measures": [...]}}` is an
 aggregate step with its body nested under its own key; `select` and `derive`
@@ -140,7 +142,21 @@ accept SQL-style aliasing (`"end_date as report_period"`,
 `"quantity * unit_price as line_total"`), `derive` accepts several
 `{name, expression}` pairs at once, and `group_by` accepts a named expression
 (`"date_trunc('day', observation_time) as day"`), which is derived ahead of
-the aggregate.
+the aggregate. An aggregate with `group_by` and no measures returns the
+distinct groups; an aggregate with neither is invalid.
+
+`semi_join` keeps a left row when the referenced right dataset has at least
+one row whose key or keys match, without copying right columns or multiplying
+the left row when the right key is duplicated:
+
+```json
+{"type": "semi_join", "right": "allowed_customers",
+ "on": {"customer_id": "customer_id"}}
+```
+
+The right dataset and version remain explicit in the canonical IR, plan and
+lineage. When matches need a condition on the right side, filter and
+materialize that dataset first, then reference the managed result here.
 
 Expressions may be strings (`"quantity * unit_price"`,
 `"amount > 100 and region in ['West', 'East']"`) or object trees; identifiers
@@ -465,11 +481,13 @@ imports in ~2 s and the task's query runs through the semantic steps.
    fell on both tasks, and five of six runs again exported the correct values
    with extra columns — this time columns the agent had *declared*, so the
    contract check passed on a misread question, and the declarations came
-   late (turns 7–28) rather than fresh. Next: honour `select` after
-   `aggregate` in compound objects, `group_by` without measures as distinct,
-   a semi-join so a filter can reference another dataset instead of a SQL
-   subquery (five refusals), and, in the scenario prompt, asking for the
-   declaration first. A validated read-only `raw_query` fallback step is
+   late (turns 7–28) rather than fresh. The declaration-first experiment on
+   2026-08-31 moved declarations to turns 1–3 without changing the model's
+   mistaken answer shapes; the result confirms the trust boundary rather than
+   fixing the reading. Compound post-aggregate projection, measureless
+   grouping as distinct, and a lineage-preserving `semi_join` now cover the
+   three general vocabulary findings; the next model run should measure
+   `task_44` against that surface. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating

@@ -19,6 +19,7 @@ from ..ir import (
     LimitStep,
     OutputMode,
     RenameStep,
+    SemiJoinStep,
     SelectStep,
     SortStep,
     TransformIR,
@@ -119,6 +120,14 @@ class Planner:
             on = [f"{c.left.name} = {c.right.name}" for c in step.on]
             return PlanStep("HashJoin", f"HashJoin({step.how}, {step.right.name} v{step.right.version} on {', '.join(on)})",
                             {"how": step.how, "right_table": versions[step.right.dataset_id].physical_table, "on": on}, index)
+        if isinstance(step, SemiJoinStep):
+            on = [f"{c.left.name} = {c.right.name}" for c in step.on]
+            return PlanStep(
+                "SemiJoin",
+                f"SemiJoin({step.right.name} v{step.right.version} on {', '.join(on)})",
+                {"right_table": versions[step.right.dataset_id].physical_table, "on": on},
+                index,
+            )
         raise TypeError(f"unplannable step {type(step).__name__}")
 
 
