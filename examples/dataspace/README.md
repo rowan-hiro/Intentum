@@ -38,6 +38,47 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+## 2026-08-31 · post-semi-join task_44 experiment
+
+After `semi_join`, post-aggregate projection and measureless grouping were on
+the MCP transform surface, the same configured model and gateway were run three
+more times on `task_44`. The declaration-first framing was unchanged.
+
+| official | mean turns | mean prompt tokens | mean cost | tool errors | successful declaration turns | `semi_join` use |
+|---|---|---|---|---|---|---|
+| 0/3 (unchanged) | 26.7 (was 30.0) | 336k (was 437k) | $0.0032 (was $0.0041) | 14 (was 11) | 1, 2, 2 (was 3, 1, 1) | 1/3 runs; 4 calls, 2 successful |
+
+Per run:
+
+| run | official | declared columns | turns | tool calls | tool errors | prompt tokens | cost | `semi_join` | stop |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | failed (no file) | `treatment_id, procedure_name, treatment_timestamp` | 30 | 31 | 9 | 370k | $0.0035 | 4 calls, 2 successful | max turns |
+| 2 | failed (extra column) | `treatment_id, procedure` | 20 | 19 | 2 | 217k | $0.0021 | not used | said DONE |
+| 3 | failed (no file) | `treatmentid, treatmentname, treatmenttime` | 30 | 30 | 3 | 421k | $0.0039 | not used | max turns |
+
+The 14 tool errors were 6 `NOT_FOUND`, 5 `INVALID_TRANSFORM` and 3
+`INVALID_INTENT`. Run 1 discovered `semi_join`, repaired two invalid key
+shapes, and invoked it successfully twice. It nevertheless related a
+health-system stay id to a unit-stay id, obtained no rows, and exhausted the
+turn budget. The same run also used measureless grouping successfully to
+materialize a distinct key set. Runs 2 and 3 never invoked `semi_join`.
+
+Run 2 followed the direct `cost.eventid = treatment.treatmentid` relationship
+instead. It exported the four correct procedure values in the required order,
+but carried the helper treatment id because that id was in its fresh output
+contract. The isolated experiment directory was supplied as a relative path,
+so the in-loop scorer did not find the resulting nested export. Running the
+vendored official evaluator offline against that CSV produced the same semantic
+verdict: `column_count_mismatch`, with 4/4 rows and two predicted columns versus
+one gold column. This rescore made no model call.
+
+The new operation therefore closes the backend capability gap and is visible
+enough for the model to attempt, but it does not change the 0/3 task result.
+The remaining failures are in reading the requested output shape and choosing
+the correct relationship between source identifiers. The lower mean turns and
+tokens are descriptive only: with three runs and no accuracy change they are
+not evidence of a model-level efficiency improvement.
+
 ## 2026-08-31 · declaration-first experiment before the remaining vocabulary
 
 The scenario framing now tells the model, before the workspace instruction,
