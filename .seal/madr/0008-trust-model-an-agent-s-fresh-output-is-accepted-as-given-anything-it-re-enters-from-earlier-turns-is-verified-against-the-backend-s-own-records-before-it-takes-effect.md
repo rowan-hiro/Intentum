@@ -48,3 +48,10 @@ Implemented where the backend can check a recalled input against its record: exp
 Status: Accepted → Accepted
 
 Observed in the third measurement: a wrong first reading enforced as faithfully as a right one (five of six runs), exactly the accepted limit; and the deferred consequence made concrete, five subquery-in-filter refusals where the agent wanted to reference another dataset rather than copy values.
+
+<!-- driftseal-reconciliation: 9b74aebe-18ce-4a0e-b292-02ba4d407e78 -->
+### 2026-08-31T07:18:34.716Z — Outcome `2026-08-31-001`
+
+Status: Accepted → Accepted
+
+The deferred reference-by-record consequence is implemented as semi_join: the right dataset and version remain explicit in canonical IR, validation, plan and lineage, and duplicate right keys do not duplicate left rows. The task_44 follow-up also confirms the trust limit: a fresh output contract with helper columns and a fresh choice of mismatched stay identifiers are enforced faithfully because the backend has no task truth against which to correct them.

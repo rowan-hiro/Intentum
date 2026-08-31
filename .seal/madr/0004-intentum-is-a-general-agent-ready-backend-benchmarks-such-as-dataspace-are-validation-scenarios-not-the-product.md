@@ -47,3 +47,10 @@ Boundary sharpened by 0007 and 0008 and stated in README: the backend guards con
 Status: Accepted → Accepted
 
 The champion comparison supports the boundary: the full-SQL pipeline misreads task_329 the same way, so the extra column is the model's reading, not a property of the backend; the general step it points at (a semi-join) is restated in the README before it enters core.
+
+<!-- driftseal-reconciliation: 8cb86a21-3c3c-4191-a591-5a491ee61eaa -->
+### 2026-08-31T07:18:25.248Z — Outcome `2026-08-31-001`
+
+Status: Accepted → Accepted
+
+The boundary remains intact. post-aggregate select, distinct grouping and semi_join are general IR operations with no benchmark identifiers or evaluator logic in agent_backend; declaration framing, model traces, scoring and task-specific findings remain under examples/. The post-semi-join measurement did not justify any task-specific core behavior.

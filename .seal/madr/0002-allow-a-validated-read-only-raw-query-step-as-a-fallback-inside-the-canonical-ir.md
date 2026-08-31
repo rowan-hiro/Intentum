@@ -58,3 +58,10 @@ Still deferred after the second measurement. Across four scripted tasks and twel
 Status: Proposed → Proposed
 
 Still not needed after the third measurement. The one SQL shape the model reached for, a subquery inside a filter (five times on task_44), is a request to reference another dataset's values, which a semi-join step expresses inside the IR with full provenance; raw_query would hide exactly the reference the trust model (0008) wants visible. Remains proposed.
+
+<!-- driftseal-reconciliation: 597e08a2-a6bf-4422-8fe6-66a4cd7f8286 -->
+### 2026-08-31T07:18:43.765Z — Outcome `2026-08-31-001`
+
+Status: Proposed → Proposed
+
+raw_query remains unnecessary for the measured contract. The repeated SQL-subquery shape from task_44 is now represented by semi_join with typed keys, versioned references and lineage; measureless grouping covers the distinct-key shape. The follow-up failures came from output-shape reading and identifier semantics rather than an inexpressible query. Revisit only when a measured task needs a remaining long-tail shape such as a window, union or tie-aware extremum.

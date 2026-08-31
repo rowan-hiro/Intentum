@@ -200,3 +200,10 @@ Third measurement (2026-08-30) after the output contract and the vocabulary from
 Status: Accepted → Accepted
 
 Champion comparison recorded (2026-08-30): upstream/main at bdc874f, one run per task, same model: task_44 passed with one column at 14 turns / 211k input tokens, task_329 failed with the same extra date column the Intentum runs declared, at 12 turns / 183k. The remaining capability gap on these tasks is the semi-join; the reading of the question is a shared limit of the model.
+
+<!-- driftseal-reconciliation: 1d1adcad-65c2-471c-a442-88c969f3ccae -->
+### 2026-08-31T07:18:15.932Z — Outcome `2026-08-31-001`
+
+Status: Accepted → Accepted
+
+The measured sequence is complete: declaration-first framing was tested before vocabulary changes; post-aggregate projection, measureless grouping and semi_join were then implemented as general transforms; full scripted coverage stayed 4/4. The post-semi-join task_44 measurement remained 0/3: one run discovered semi_join but chose mismatched stay identifiers, one exported the four correct procedures with a helper id column, and one exhausted its turns. The next finding is model reading and relationship selection, not an unimplemented semantic step.
