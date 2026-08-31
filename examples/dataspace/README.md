@@ -38,6 +38,41 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+## 2026-08-31 · declaration-first experiment before the remaining vocabulary
+
+The scenario framing now tells the model, before the workspace instruction,
+to read the question once and make `declare_output` its first tool call. It
+also says not to include helper, grouping or identifier columns unless the
+question explicitly asks for them. The same model and gateway were run three
+times on `task_44` and `task_329` before any core vocabulary changed.
+
+| task | official | mean turns | mean prompt tokens | mean cost | tool errors | declaration turns |
+|---|---|---|---|---|---|---|
+| `task_44` | 0/3 (was 0/3) | 30.0 (was 26.3) | 437k (was 351k) | $0.0041 (was $0.0034) | 11 (was 8) | 3, 1, 1 (was never, 28, 16) |
+| `task_329` | 0/3 (was 0/3) | 15.0 (unchanged) | 195k (was 164k) | $0.0018 (was $0.0015) | 7 (was 9) | 1, 1, 1 (was 13, 8, 7) |
+
+Per run:
+
+| task | run | official | declared columns | turns | tool calls | tool errors | prompt tokens | cost | stop |
+|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | failed (no file) | `treatmentid, treatmentname` | 30 | 29 | 1 | 419k | $0.0039 | max turns |
+| `task_44` | 2 | failed (no file) | `treatment_id, procedure_name` | 30 | 32 | 4 | 440k | $0.0043 | max turns |
+| `task_44` | 3 | failed (no file) | `treatment_id, procedure` | 30 | 31 | 6 | 453k | $0.0042 | max turns |
+| `task_329` | 1 | failed (extra column) | `date, max_amount` | 13 | 15 | 2 | 144k | $0.0014 | said DONE |
+| `task_329` | 2 | failed (extra column) | `date, max_volume` | 12 | 12 | 3 | 134k | $0.0012 | said DONE |
+| `task_329` | 3 | failed (two extra columns) | `patient_id, date, max_enteral_volume` | 20 | 21 | 2 | 307k | $0.0028 | said DONE |
+
+The experiment fixes the timing defect without changing the reading defect.
+Five runs made the declaration in the same first turn as `import_workspace`;
+the remaining `task_44` run declared at turn 3 rather than never or at turn
+28. All six fresh declarations nevertheless added an identifier or grouping
+column that the gold answer does not carry. `task_329` still reached the
+correct value in every run and exported it with the declared extra columns;
+`task_44` still spent all three runs searching for a path between the patient
+identifier and treatment rows. A fresh declaration is useful as a durable
+reference, but it does not make a first reading correct, the boundary stated
+by MADRs 0007 and 0008.
+
 ## 2026-08-30 · after the output contract and the vocabulary from the second measurement
 
 What changed since the second measurement, in the order that measurement

@@ -42,6 +42,9 @@ from dataspace_smoke import official_verdict, run_champion_scorer, run_official_
 TASK_FRAMING = """\
 You are a data agent solving one analytics task. Work only through the tools.
 
+- Before importing or exploring, read the question once and make declare_output your first tool call.
+  Declare exactly the ordered answer columns the question asks for; do not include helper, grouping or
+  identifier columns unless the question explicitly asks for them.
 - The task workspace directory is: {context_dir}
   It contains csv/json/sqlite files and a knowledge.md that describes them. Import it first.
 - Produce the answer as a table with exactly the columns the question asks for, then write it with
