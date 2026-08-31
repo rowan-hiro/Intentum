@@ -25,6 +25,41 @@ def test_compact_form_with_sort_and_limit(backend, orders):
     assert "Filter" in response["plan"] and "Limit(2)" in response["plan"]
 
 
+def test_compound_select_moves_after_aggregate_when_it_uses_measure_alias(backend, orders):
+    response = backend.transform_dataset(
+        "orders",
+        {
+            "aggregate": {
+                "group_by": ["region"],
+                "measures": [{"function": "sum", "field": "amount", "alias": "revenue"}],
+            },
+            "select": ["region", "revenue"],
+            "sort": "region",
+        },
+        explain=True,
+    )
+
+    assert [step["type"] for step in response["explain"]["canonical_ir"]["steps"]] == [
+        "aggregate", "select", "sort",
+    ]
+    assert rows(response) == [["East", 1791.0], ["North", 787.5], ["South", 991.0], ["West", 762.5]]
+
+
+def test_compound_select_stays_before_aggregate_when_it_only_uses_input_fields(backend, orders):
+    response = backend.transform_dataset(
+        "orders",
+        {
+            "select": ["region", "amount"],
+            "group_by": ["region"],
+            "measures": [{"function": "sum", "field": "amount", "alias": "revenue"}],
+        },
+        explain=True,
+    )
+
+    assert [step["type"] for step in response["explain"]["canonical_ir"]["steps"]] == ["select", "aggregate"]
+    assert response["result"]["row_count"] == 4
+
+
 def test_filter_object_forms(backend, orders):
     a = backend.transform_dataset("orders", {"filter": {"field": "region", "op": "eq", "value": "West"}})
     b = backend.transform_dataset("orders", {"filter": {"region": "West"}})

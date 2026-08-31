@@ -199,14 +199,18 @@ class TransformResolver:
         body = {k: v for k, v in step.items() if k not in ("type", "op", "operation")}
         return [{"type": step_type, **body}]
 
-    @staticmethod
-    def _implicit_steps(transform: dict[str, Any]) -> list[dict[str, Any]]:
+    @classmethod
+    def _implicit_steps(cls, transform: dict[str, Any]) -> list[dict[str, Any]]:
         """Read an untyped step object by its keys, in the canonical step order."""
         keys = set(transform)
         all_known = set().union(*_IMPLICIT_KEYS.values())
         reject_unknown_keys(transform, all_known | {"type"}, "transform")
         steps: list[dict[str, Any]] = []
-        for step_type in _IMPLICIT_ORDER:
+        order = list(_IMPLICIT_ORDER)
+        if cls._select_uses_aggregate_output(transform):
+            order.remove("select")
+            order.insert(order.index("aggregate") + 1, "select")
+        for step_type in order:
             present = keys & _IMPLICIT_KEYS[step_type]
             if not present:
                 continue
@@ -227,6 +231,57 @@ class TransformResolver:
                          "allowed_keys": sorted(all_known)},
             )
         return steps
+
+    @staticmethod
+    def _select_uses_aggregate_output(transform: dict[str, Any]) -> bool:
+        """Whether a compound object's projection needs an aggregate alias.
+
+        Compact objects historically project before aggregating, which is
+        still useful when ``select`` narrows the input. When a selected field
+        is created by a measure in the same object, however, the projection
+        can only be meaningful after the aggregate.
+        """
+        raw_select = pick(transform, "select", "columns")
+        if raw_select is None or not (set(transform) & _IMPLICIT_KEYS["aggregate"]):
+            return False
+        selected = [raw_select] if isinstance(raw_select, (str, dict)) else list(raw_select or [])
+        selected_names: set[str] = set()
+        for item in selected:
+            if isinstance(item, dict):
+                name = pick(item, "field", "column", "name")
+            else:
+                name, _ = split_alias(str(item))
+            if name is not None:
+                selected_names.add(slugify(str(name)))
+
+        body = transform.get("aggregate")
+        if not isinstance(body, dict) or not set(body) & _AGGREGATE_BODY_KEYS:
+            body = transform
+        raw_measures = pick(body, "measures", "metrics", "metric", "aggregate", default=[])
+        measures = [raw_measures] if isinstance(raw_measures, (str, dict)) else list(raw_measures or [])
+        aliases: set[str] = set()
+        for measure in measures:
+            if isinstance(measure, str):
+                aliases.add("count" if measure.strip().lower() in ("count", "rows", "n", "count(*)") else slugify(measure))
+                continue
+            if not isinstance(measure, dict):
+                continue
+            alias = pick(measure, "alias", "as", "name")
+            raw_fn = pick(measure, "function", "fn", "agg")
+            raw_field = pick(measure, "field", "column", "of")
+            if raw_fn is None:
+                for key, value in measure.items():
+                    if str(key).lower() in _AGG_ALIASES:
+                        raw_fn, raw_field = key, value
+                        break
+            function = _AGG_ALIASES.get(str(raw_fn).lower()) if raw_fn is not None else None
+            if alias is not None:
+                aliases.add(slugify(str(alias)))
+            elif function == AggregateFunction.COUNT and raw_field in (None, "*", ""):
+                aliases.add("count")
+            elif function is not None and raw_field not in (None, "*", ""):
+                aliases.add(slugify(f"{function}_{raw_field}"))
+        return bool(selected_names & aliases)
 
     # -- step resolution -------------------------------------------------
     def _resolve_step(
