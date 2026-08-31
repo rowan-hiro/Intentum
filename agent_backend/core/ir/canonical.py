@@ -203,8 +203,14 @@ class JoinStep(_StepBase):
     right_fields: list[JoinOutput]
 
 
+class SemiJoinStep(_StepBase):
+    type: Literal["semi_join"] = "semi_join"
+    right: DatasetRef
+    on: list[JoinCondition] = Field(min_length=1)
+
+
 Step = Annotated[
-    Union[SelectStep, FilterStep, AggregateStep, SortStep, LimitStep, RenameStep, DeriveStep, JoinStep],
+    Union[SelectStep, FilterStep, AggregateStep, SortStep, LimitStep, RenameStep, DeriveStep, JoinStep, SemiJoinStep],
     Field(discriminator="type"),
 ]
 
@@ -242,7 +248,7 @@ class TransformIR(IRModel):
     def referenced_datasets(self) -> list[DatasetRef]:
         refs = [self.source]
         for step in self.steps:
-            if isinstance(step, JoinStep):
+            if isinstance(step, (JoinStep, SemiJoinStep)):
                 refs.append(step.right)
         return refs
 

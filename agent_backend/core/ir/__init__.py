@@ -22,6 +22,7 @@ from .canonical import (
     OutputSpec,
     RenameMapping,
     RenameStep,
+    SemiJoinStep,
     SelectStep,
     SortKey,
     SortStep,

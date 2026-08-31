@@ -24,6 +24,7 @@ from ..ir import (
     LiteralExpr,
     OutputMode,
     RenameStep,
+    SemiJoinStep,
     SelectStep,
     SortStep,
     TransformIR,
@@ -167,6 +168,23 @@ class IRValidator:
                 out.append(FieldRef(name=jo.output_name, logical_type=actual.logical_type, column_id=actual.column_id))
             self._unique([f.name for f in out], where)
             return out
+        if isinstance(step, SemiJoinStep):
+            right = self._dataset(step.right.dataset_id, step.right.version, f"{where}.right")
+            right_fields = {c.name: FieldRef(name=c.name, logical_type=c.logical_type, column_id=c.id) for c in right.columns}
+            for cond in step.on:
+                left = require(cond.left, "semi_join")
+                actual_right = right_fields.get(cond.right.name)
+                if actual_right is None or actual_right != cond.right:
+                    raise NotFoundError(
+                        f"semi_join references unknown right field {cond.right.name!r}.",
+                        field=where,
+                        candidates=list(right_fields),
+                    )
+                if not comparable(left.logical_type, actual_right.logical_type):
+                    raise TypeMismatchError(
+                        f"semi_join keys {left.name} and {cond.right.name} are not comparable.", field=where
+                    )
+            return scope
         raise InvalidTransformError(f"Unknown step type {type(step).__name__}.", field=where)
 
     # -- expressions -----------------------------------------------------

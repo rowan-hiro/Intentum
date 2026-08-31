@@ -27,6 +27,7 @@ from ..ir import (
     OutputSpec,
     RenameMapping,
     RenameStep,
+    SemiJoinStep,
     SelectStep,
     SortKey,
     SortStep,
@@ -58,6 +59,7 @@ _STEP_TYPE_ALIASES = {
     "rename": "rename",
     "derive": "derive", "compute": "derive", "mutate": "derive", "add_column": "derive",
     "join": "join", "merge": "join",
+    "semi_join": "semi_join", "semijoin": "semi_join", "where_exists": "semi_join",
 }
 # The keys each step handler accepts, besides "type". A single-key untyped step
 # whose value is an object made only of these keys carries the step body nested
@@ -71,11 +73,13 @@ _STEP_BODY_KEYS: dict[str, set[str]] = {
     "rename": {"rename", "mappings", "from", "to"},
     "derive": {"derive", "compute", "name", "as", "alias", "expression", "expr", "formula"},
     "join": {"join", "right", "with", "dataset", "on", "how", "kind", "columns", "select"},
+    "semi_join": {"semi_join", "semijoin", "where_exists", "right", "with", "dataset", "on"},
 }
 _AGGREGATE_BODY_KEYS = {"group_by", "groupby", "by", "measures", "metrics", "metric"}
-_IMPLICIT_ORDER = ("join", "filter", "derive", "select", "aggregate", "sort", "limit", "rename")
+_IMPLICIT_ORDER = ("join", "semi_join", "filter", "derive", "select", "aggregate", "sort", "limit", "rename")
 _IMPLICIT_KEYS = {
     "join": {"join"},
+    "semi_join": {"semi_join", "semijoin", "where_exists"},
     "filter": {"filter", "where"},
     "derive": {"derive", "compute"},
     "select": {"select", "columns"},
@@ -719,6 +723,20 @@ class TransformResolver:
             output_schema=new_scope.refs(),
         )
         return step, new_scope
+
+    def _step_semi_join(self, loose, scope, where, context, notes, used):
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["semi_join"] | {"type"}, where)
+        body = dict(loose)
+        body["type"] = "join"
+        for key in ("semi_join", "semijoin", "where_exists"):
+            if key in body:
+                body["join"] = body.pop(key)
+        body["columns"] = []
+        join, joined_scope = self._step_join(body, scope, where, context, notes, used)
+        if joined_scope.names() != scope.names():
+            raise InvalidTransformError("semi_join cannot add fields from the right dataset.", field=where)
+        step = SemiJoinStep(right=join.right, on=join.on, output_schema=scope.refs())
+        return step, scope
 
     @staticmethod
     def _check_unique(names: list[str], where: str) -> None:

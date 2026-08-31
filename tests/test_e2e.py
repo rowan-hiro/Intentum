@@ -53,7 +53,7 @@ def test_agent_repairs_intent_after_ambiguity(backend, tmp_path):
 
 def test_partial_transform_then_completion(backend):
     backend.import_dataset(str(ORDERS_CSV))
-    partial = backend.transform_dataset("orders", {"type": "aggregate", "group_by": ["region"]})
+    partial = backend.transform_dataset("orders", {"type": "aggregate"})
     assert partial["code"] == "INVALID_TRANSFORM"
     completed = backend.transform_dataset("orders", {"type": "aggregate", "group_by": ["region"], "measures": ["revenue"]})
     assert completed["status"] == "success"

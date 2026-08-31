@@ -104,6 +104,70 @@ def test_join(backend, orders, tmp_path):
     assert rows(response) == [["Ann", 762.5], ["Bob", 1791.0], [None, 1778.5]]
 
 
+def test_semi_join_keeps_matching_left_rows_without_duplicate_amplification(backend, orders, tmp_path):
+    path = write_csv(
+        tmp_path / "priority_customers.csv",
+        "customer",
+        ["Acme Corp", "Acme Corp", "Globex"],
+    )
+    right = backend.import_dataset(str(path), name="priority_customers")["dataset"]
+
+    response = backend.transform_dataset(
+        "orders",
+        {
+            "semi_join": {"right": "priority customers", "on": "customer"},
+            "select": ["order_id", "customer"],
+            "sort": "order_id",
+        },
+        explain=True,
+    )
+
+    assert rows(response) == [
+        [1001, "Acme Corp"],
+        [1002, "Globex"],
+        [1006, "Acme Corp"],
+        [1007, "Globex"],
+        [1011, "Acme Corp"],
+        [1012, "Globex"],
+    ]
+    ir_step = response["explain"]["canonical_ir"]["steps"][0]
+    assert ir_step["type"] == "semi_join" and ir_step["right"]["dataset_id"] == right["id"]
+    assert "SemiJoin(priority_customers v1 on customer = customer)" in response["plan"]
+    assert "WHERE EXISTS" in response["explain"]["sql"]
+
+
+def test_materialized_semi_join_records_both_inputs_in_lineage(backend, orders, tmp_path):
+    path = write_csv(tmp_path / "allowed_regions.csv", "region", ["West", "East", "East"])
+    right = backend.import_dataset(str(path), name="allowed_regions")["dataset"]
+
+    response = backend.materialize_result(
+        "orders",
+        {"type": "semi_join", "right": "allowed_regions", "on": {"left": "region", "right": "region"}},
+        "allowed_orders",
+    )
+
+    assert response["dataset"]["rows"] == 6
+    assert set(response["lineage"]) == {orders["id"], right["id"]}
+    provenance = backend.get_provenance("allowed_orders")
+    assert {(item["id"], item["relationship"]) for item in provenance["inputs"]} == {
+        (orders["id"], "derived_from"),
+        (right["id"], "joined_with"),
+    }
+
+
+def test_semi_join_rejects_incomparable_keys(backend, orders, tmp_path):
+    path = write_csv(tmp_path / "labels.csv", "label", ["one", "two"])
+    backend.import_dataset(str(path), name="labels")
+
+    response = backend.transform_dataset(
+        "orders",
+        {"type": "semi_join", "right": "labels", "on": {"left": "order_id", "right": "label"}},
+    )
+
+    assert response["code"] == "INVALID_TRANSFORM"
+    assert "not comparable" in response["message"].lower() or "cannot join" in response["message"].lower()
+
+
 def test_type_mismatch_in_arithmetic(backend, orders):
     response = backend.transform_dataset("orders", {"derive": {"label": "region + 1"}})
     assert response["code"] == "TYPE_MISMATCH"
