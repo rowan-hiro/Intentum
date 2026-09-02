@@ -1,18 +1,31 @@
-"""OpenCode as the agent host.
+"""OpenCode as the agent host, in a container.
 
-``opencode run`` drives the model; the backend is reached only through its
-MCP server, launched by OpenCode from the per-run ``opencode.json`` this
-module writes. Every builtin tool (bash, edit, read, ...) is disabled for the
-agent and only the ``backend_*`` MCP tools are allowed, so the model cannot
-step around the backend. The run's ``--format json`` event stream is parsed
-into the harness's tool-event records: one per tool call with the backend's
-own status, code, summary and advice kinds, and the step it happened in.
+``opencode run`` drives the model inside a container built from
+``opencode.Dockerfile`` beside this module: OpenCode at a pinned version and
+the backend's MCP entry point installed from the lockfile. The backend is
+reached only through that MCP server, launched by OpenCode from the per-run
+``opencode.json`` this module writes. Every builtin tool (bash, edit, read,
+...) is disabled for the agent and only the ``backend_*`` MCP tools are
+allowed, so the model cannot step around the backend. The run's
+``--format json`` event stream is parsed into the harness's tool-event
+records: one per tool call with the backend's own status, code, summary and
+advice kinds, and the step it happened in.
 
-    opencode run --agent backend --model harness/<model> --format json --auto --pure "<question>"
+    docker run --rm -v <run dir>:/run -v <benchmark>:/data:ro -v <empty dir>:/work ... <image> \\
+        run --agent backend --model harness/<model> --format json --auto --pure "<question>"
+
+Why a container and nothing else: OpenCode adds to the system prompt every
+AGENTS.md or CLAUDE.md it finds upwards from its working directory and from
+the directory of the config file it loads, plus global config, plugins and
+session state. Measured on 2026-09-02, runs whose opencode.json sat inside
+this repository carried the repository's AGENTS.md, about 2.4k tokens more per
+step. Inside the container HOME and the working directory are empty and the
+run directory is mounted at /run, so the model sees the harness's prompt and
+nothing else of ours (MADR 0011).
 
 Settings come from the harness configuration (DEFAULT_MODEL_*): the provider
 is declared as an OpenAI-compatible endpoint with the same base URL the
-in-process loop uses; the key reaches OpenCode through the environment.
+in-process loop uses; the key reaches the container through the environment.
 """
 
 from __future__ import annotations
@@ -22,12 +35,11 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
-
-from agent_harness.config import ROOT
 
 SERVER = "backend"                 # MCP server name; tools appear to the model as backend_<tool>
 PROVIDER = "harness"               # provider id in opencode.json; the model is referenced as harness/<model>
@@ -37,6 +49,11 @@ BUILTIN_TOOLS = ("bash", "edit", "write", "read", "glob", "grep", "list", "patch
                  "task", "todowrite", "todoread", "question", "skill", "lsp")
 PERMISSION_KEYS = ("bash", "edit", "read", "glob", "grep", "list", "webfetch", "websearch", "task", "todowrite",
                    "question", "skill", "lsp")
+DEFAULT_IMAGE = "intentum-opencode:1.18.26"       # built from opencode.Dockerfile beside this module
+DOCKER_RUN_DIR = "/run"                          # the run directory inside the container
+DOCKER_DATA_DIR = "/data"                        # the benchmark, read-only, inside the container
+DOCKER_HOME = "/work"                            # an empty HOME and cwd inside the container
+DOCKER_BACKEND = "/opt/venv/bin/agent-backend-mcp"  # where the image installs the backend's MCP entry point
 
 
 @dataclass
@@ -50,27 +67,12 @@ class HostRun:
     final_text: str
     session_id: str | None
     exit_code: int | None
+    image: str                       # the image the container ran from
 
 
-def opencode_version() -> str | None:
-    if shutil.which("opencode") is None:
-        return None
-    try:
-        proc = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
-
-
-def backend_command(workspace: Path, export_root: Path) -> list[str]:
-    """The MCP server as OpenCode launches it: the backend's own entry point on this run's workspace."""
-    return ["uv", "run", "--directory", str(ROOT), "agent-backend-mcp",
-            "--workspace", str(workspace), "--export-root", str(export_root)]
-
-
-def write_config(run_dir: Path, *, model: str, base_url: str, system_prompt: str, workspace: Path, export_root: Path,
+def write_config(run_dir: Path, *, model: str, base_url: str, system_prompt: str,
                  context_limit: int = 262144, output_limit: int = 16384, mcp_timeout_ms: int = 60000) -> Path:
-    """Write the per-run opencode.json and the agent prompt beside it."""
+    """Write the per-run opencode.json and the agent prompt beside it, with the paths the container sees."""
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "prompt.txt").write_text(system_prompt, encoding="utf-8")
     config = {
@@ -85,15 +87,16 @@ def write_config(run_dir: Path, *, model: str, base_url: str, system_prompt: str
             }
         },
         "mcp": {
-            SERVER: {"type": "local", "command": backend_command(workspace, export_root), "enabled": True,
-                     "timeout": mcp_timeout_ms},
+            SERVER: {"type": "local",
+                     "command": [DOCKER_BACKEND, "--workspace", f"{DOCKER_RUN_DIR}/workspace", "--export-root", DOCKER_RUN_DIR],
+                     "enabled": True, "timeout": mcp_timeout_ms},
         },
         "agent": {
             AGENT: {
                 "mode": "primary",
                 "description": "Solve one analytics task only through the backend's MCP tools",
                 "model": f"{PROVIDER}/{model}",
-                "prompt": "{file:./prompt.txt}",
+                "prompt": "{file:" + f"{DOCKER_RUN_DIR}/prompt.txt" + "}",
                 "tools": {**{tool: False for tool in BUILTIN_TOOLS}, f"{SERVER}_*": True},
                 "permission": {**{key: "deny" for key in PERMISSION_KEYS}, f"{SERVER}_*": "allow"},
             }
@@ -102,6 +105,32 @@ def write_config(run_dir: Path, *, model: str, base_url: str, system_prompt: str
     path = run_dir / "opencode.json"
     path.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def container_path(host_path: Path, mounts: dict[Path, str]) -> str:
+    """Where a host path appears inside the container, given the mounts (host directory -> container directory)."""
+    resolved = host_path.resolve()
+    for host_root, target in sorted(mounts.items(), key=lambda item: -len(str(item[0]))):
+        root = host_root.resolve()
+        if resolved == root or root in resolved.parents:
+            return target + ("/" + resolved.relative_to(root).as_posix() if resolved != root else "")
+    raise ValueError(f"{host_path} is not under a mounted directory {sorted(map(str, mounts))}")
+
+
+def docker_command(*, image: str, name: str, run_dir: Path, home_dir: Path, mounts: dict[Path, str],
+                   model: str, prompt: str, title: str | None) -> list[str]:
+    """``docker run`` for one measurement: the run directory at /run, the data read-only, an empty HOME, the caller's uid."""
+    command = ["docker", "run", "--rm", "--name", name, "--user", f"{os.getuid()}:{os.getgid()}",
+               "-e", KEY_ENV, "-e", f"OPENCODE_CONFIG={DOCKER_RUN_DIR}/opencode.json", "-e", f"HOME={DOCKER_HOME}",
+               "-v", f"{run_dir.resolve()}:{DOCKER_RUN_DIR}", "-v", f"{home_dir.resolve()}:{DOCKER_HOME}"]
+    for host_root, target in mounts.items():
+        command += ["-v", f"{host_root.resolve()}:{target}:ro"]
+    command += ["-w", DOCKER_HOME, image, "run", "--agent", AGENT, "--model", f"{PROVIDER}/{model}",
+                "--format", "json", "--auto", "--pure"]
+    if title:
+        command += ["--title", title]
+    command.append(prompt)
+    return command
 
 
 def _body(output: Any) -> dict[str, Any]:
@@ -179,27 +208,32 @@ def parse_events(lines: Iterable[str]) -> dict[str, Any]:
             "final_text": "\n".join(texts), "session_id": session_id, "last_reason": last_reason}
 
 
-def run_opencode(run_dir: Path, *, prompt: str, system_prompt: str, settings: dict[str, str],
-                 timeout_s: int = 900, title: str | None = None) -> HostRun:
-    """One ``opencode run`` in ``run_dir``: the backend's workspace and export root live there too."""
-    workspace = run_dir / "workspace"
-    config_path = write_config(run_dir, model=settings["model"], base_url=settings["url"], system_prompt=system_prompt,
-                               workspace=workspace, export_root=run_dir)
-    env = {**os.environ, KEY_ENV: settings["key"], "OPENCODE_CONFIG": str(config_path)}
-    command = ["opencode", "run", "--agent", AGENT, "--model", f"{PROVIDER}/{settings['model']}",
-               "--format", "json", "--auto", "--pure"]
-    if title:
-        command += ["--title", title]
-    command.append(prompt)
+def run_opencode(run_dir: Path, *, prompt: str, system_prompt: str, settings: dict[str, str], mounts: dict[Path, str],
+                 image: str = DEFAULT_IMAGE, timeout_s: int = 900, title: str | None = None) -> HostRun:
+    """One ``opencode run`` in a fresh container: ``run_dir`` at /run, each of ``mounts`` read-only, an empty HOME.
+
+    The caller renders the framing with container paths (see ``container_path``);
+    the backend's workspace and exports land in ``run_dir`` on this side.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_config(run_dir, model=settings["model"], base_url=settings["url"], system_prompt=system_prompt)
+    home = Path(tempfile.mkdtemp(prefix="intentum-opencode-home-"))  # mounted as the container's empty HOME and cwd
+    container = f"intentum-{run_dir.parent.name}-{run_dir.name}-{int(time.time())}"
+    command = docker_command(image=image, name=container, run_dir=run_dir, home_dir=home, mounts=mounts,
+                             model=settings["model"], prompt=prompt, title=title)
+    env = {**os.environ, KEY_ENV: settings["key"]}
     events_path = run_dir / "events.jsonl"
     started = time.perf_counter()
     timed_out = False
     with events_path.open("w", encoding="utf-8") as events, (run_dir / "host.log").open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(command, cwd=run_dir, env=env, stdout=events, stderr=log, start_new_session=True)
+        # stdin closed: an inherited pipe that never closes has stalled opencode before it started the MCP server.
+        process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, stdout=events, stderr=log,
+                                   start_new_session=True)
         try:
             process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             timed_out = True
+            subprocess.run(["docker", "kill", container], capture_output=True)
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=15)
@@ -207,6 +241,7 @@ def run_opencode(run_dir: Path, *, prompt: str, system_prompt: str, settings: di
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
     elapsed = round(time.perf_counter() - started, 1)
+    shutil.rmtree(home, ignore_errors=True)
     parsed = parse_events(events_path.read_text(encoding="utf-8").splitlines())
     if timed_out:
         stop = "timeout"
@@ -218,4 +253,4 @@ def run_opencode(run_dir: Path, *, prompt: str, system_prompt: str, settings: di
         stop = "unknown"
     return HostRun(tool_events=parsed["tool_events"], turns=parsed["turns"], usage=parsed["usage"], cost_usd=parsed["cost_usd"],
                    stop_reason=stop, elapsed_s=elapsed, final_text=parsed["final_text"], session_id=parsed["session_id"],
-                   exit_code=process.returncode)
+                   exit_code=process.returncode, image=image)

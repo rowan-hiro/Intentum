@@ -4,10 +4,10 @@
     uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --declaration informed
     uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --host opencode
 
-Two hosts can run the model: OpenCode with only the backend's MCP tools enabled
-(--host opencode, the default since MADR 0011; see agent_harness/hosts/opencode.py),
-or the in-process reference loop below (--host loop, the control arm); both
-produce the same run record.
+Two hosts can run the model: OpenCode in a container with only the backend's MCP
+tools enabled (--host opencode, the default since MADR 0011; the image from
+agent_harness/hosts/opencode.Dockerfile), or the in-process reference loop below
+(--host loop, the control arm); both produce the same run record.
 
 A deliberately thin agent loop (no framework, no SQL, no dialect rules): the
 model sees the MCP server's own instructions, the task framing, the question
@@ -15,8 +15,9 @@ and the tool schemas; every tool call is forwarded to the MCP server and the
 structured response is handed back verbatim (truncated only for size). The
 prediction it exports is scored with the official evaluator; per-run traces
 (messages, tool calls, usage, cost) and an aggregated summary are written
-under runs/<task>/agent-informed/ (--declaration informed, the default since the
-2026-09-02 timing experiment) or runs/<task>/agent/ (--declaration fresh; see framing.py).
+under runs/<task>/<host>-<declaration>/ (the loop keeps its historical names agent/
+and agent-informed/); --declaration informed is the default since the 2026-09-02
+timing experiment (see framing.py).
 
 Settings (environment or the repository .env):
     DEFAULT_MODEL_API_URL, DEFAULT_MODEL_API_KEY, DEFAULT_MODEL_NAME
@@ -38,7 +39,7 @@ from agent_backend import Backend
 from agent_backend.mcp.server import INSTRUCTIONS, create_server
 
 from agent_harness.config import model_config
-from agent_harness.hosts.opencode import opencode_version, run_opencode
+from agent_harness.hosts.opencode import DEFAULT_IMAGE, DOCKER_DATA_DIR, DOCKER_RUN_DIR, container_path, run_opencode
 from agent_harness.loop import run_tool_loop
 from agent_harness.scenarios.dataspace import RUNS, benchmark_root, champion_root, task_context, task_question
 from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, FRAMINGS, NUDGE_PROMPT
@@ -69,27 +70,32 @@ def convergence(tool_events: list[dict[str, Any]], window: int = 2) -> dict[str,
 
 async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, config: dict[str, str], *,
                    max_turns: int, max_tool_chars: int, max_tokens: int, declaration: str = "fresh",
-                   host: str = "loop", host_timeout: int = 900) -> dict[str, Any]:
+                   host: str = "opencode", host_timeout: int = 900, image: str = DEFAULT_IMAGE) -> dict[str, Any]:
     context_dir = task_context(benchmark, task)
     pred_root = run_dir / "predictions"
     prediction_path = pred_root / task / "prediction.csv"
-    system_prompt = INSTRUCTIONS + "\n" + FRAMINGS[declaration].format(context_dir=context_dir, prediction_path=prediction_path)
     messages: list[dict[str, Any]] | None = None
     turn_log: list[dict[str, Any]] = []
     host_version: str | None = None
     if host == "opencode":
-        # The host launches the backend's MCP server itself on this run's workspace; exports are confined to run_dir.
-        ran = run_opencode(run_dir, prompt=question, system_prompt=system_prompt, settings=config,
-                           timeout_s=host_timeout, title=task)
+        # OpenCode runs in a container and launches the backend's MCP server there, on this run's workspace;
+        # the framing names the paths as the container sees them, exports land in run_dir on this side.
+        mounts = {benchmark: DOCKER_DATA_DIR}
+        system_prompt = INSTRUCTIONS + "\n" + FRAMINGS[declaration].format(
+            context_dir=container_path(context_dir, mounts),
+            prediction_path=container_path(prediction_path, {run_dir: DOCKER_RUN_DIR}))
+        ran = run_opencode(run_dir, prompt=question, system_prompt=system_prompt, settings=config, mounts=mounts,
+                           image=image, timeout_s=host_timeout, title=task)
         tool_events, turns, usage, cost = ran.tool_events, ran.turns, ran.usage, ran.cost_usd
         stop_reason, elapsed, nudges = ran.stop_reason, ran.elapsed_s, 0
-        host_version = opencode_version()
+        host_version = ran.image
         backend = Backend(run_dir / "workspace", export_root=run_dir)
         try:
             integrity = backend.integrity_report()
         finally:
             backend.close()
     else:
+        system_prompt = INSTRUCTIONS + "\n" + FRAMINGS[declaration].format(context_dir=context_dir, prediction_path=prediction_path)
         backend = Backend(run_dir / "workspace", export_root=run_dir)  # exports are confined to the run directory
         try:
             server = create_server(backend)
@@ -183,8 +189,9 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--benchmark", default=None, help="benchmark package root (default: $DATASPACE_BENCHMARK)")
     parser.add_argument("--host", choices=["loop", "opencode"], default="opencode",
-                        help="who runs the model loop: the in-process reference loop, or OpenCode with only the backend tools")
-    parser.add_argument("--host-timeout", type=int, default=900, help="seconds an external host run may take")
+                        help="who runs the model loop: OpenCode in a container from --image (default), or the in-process reference loop")
+    parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image for --host opencode (built from agent_harness/hosts/opencode.Dockerfile)")
+    parser.add_argument("--host-timeout", type=int, default=900, help="seconds a container run may take before it is killed")
     parser.add_argument("--declaration", choices=sorted(FRAMINGS), default="informed",
                         help="when the framing asks for declare_output: fresh (first call) or informed (once a preview shows the answer)")
     parser.add_argument("--out", default=None, help="output directory (default runs/<task>/agent or agent-informed beside this module)")
@@ -218,7 +225,8 @@ def main() -> int:
         print(f"\n=== run {index}/{args.runs} ===")
         result = asyncio.run(run_once(args.task, question, benchmark, run_dir, config, max_turns=args.max_turns,
                                       max_tool_chars=args.max_tool_chars, max_tokens=args.max_tokens,
-                                      declaration=args.declaration, host=args.host, host_timeout=args.host_timeout))
+                                      declaration=args.declaration, host=args.host, host_timeout=args.host_timeout,
+                                      image=args.image))
         results.append(result)
         c = result["convergence"]
         print(f"  → passed={result['official']['passed']} turns={result['turns']} tool_calls={result['tool_calls']} "
