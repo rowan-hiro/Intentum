@@ -28,6 +28,7 @@ from ..storage.duckdb.engine import SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEn
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
+from .recovery import Advice, advise_contract, advise_empty_result, advise_error, call as tool_call
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import contract_summary, parse_contract, repair_transform, verify_columns, verify_rows
@@ -232,7 +233,11 @@ class Backend:
     @semantic_operation("describe_dataset")
     def describe_dataset(self, dataset: Any, *, sample_rows: int = 5, principal: str | None = None) -> dict[str, Any]:
         notes: list[ResolutionNote] = []
-        ds = self.datasets.resolve(dataset, field="dataset", notes=notes)
+        try:
+            ds = self.datasets.resolve(dataset, field="dataset", notes=notes)
+        except BackendError as err:
+            err.advice = advise_error(err, tool="describe_dataset", arguments={"dataset": dataset})
+            raise
         version = self.store.get_version(ds.id, ds.version)
         versions = self.store.list_versions(ds.id)
         upstream = self.lineage.upstream(ds.id, depth=1)
@@ -685,9 +690,9 @@ class Backend:
     ) -> dict[str, Any]:
         if output_name:
             return self._run_transform(OperationKind.MATERIALIZE, source, transform, output_name, description,
-                                       preview_limit, context, explain, idempotency_key, principal)
+                                       preview_limit, context, explain, idempotency_key, principal, tool="transform_dataset")
         return self._run_transform(OperationKind.TRANSFORM, source, transform, None, None,
-                                   preview_limit, context, explain, idempotency_key, principal)
+                                   preview_limit, context, explain, idempotency_key, principal, tool="transform_dataset")
 
     @semantic_operation("materialize_result")
     def materialize_result(
@@ -706,7 +711,7 @@ class Backend:
         if not isinstance(name, str) or not name.strip():
             raise InvalidIntentError("materialize_result needs a non-empty name.", field="name")
         return self._run_transform(OperationKind.MATERIALIZE, source, transform, name, description,
-                                   preview_limit, context, explain, idempotency_key, principal)
+                                   preview_limit, context, explain, idempotency_key, principal, tool="materialize_result")
 
     def _run_transform(
         self,
@@ -720,23 +725,37 @@ class Backend:
         explain: bool,
         idempotency_key: str | None,
         principal: str | None,
+        tool: str = "transform_dataset",
     ) -> dict[str, Any]:
         intent = _jsonable({"source": source, "transform": transform, "output_name": output_name,
                             "description": description, "context": context})
         if not isinstance(preview_limit, int) or preview_limit < 0 or preview_limit > 1000:
             raise InvalidIntentError("preview_limit must be an integer between 0 and 1000.", field="preview_limit")
         notes: list[ResolutionNote] = []
+        # The request as the agent wrote it, for advice that rewrites it (MADR 0010).
+        call_arguments: dict[str, Any] = {"source": source, "transform": transform}
+        if tool == "materialize_result":
+            call_arguments["name"] = output_name
+        elif output_name:
+            call_arguments["output_name"] = output_name
+        if description:
+            call_arguments["description"] = description
         with self._operation(kind, intent, principal, idempotency_key) as op:
-            ir, used = self.transforms.resolve(
-                source=source, transform=transform, output_name=output_name, description=description,
-                preview_limit=preview_limit, context=context, notes=notes,
-            )
-            log_event("resolution.completed", operation_id=op.id, source=ir.source.dataset_id,
-                      notes=[n.to_dict() for n in notes])
-            op.canonical_ir = ir.model_dump(mode="json")
-            log_event("ir.canonical", operation_id=op.id, ir=op.canonical_ir)
-            self.validator.validate_transform(ir)
-            log_event("validation.completed", operation_id=op.id)
+            try:
+                ir, used = self.transforms.resolve(
+                    source=source, transform=transform, output_name=output_name, description=description,
+                    preview_limit=preview_limit, context=context, notes=notes,
+                )
+                log_event("resolution.completed", operation_id=op.id, source=ir.source.dataset_id,
+                          notes=[n.to_dict() for n in notes])
+                op.canonical_ir = ir.model_dump(mode="json")
+                log_event("ir.canonical", operation_id=op.id, ir=op.canonical_ir)
+                self.validator.validate_transform(ir)
+                log_event("validation.completed", operation_id=op.id)
+            except BackendError as err:
+                # Teach on refusal: what the backend accepts instead, and the request rewritten when mechanical.
+                err.advice = advise_error(err, tool=tool, arguments=call_arguments)
+                raise
 
             materialize = ir.output.mode == OutputMode.MATERIALIZED
             key = idempotency_key or (f"materialize:{ir.logical_fingerprint()}" if materialize else None)
@@ -767,6 +786,8 @@ class Backend:
 
             result = self.executor.execute_transform(ir, plan)
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
+            advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
+                                            ir.output.name if materialize else None)
 
             now = self.clock()
             response: dict[str, Any]
@@ -788,6 +809,8 @@ class Backend:
                             "summary": self._summarize(ir, None),
                             "hint": "Call materialize_result with the same source/transform and a name to persist this result.",
                         }
+                    if advice:
+                        response["advice"] = [a.to_dict() for a in advice]
                     response["plan"] = plan.to_text()
                     if explain:
                         response["explain"] = {"canonical_ir": op.canonical_ir, "execution_plan": plan.to_dict(), "sql": result.sql}
@@ -797,6 +820,30 @@ class Backend:
                 raise
             log_event("state.committed", operation_id=op.id, dataset_id=dataset_id)
             return self._with_notes(response, notes)
+
+    def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
+                          arguments: dict[str, Any], materialized_name: str | None) -> list[Advice]:
+        """Advice on a successful transform: an empty result explained, or a result that fits the contract."""
+        advice: list[Advice] = []
+        try:
+            if row_count == 0:
+                found = advise_empty_result(ir, used=used, workspace=self.store.list_datasets(include_deleted=False),
+                                            occurs=self._column_contains)
+                if found is not None:
+                    advice.append(found)
+            contract = self.store.latest_contract()
+            if contract is not None:
+                found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,
+                                        materialized_name=materialized_name)
+                if found is not None:
+                    advice.append(found)
+        except Exception as err:  # advice never breaks a response
+            log_event("advice.skipped", error=repr(err))
+        return advice
+
+    def _column_contains(self, dataset: Dataset, column: Column, value: Any) -> bool:
+        version = self.store.get_version(dataset.id, dataset.version)
+        return version is not None and self.engine.column_contains(version.physical_table, column.name, value)
 
     def _commit_materialization(
         self,
@@ -1042,7 +1089,12 @@ class Backend:
         text = source.strip()
         artifact = self.store.get_artifact(text)
         if artifact is None:
-            candidates = [a for a in self.store.list_artifacts() if a.name.lower() == text.lower() or a.path == text]
+            # A leading slash or ./ and a bare file name are the same document to an agent.
+            loose = text.lstrip("./").lower()
+            candidates = [a for a in self.store.list_artifacts()
+                          if a.name.lower() in (text.lower(), loose) or a.path == text]
+            if not candidates and loose:
+                candidates = [a for a in self.store.list_artifacts() if Path(a.name).name.lower() == Path(loose).name]
             if len(candidates) == 1:
                 artifact = candidates[0]
             elif len(candidates) > 1:
@@ -1279,7 +1331,9 @@ class Backend:
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
             # Verified before anything is read or written: a mismatch costs no work
             # and leaves an existing target untouched.
-            evidence = self._verify_contract(contract, ds, version) if contract is not None else None
+            evidence = (self._verify_contract(contract, ds, version, export={"path": str(target), "format": fmt,
+                                                                         "format_spec": format_spec, "overwrite": overwrite})
+                        if contract is not None else None)
             renderer: ValueRenderer | None = None
             columns: list[str] = []
             data: list[Any] = []
@@ -1431,7 +1485,8 @@ class Backend:
             log_event("state.committed", operation_id=op.id, contract_id=contract.id)
             return response
 
-    def _verify_contract(self, contract: OutputContract, ds: Dataset, version: DatasetVersion) -> dict[str, Any]:
+    def _verify_contract(self, contract: OutputContract, ds: Dataset, version: DatasetVersion,
+                         export: dict[str, Any] | None = None) -> dict[str, Any]:
         """Hold a dataset to the contract; the evidence returned goes into the audit event."""
         actual = [(c.name, c.logical_type) for c in ds.columns]
         problems = verify_columns(contract, actual)
@@ -1456,7 +1511,7 @@ class Backend:
             }
             if repair is not None:
                 details["repair"] = repair
-            raise ContractMismatchError(
+            err = ContractMismatchError(
                 f"{ds.name} does not have the shape declared in output contract {contract.id}: "
                 + " ".join(p.message for p in problems),
                 field="dataset",
@@ -1464,6 +1519,22 @@ class Backend:
                 details=details,
                 hint=first + " call declare_output again with a reason if the requirement itself changed.",
             )
+            problem_text = " ".join(p.message for p in problems)
+            amend = " Amend the contract with declare_output and a reason only if the requirement itself changed."
+            if repair is not None:
+                answer = f"answer_{contract.id}"
+                rewrite = [tool_call("materialize_result", source=ds.name, transform=repair, name=answer,
+                                     description=contract.description or "the declared deliverable")]
+                if export is not None:
+                    rewrite.append(tool_call("export_result", dataset=answer, **export))
+                err.advice = [Advice("reshape_to_contract",
+                                     f"{ds.name} differs from the declared shape only in shape: {problem_text} "
+                                     "Reshape it as below and export the new dataset." + amend, rewrite=rewrite)]
+            else:
+                err.advice = [Advice("contract_mismatch",
+                                     f"{ds.name} lacks something the contract declares: {problem_text} "
+                                     "Go back to the data for it and export a dataset with the declared shape." + amend)]
+            raise err
         evidence: dict[str, Any] = {"contract_id": contract.id, "revision": contract.revision,
                                     "columns": [n for n, _ in actual], "rows": version.row_count}
         if contract.rows is not None:

@@ -9,7 +9,8 @@ find the right dataset, materialize the answer, export it. The resulting
 prediction.csv is scored with the official evaluator (evaluate.py) and, when
 the champion repository is available, with its local column-signature scorer.
 The full tool-call trace and both scores are written to smoke_result.json
-under runs/<task>/.
+under runs/<task>/scripted/, a directory this layer owns; the model-driven
+layer writes under runs/<task>/agent/ and neither touches the other's.
 
 Settings (environment or the repository .env):
     DATASPACE_BENCHMARK   benchmark package root (default $DATASPACE_BENCHMARK)
@@ -40,7 +41,7 @@ def run_task(task: str, benchmark: Path, champion: Path, out_root: Path | None) 
         raise SystemExit(f"benchmark task not found: {context_dir}")
     question = task_question(benchmark, task)
 
-    out_dir = out_root if out_root is not None else RUNS / task
+    out_dir = out_root if out_root is not None else RUNS / task / "scripted"
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -98,7 +99,7 @@ def main() -> int:
     parser.add_argument("--task", default="task_10", help="task id, comma-separated ids, or 'all'")
     parser.add_argument("--benchmark", default=None, help="benchmark package root (default: $DATASPACE_BENCHMARK)")
     parser.add_argument("--champion", default=None, help="champion repository root (default: $KDDCUP_CHAMPION)")
-    parser.add_argument("--out", default=None, help="output directory (default runs/<task> beside this module)")
+    parser.add_argument("--out", default=None, help="output directory (default runs/<task>/scripted beside this module)")
     parser.add_argument("--check", action="store_true", help="exit non-zero unless the official evaluator marks every task correct")
     args = parser.parse_args()
 

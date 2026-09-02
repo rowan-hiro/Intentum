@@ -211,8 +211,12 @@ class TransformResolver:
         reject_unknown_keys(transform, all_known | {"type"}, "transform")
         steps: list[dict[str, Any]] = []
         order = list(_IMPLICIT_ORDER)
-        if cls._select_uses_aggregate_output(transform):
-            order.remove("select")
+        order.remove("select")
+        if keys & _IMPLICIT_KEYS["aggregate"] and not cls._select_uses_aggregate_output(transform):
+            order.insert(order.index("derive") + 1, "select")  # narrows the aggregate's input
+        elif cls._sort_needs_unselected_field(transform):
+            order.insert(order.index("limit") + 1, "select")  # sort by a field the projection drops
+        else:
             order.insert(order.index("aggregate") + 1, "select")
         for step_type in order:
             present = keys & _IMPLICIT_KEYS[step_type]
@@ -235,6 +239,39 @@ class TransformResolver:
                          "allowed_keys": sorted(all_known)},
             )
         return steps
+
+    @classmethod
+    def _sort_needs_unselected_field(cls, transform: dict[str, Any]) -> bool:
+        """Whether a compound object's sort names a field its projection would drop.
+
+        Sorting does not change columns, so projecting after the sort is the same
+        result whenever the key is kept, and the only valid reading when it is not.
+        A sort by a select alias keeps the projection first.
+        """
+        raw_sort = pick(transform, "sort", "order_by", "sort_by")
+        raw_select = pick(transform, "select", "columns")
+        if raw_sort is None or raw_select is None:
+            return False
+        selected: set[str] = set()
+        for item in [raw_select] if isinstance(raw_select, (str, dict)) else list(raw_select or []):
+            if isinstance(item, dict):
+                name = pick(item, "as", "alias", "to") or pick(item, "field", "column", "name")
+            else:
+                head, alias = split_alias(str(item))
+                name = alias or head
+            if name is not None:
+                selected.add(slugify(str(name)))
+        for item in [raw_sort] if isinstance(raw_sort, (str, dict)) else list(raw_sort or []):
+            if isinstance(item, dict):
+                name = pick(item, "field", "column", "name")
+            else:
+                name = str(item).strip().lstrip("-+")
+                for suffix in (" desc", " asc"):
+                    if name.lower().endswith(suffix):
+                        name = name[: -len(suffix)].strip()
+            if name is not None and slugify(str(name)) not in selected:
+                return True
+        return False
 
     @staticmethod
     def _select_uses_aggregate_output(transform: dict[str, Any]) -> bool:

@@ -92,6 +92,7 @@ class AnalyticsEngine(Protocol):
     def table_exists(self, table: str) -> bool: ...
     def row_count(self, table: str) -> int: ...
     def count_distinct_rows(self, table: str, columns: list[str]) -> int: ...
+    def column_contains(self, table: str, column: str, value: Any) -> bool: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def read_table(self, table: str) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def drop_table(self, table: str) -> None: ...
@@ -298,6 +299,16 @@ class DuckDBEngine:
         """How many distinct combinations of ``columns`` the table holds (NULLs count as one value)."""
         keys = ", ".join(quote_ident(c) for c in columns)
         return self.count_rows_of_query(f"SELECT DISTINCT {keys} FROM {quote_ident(table)}")
+
+    def column_contains(self, table: str, column: str, value: Any) -> bool:
+        """Whether ``value`` occurs in ``column`` (by equality; a value the column's type cannot hold never does)."""
+        try:
+            row = self.conn.execute(
+                f"SELECT 1 FROM {quote_ident(table)} WHERE {quote_ident(column)} = ? LIMIT 1", [value]
+            ).fetchone()
+        except duckdb.Error:
+            return False
+        return row is not None
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)

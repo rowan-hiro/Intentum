@@ -10,9 +10,9 @@ to start.
    packages and the boundary between them) and 7 ("What to implement next")
    are the ones that matter.
 3. `agent_harness/scenarios/dataspace/README.md` — the validation
-   measurements, newest first. The 2026-08-31 sections say what was last
-   changed on the backend, what it did, and where the model runs still fail;
-   the 2026-08-30 section carries the champion comparison.
+   measurements, newest first. The 2026-09-02 sections say what the model
+   runs looked like before and after the recovery module; the 2026-08-30
+   section carries the champion comparison.
 
 Then re-anchor:
 
@@ -21,6 +21,12 @@ driftseal status
 driftseal log --last 3
 ```
 
+- Outcome `2026-09-02-002` added `agent_backend/core/recovery/`: every
+  refusal now carries `advice` naming what the backend accepts, with the
+  request rewritten as tool calls when mechanical; empty results and results
+  that fit the declared contract are named too. The harness reports refusals
+  without advice and the repair rate, and nudges on stalled previews. The
+  DataSpace README's 2026-09-02 sections hold the before and after runs.
 - Outcome `2026-09-02-001` split the repository into two packages:
   `agent_backend/` (the backend) and `agent_harness/` (the agent side: model
   loop, framing, perception, scenarios), with the boundary enforced by
@@ -36,6 +42,8 @@ MADRs, in reading order (`.seal/madr/`):
 
 - `0004` — what Intentum is: a general backend; benchmarks validate it, they
   do not define it.
+- `0010` — teach on refusal: why refusals carry advice and rewrites instead of
+  the resolver accepting every shape, and what convergence is measured by.
 - `0009` — the harness/backend boundary, and why perception of unstructured
   sources (PDF, video, audio) is the harness's job.
 - `0008` — the trust model: fresh agent output is accepted, anything recalled

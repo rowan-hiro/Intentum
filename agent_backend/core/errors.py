@@ -53,6 +53,8 @@ class BackendError(Exception):
         self.candidates = candidates or []
         self.details = details or {}
         self.hint = hint
+        # Teach on refusal (MADR 0010): what the backend accepts instead, attached by core/recovery.
+        self.advice: list[Any] = []
 
     def to_response(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -69,6 +71,8 @@ class BackendError(Exception):
             body["details"] = self.details
         if self.hint:
             body["hint"] = self.hint
+        if self.advice:
+            body["advice"] = [a.to_dict() if hasattr(a, "to_dict") else a for a in self.advice]
         return body
 
 

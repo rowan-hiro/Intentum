@@ -120,12 +120,16 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "or {\"aggregate\": {\"group_by\": [...], \"measures\": [...]}}; select and derive accept "
                              "\"field as alias\", and group_by accepts a named expression such as "
                              "\"date_trunc('day', ts) as day\". In a compact object, select runs after aggregate "
-                             "when it names an aggregate output, and before it otherwise. Expressions: comparison, arithmetic, and/or/not, "
+                             "when it names an aggregate output, before it otherwise, and after sort when sort names a "
+                             "field select drops. Expressions: comparison, arithmetic, and/or/not, "
                              "in (a, b) or in [a, b], and the functions abs round floor ceil upper lower trim length "
                              "substr left right concat (or ||) coalesce year month day date date_trunc strftime "
                              "is_null contains starts_with ends_with. Field names may be approximate; the response "
                              "lists how each was resolved, or returns needs_resolution with candidates. Transforms "
-                             "compute values; how they are rendered as text is export_result's business.")
+                             "compute values; how they are rendered as text is export_result's business. A refused transform "
+                             "comes back with `advice`: what the backend accepts instead and, when mechanical, a "
+                             "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
+                             "says where a filtered value does occur; a result with the declared output shape says so.")
     def transform_dataset(
         source: str,
         transform: dict[str, Any] | list[dict[str, Any]],
