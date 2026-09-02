@@ -204,12 +204,25 @@ class ContractColumn(_Entity):
     logical_type: LogicalType | None = None
 
 
+class ContractOrder(_Entity):
+    """A column the deliverable is ordered by, whether or not it carries it."""
+
+    name: str
+    descending: bool = False
+
+
 class OutputContract(_Entity):
     """The declared shape of the deliverable an agent is working towards.
 
     Declared while the requirement is fresh, held by the backend, and checked
     against every export (MADR 0007). ``revision`` counts explicit amendments;
     ``satisfied_by`` names the latest export that matched it.
+
+    The shape has two halves. ``columns`` is what the deliverable *carries*, in
+    order. ``order_by`` and ``row_keys`` are what it is *organized by*: they may
+    name columns the deliverable does not carry, and those columns are expected
+    in the dataset at export so the backend can order and count by them, then
+    left out of the file (MADR 0012).
     """
 
     id: str
@@ -217,6 +230,7 @@ class OutputContract(_Entity):
     columns: list[ContractColumn]
     rows: RowCardinality | None = None
     row_keys: list[str] = Field(default_factory=list)
+    order_by: list[ContractOrder] = Field(default_factory=list)
     description: str = ""
     revision: int = 1
     operation_id: str

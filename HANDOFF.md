@@ -21,6 +21,13 @@ driftseal status
 driftseal log --last 3
 ```
 
+- Outcome `2026-09-02-006` split the output contract in two (MADR 0012):
+  `columns` is what the answer carries, `order_by` and the `one_per` keys are
+  what it is organized by and may name columns the answer does not carry — the
+  export sorts and counts by them and leaves them out of the file. `rows` is
+  now required, and a declaration is answered with what the workspace holds
+  under each of its names. Not yet measured: the prediction is that early
+  declarations stop carrying the sort key.
 - Outcome `2026-09-02-005` made OpenCode the agent host (`--host opencode`,
   MADR 0011): the model sees only the backend's MCP tools, and the event
   stream is normalized into the same run record as the in-process loop.
@@ -49,6 +56,8 @@ MADRs, in reading order (`.seal/madr/`):
   do not define it.
 - `0011` — OpenCode as the agent host: what the harness keeps (scenario,
   measurement, adapters) and what the host owns (loop, pacing, perception).
+- `0012` — why the contract separates the columns the answer carries from the
+  columns it is organized by, and what was rejected on the way there.
 - `0010` — teach on refusal: why refusals carry advice and rewrites instead of
   the resolver accepting every shape, and what convergence is measured by.
 - `0009` — the harness/backend boundary, and why perception of unstructured
