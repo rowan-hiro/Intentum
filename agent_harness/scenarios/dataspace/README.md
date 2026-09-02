@@ -130,7 +130,41 @@ first four became, in this order, the `document_as_dataset` advice (with the
 `predicate_not_boolean` advice, and a resolver rule that runs a compact
 object's `select` after its `sort` when the sort key would be dropped. The
 fifth already answers itself: the response lists the datasets that exist.
-These are not yet measured on a model run.
+
+### `task_44`, three runs with the four fixes
+
+| official | mean turns | mean prompt tokens | refusals | unadvised | repair rate | exports | correct values exported | nudges |
+|---|---|---|---|---|---|---|---|---|
+| **1/3** (was 0/3) | 26.7 (was 26.0) | 368k (was 336k) | 6 (was 10) | 3 (was 5) | 1.0 (was 0.8) | 2/3 (was 3/3) | 2/2 | 4 (was 2) |
+
+Per run:
+
+| run | official | declared columns | declaration turn | turns | tool calls | refusals (advised) | advice taken up | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | **passed** | `treatmentname` | 21 | 25 | 24 | 2 (1) | `subquery_as_semi_join`, `no_matching_rows`, `near_contract` (materialized `answer_oc_1` with the projection it proposed), `matches_contract` | 331k | said DONE |
+| 2 | failed (no file) | `procedure, treatment_id` | 1 | 30 | 30 | 1 (1) | `value_not_found`, `join_on_as_mapping` (repaired, then out of turns) | 439k | max turns |
+| 3 | failed (extra column) | `treatment_id, procedure` | 1 | 25 | 25 | 3 (1) | `distinct_as_group_by`, `value_not_found`, `matches_contract` | 335k | said DONE |
+
+Run 1 is the first official pass of the model-driven layer on `task_44`. It
+declared late, at turn 21, after it had the four procedure rows in front of
+it, and declared the gold shape exactly; the next preview carried an
+identifier column beside the names, `near_contract` proposed the projection,
+the model materialized it under the proposed name and exported. The two runs
+that declared at turn 1 declared an identifier column again, as every early
+declaration has: run 3 exported the four correct names next to it, run 2
+took the `join_on_as_mapping` rewrite at turn 26 and ran out of turns. A
+declaration made with the data in view read the question better than the
+fresh ones; one run is not evidence, but it is the first counter-example to
+the declaration-first framing (MADR 0007, 0008) and belongs in the next
+experiment.
+
+The four fixes themselves did not fire: no run named a document as a dataset,
+passed a bare field as a filter, or sorted by a field its projection dropped.
+Their measured effect on this sample is that the shapes did not recur. The
+three unadvised refusals were a field no longer in scope after an earlier
+step (the response lists the fields that are) and, twice, a SQL `LIMIT` tail
+written inside a filter expression (`... IS NOT NULL LIMIT 5`), which is the
+next detector: strip the tail into a limit step.
 
 ## 2026-09-02 · task_44 after the harness split, before advice
 

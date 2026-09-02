@@ -221,3 +221,10 @@ The DataSpace sequence continues in the agent harness: the scenario, its evaluat
 Status: Accepted → Accepted
 
 Fifth measurement (2026-09-02, after the recovery module): task_329 0/3 with unadvised refusals 7 to 0, turns 15.0 to 11.7; task_44 0/3 but exports 0/3 to 3/3 with the four gold values in every file, turns 30.0 to 26.0. The remaining failure on both is the declared extra column, the model's reading, outside the backend by MADRs 0007/0008. Next in the sequence: measure the four fixes from the task_44 unadvised refusals, then the first perception reader for a PDF-bearing task (MADR 0009).
+
+<!-- driftseal-reconciliation: 9f1b9f0e-67bd-48ff-8944-fcff37159882 -->
+### 2026-09-02T08:14:19.477Z — Outcome `2026-09-02-003`
+
+Status: Accepted → Accepted
+
+task_44 1/3 on 2026-09-02 after the fixes, the first official pass of the model-driven layer on that task; exports 2/3 both with the gold values. Next in the sequence: a detector for a LIMIT tail inside a filter, an experiment on declaration timing (fresh versus informed), then the first perception reader (MADR 0009).

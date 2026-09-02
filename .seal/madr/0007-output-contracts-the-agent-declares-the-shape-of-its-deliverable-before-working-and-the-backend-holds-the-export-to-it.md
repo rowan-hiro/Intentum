@@ -59,3 +59,10 @@ Evidence from the third measurement: the model declared its contract at turns 7 
 Status: Accepted → Accepted
 
 Contracts now teach as well as hold: a preview or dataset with the declared shape is told so (matches_contract) with the materialize call, one that is a rename or projection away gets the reshape (near_contract), and CONTRACT_MISMATCH at export carries the reshape and the export as a rewrite. Measured on task_329 and task_44: every run took matches_contract up and exported within two or three calls; the verdicts stayed 0/3 because the declared shape itself carried an extra column, which the contract holds by design.
+
+<!-- driftseal-reconciliation: 6371cba5-bf5f-4ac1-84a5-54fc419eaf9d -->
+### 2026-09-02T08:14:19.388Z — Outcome `2026-09-02-003`
+
+Status: Accepted → Accepted
+
+First counter-example to declaration-first: the run that passed task_44 declared at turn 21 with the answer rows in view and named the gold shape exactly; both turn-1 declarations in the same round added an identifier column, as every early declaration has. One run is not evidence; the trust model (fresh accepted, recalled verified) is unaffected, but when to declare belongs in the next experiment.

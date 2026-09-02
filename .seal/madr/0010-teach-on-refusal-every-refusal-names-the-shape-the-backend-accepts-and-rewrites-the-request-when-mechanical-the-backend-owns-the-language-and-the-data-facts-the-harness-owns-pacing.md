@@ -42,3 +42,10 @@ The backend keeps its transform language small and closed and teaches it on refu
 Status: Accepted → Accepted
 
 Implemented in outcome 2026-09-02-002: agent_backend/core/recovery with eleven detectors (subquery as semi_join, LIKE, distinct, join on as mapping, aggregate in select, expression in select, inline source, unknown key, temporal as text, document as dataset, predicate not boolean) plus reshape_to_contract at export and two success-side signals (value_not_found, matches_contract/near_contract); every rewrite is executed in its test. Measured: task_329 unadvised refusals 7 to 3 to 0 over two rounds, repair rate 1.0, turns 15.0 to 11.7; task_44 exports 0/3 to 3/3 with the four gold values in every file, turns 30.0 to 26.0, unadvised refusals 12 to 5, repair rate 0.8; official verdicts unchanged at 0/3 because the declared extra columns are the model's reading. The five unadvised task_44 refusals became four more fixes, not yet measured.
+
+<!-- driftseal-reconciliation: 33771115-08de-4612-8f25-561d0e9ef6b7 -->
+### 2026-09-02T08:14:19.300Z — Outcome `2026-09-02-003`
+
+Status: Accepted → Accepted
+
+Sixth measurement (task_44 with the four post-round fixes): 1/3 official, refusals 10 to 6, unadvised 5 to 3, repair rate 1.0. The four fixes did not fire on this sample (the shapes did not recur); the pass came through near_contract, taken up under the proposed name. Next detector from the unadvised refusals: a SQL LIMIT tail inside a filter expression (twice).
