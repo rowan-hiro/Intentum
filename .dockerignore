@@ -1,0 +1,12 @@
+# Build context for agent_harness/hosts/opencode.Dockerfile: only the backend is copied.
+.git
+.venv
+.seal
+.claude
+.env
+agent_harness
+examples
+tests
+**/__pycache__
+**/*.duckdb
+**/*.sqlite

@@ -73,10 +73,14 @@ scenario from the repository root:
 
 ```sh
 uv run python -m agent_harness.scenarios.dataspace.smoke --task all --check
-uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3              # OpenCode, backend tools only (default)
+docker build -f agent_harness/hosts/opencode.Dockerfile --build-arg OPENCODE_VERSION=1.18.26 -t intentum-opencode:1.18.26 .
+uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3              # OpenCode in the container (default)
 uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --host loop  # in-process loop, the control arm
 ```
 
-The OpenCode host needs `opencode` on the PATH (1.18.26 was used); each run
+The OpenCode host needs Docker and the image above; rebuild the image after a
+backend change, since the backend's MCP server is baked in. OpenCode is never
+run on the machine itself: it folds any `AGENTS.md` above its working or config
+directory into the system prompt, and this repository has one. Each run
 writes its own `opencode.json`, `prompt.txt`, `events.jsonl` and `host.log`
 beside the run's workspace.

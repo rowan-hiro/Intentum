@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from agent_harness.hosts.opencode import (
-    AGENT, BUILTIN_TOOLS, KEY_ENV, PROVIDER, SERVER, backend_command, parse_events, write_config,
+    AGENT, BUILTIN_TOOLS, DOCKER_BACKEND, DOCKER_DATA_DIR, DOCKER_HOME, DOCKER_RUN_DIR, KEY_ENV, PROVIDER, SERVER,
+    container_path, docker_command, parse_events, write_config,
 )
 from agent_harness.scenarios.dataspace.agent import convergence
 
@@ -32,21 +33,18 @@ def test_convergence_metrics_apply_to_host_events_unchanged():
                                    "advice_kinds": {"expression_as_derive": 1}}
 
 
-def test_config_allows_only_the_backend_tools(tmp_path):
-    path = write_config(tmp_path, model="qwen/qwen3.5-35b-a3b", base_url="https://gateway.example/api", system_prompt="Work only through the tools.",
-                        workspace=tmp_path / "workspace", export_root=tmp_path)
+def test_config_allows_only_the_backend_tools_and_points_at_the_container_paths(tmp_path):
+    path = write_config(tmp_path, model="qwen/qwen3.5-35b-a3b", base_url="https://gateway.example/api", system_prompt="Work only through the tools.")
     config = json.loads(path.read_text(encoding="utf-8"))
     agent = config["agent"][AGENT]
-    assert agent["mode"] == "primary" and agent["prompt"] == "{file:./prompt.txt}"
+    assert agent["mode"] == "primary" and agent["prompt"] == "{file:/run/prompt.txt}"
     assert all(agent["tools"][tool] is False for tool in BUILTIN_TOOLS) and agent["tools"][f"{SERVER}_*"] is True
     assert agent["permission"]["bash"] == "deny" and agent["permission"][f"{SERVER}_*"] == "allow"
     provider = config["provider"][PROVIDER]
     assert provider["npm"] == "@ai-sdk/openai-compatible" and provider["options"]["baseURL"] == "https://gateway.example/api"
     assert provider["options"]["apiKey"] == "{env:" + KEY_ENV + "}" and "qwen/qwen3.5-35b-a3b" in provider["models"]
     assert config["model"] == f"{PROVIDER}/qwen/qwen3.5-35b-a3b"
-    mcp = config["mcp"][SERVER]
-    assert mcp["type"] == "local" and mcp["command"] == backend_command(tmp_path / "workspace", tmp_path)
-    assert "agent-backend-mcp" in mcp["command"] and str(tmp_path / "workspace") in mcp["command"]
+    assert config["mcp"][SERVER]["command"] == [DOCKER_BACKEND, "--workspace", "/run/workspace", "--export-root", "/run"]
     assert (tmp_path / "prompt.txt").read_text(encoding="utf-8") == "Work only through the tools."
 
 
@@ -64,3 +62,35 @@ def test_an_argument_the_sdk_refused_is_recorded_as_invalid_intent():
     (event,) = parse_events([json.dumps({"type": "step_start", "part": {}}), line])["tool_events"]
     assert event["status"] == "error" and event["code"] == "INVALID_INTENT"
     assert event["summary"].startswith("Error executing tool transform_dataset") and event["advice"] == []
+
+
+def test_host_paths_are_translated_to_the_container_mounts(tmp_path):
+    benchmark, run_dir = tmp_path / "bench", tmp_path / "runs" / "task_44" / "run_1"
+    (benchmark / "input" / "task_44" / "context").mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    mounts = {benchmark: DOCKER_DATA_DIR, run_dir: DOCKER_RUN_DIR}
+    assert container_path(benchmark / "input" / "task_44" / "context", mounts) == "/data/input/task_44/context"
+    assert container_path(run_dir / "predictions" / "task_44" / "prediction.csv", mounts) == "/run/predictions/task_44/prediction.csv"
+    assert container_path(run_dir, mounts) == "/run"
+    try:
+        container_path(tmp_path / "elsewhere", mounts)
+    except ValueError as err:
+        assert "not under a mounted directory" in str(err)
+    else:
+        raise AssertionError("a path outside the mounts must be refused")
+
+
+def test_the_container_gets_the_run_dir_the_data_read_only_and_an_empty_home(tmp_path):
+    run_dir, home, data = tmp_path / "run_1", tmp_path / "home", tmp_path / "bench"
+    for d in (run_dir, home, data):
+        d.mkdir()
+    command = docker_command(image="intentum-opencode:1.18.26", name="intentum-test", run_dir=run_dir, home_dir=home,
+                             mounts={data: DOCKER_DATA_DIR}, model="qwen/qwen3.5-35b-a3b", prompt="the question", title="task_44")
+    text = " ".join(command)
+    assert command[:3] == ["docker", "run", "--rm"] and "--name intentum-test" in text
+    assert f"-v {run_dir.resolve()}:{DOCKER_RUN_DIR} " in text and f"-v {data.resolve()}:{DOCKER_DATA_DIR}:ro" in text
+    assert f"-v {home.resolve()}:{DOCKER_HOME}" in text and f"-e HOME={DOCKER_HOME}" in text and f"-w {DOCKER_HOME}" in text
+    assert "-e HARNESS_MODEL_API_KEY " in text and f"-e OPENCODE_CONFIG={DOCKER_RUN_DIR}/opencode.json" in text
+    assert "HARNESS_MODEL_API_KEY=" not in text  # the key travels in the environment, never on the command line
+    assert command[-1] == "the question" and "--format json --auto --pure --title task_44" in text
+    assert f"intentum-opencode:1.18.26 run --agent {AGENT} --model {PROVIDER}/qwen/qwen3.5-35b-a3b" in text

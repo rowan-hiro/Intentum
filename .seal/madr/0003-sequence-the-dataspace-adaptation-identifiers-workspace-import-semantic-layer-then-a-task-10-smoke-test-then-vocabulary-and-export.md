@@ -242,3 +242,24 @@ Seventh measurement (declaration timing): informed framing 3/6 against fresh 1/6
 Status: Accepted → Accepted
 
 Eighth measurement (OpenCode as host): task_44 2/3, task_329 0/3, both informed framing, against the loop's 2/3 and 1/3. Next in the sequence: parse JSON strings where objects are expected at the MCP layer and widen the inline-relation detector to string forms and join right sides (from this round's unadvised refusals); then the with-and-without-backend comparison on one host, which is the hypothesis test; then the first PDF-bearing task, read by the host.
+
+<!-- driftseal-reconciliation: f956c826-fa15-4035-b48e-ea5e18119ce7 -->
+### 2026-09-02T09:31:03.572Z — Outcome `2026-09-02-006`
+
+Status: Accepted → Accepted
+
+The OpenCode comparison recorded on 2026-09-02 (task_44 2/3, task_329 0/3) was contaminated: the model's system prompt carried the repository's AGENTS.md. It is superseded by the container runs of the next outcome.
+
+<!-- driftseal-reconciliation: 43791b6b-3aeb-447b-9dbd-af91177c6c44 -->
+### 2026-09-02T09:35:50.186Z — Outcome `2026-09-02-007`
+
+Status: Accepted → Accepted
+
+Ninth measurement, OpenCode in the container (the eighth is discarded as contaminated): task_44 2/3, task_329 0/3, informed framing, against the loop's 2/3 and 1/3. Next in the sequence: the with-and-without-backend comparison on the same host (the container already sandboxes shell and python for the direct arm), then MCP-layer JSON-string parsing and the wider inline-relation detector, then the first PDF-bearing task.
+
+<!-- driftseal-reconciliation: 82dd6003-06df-47da-ac17-660bae11ce7f -->
+### 2026-09-02T09:37:50.081Z — Outcome `2026-09-02-007`
+
+Status: Accepted → Accepted
+
+Reconciled with outcome 2026-09-02-007: the DataSpace OpenCode measurements now use the isolated container host and replace the contaminated machine-host comparison.
