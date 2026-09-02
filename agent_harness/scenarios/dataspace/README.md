@@ -16,7 +16,8 @@ measurements below are comparable across the move.
   `predictions/<task>/prediction.csv`, scores it with the official evaluator
   and (when the champion repository is available) with its local
   column-signature scorer, and records the full tool-call trace in
-  `smoke_result.json`.
+  `runs/<task>/scripted/smoke_result.json`; the model-driven layer writes
+  under `runs/<task>/agent/` and neither layer touches the other's directory.
 - `agent.py` — the same tool surface driven by a real model: a
   thin OpenAI-compatible agent loop with no SQL and no dialect rules in the
   prompt, scored the same way, with per-run traces and an aggregated summary.
@@ -41,6 +42,140 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_44` | procedures a patient received at the latest treatment timestamp, in treatment id order | the patient is only named in `cost`, so the answer needs a join and a second round on the maximum |
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
+
+## 2026-09-02 · after the recovery module (teach on refusal, MADR 0010)
+
+The backend now answers every refusal with `advice` (what it accepts instead,
+and the request rewritten as tool calls when mechanical) and marks two silent
+failures on successful responses (an empty result whose literal lives
+elsewhere; a result that already fits the declared contract). The harness
+reports two convergence numbers beside the verdict: refusals without advice,
+and the repair rate (a refusal followed by a successful call of the same tool
+within two calls). It also nudges after four previews of one source with
+nothing materialized. Same model and gateway, same framing.
+
+### `task_329`, two rounds
+
+Round 1 ran with the detectors written from the `task_44` refusals. Its three
+unadvised refusals were two new shapes (an expression with an alias inside
+`select`; a string function on a timestamp), which became the detectors
+`expression_as_derive` and `temporal_as_text`; round 2 ran with those.
+
+| round | official | mean turns | mean prompt tokens | refusals | unadvised | repair rate | advice taken up | nudges |
+|---|---|---|---|---|---|---|---|---|
+| before advice (08-31) | 0/3 | 15.0 | 195k | 7 | 7 | — | — | — |
+| round 1 | 0/3 | 12.3 | 138k | 3 | 3 | 1.0 | `matches_contract` 3/3 runs | 1 |
+| round 2 | 0/3 | 11.7 | 126k | 2 | 0 | 1.0 | `matches_contract` 3/3, `expression_as_derive` 1, `unknown_key` 1 | 1 |
+
+Per run, round 2:
+
+| run | official | declared columns | declaration turn | turns | tool calls | refusals (advice) | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|
+| 1 | failed (extra column) | `date, max_bolus_amount` | 1 | 10 | 9 | 0 | 90k | said DONE |
+| 2 | failed (extra column) | `date, max_amount` | 7 | 10 | 9 | 0 | 113k | said DONE |
+| 3 | failed (extra column) | `date, max_bolus_amt` | 1 | 15 | 15 | 2 (`expression_as_derive`, `unknown_key`) | 176k | said DONE |
+
+What changed and what did not. Every run reached the correct value
+(2105-12-30, 60.0) and exported it in the shape it had declared, so the
+verdict is the same reading failure as in every earlier measurement: the gold
+table has one column, the model declares two. That is the boundary MADRs 0007
+and 0008 draw, and advice does not cross it; the backend never sees the
+question. Inside the boundary the loop converged: unadvised refusals went from
+seven to three to zero in two rounds, each refusal was repaired within two
+calls, and `matches_contract` was taken up in every run, twice under the
+proposed name `answer_oc_1`, so the preview-to-export tail shrank to two or
+three calls. Turns fell from 15.0 to 11.7 and prompt tokens from 195k to 126k
+across the three measurements. The one nudge (run 3, four previews of
+`intakeoutput`) was followed by the materialization.
+
+### `task_44`, three runs with the round-1 detectors
+
+| official | mean turns | mean prompt tokens | refusals | unadvised | repair rate | exports | correct values exported | `semi_join` use | nudges |
+|---|---|---|---|---|---|---|---|---|---|
+| 0/3 (unchanged) | 26.0 (was 30.0) | 336k (was 425k) | 10 (was 12) | 5 (was 12) | 0.8 | 3/3 (was 0/3) | 3/3 | 1/3 | 2 |
+
+Per run:
+
+| run | official | declared columns | declaration turn | turns | tool calls | refusals (advised) | advice taken up | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | failed (two extra columns) | `treatmentid, treatmentname, treatmenttime` | 2 | 30 | 28 | 4 (3) | `subquery_as_semi_join` ×2 (materialized `cost_filtered`, ran `semi_join`), `distinct_as_group_by`, `value_not_found` ×2, `matches_contract` ×6 | 369k | said DONE |
+| 2 | failed (extra column) | `treatment_id, procedure` | 1 | 28 | 28 | 4 (1) | `distinct_as_group_by`, `value_not_found`, `matches_contract` ×2 | 379k | said DONE |
+| 3 | failed (extra column) | `procedure, treatment_id` | 1 | 20 | 19 | 2 (1) | `contract_mismatch` at export, then `matches_contract` | 261k | said DONE |
+
+Every run exported the four gold procedure names in gold order, next to the
+identifier or timestamp columns it had declared. Before advice, no run
+exported anything: all three hit the turn limit, one of them with the exact
+answer sitting in a preview. The change is inside the boundary: the model
+still reads the question as asking for an identifier column, and the contract
+holds the export to that reading; the "knew but did not do" failures
+(unexported answer, previews of one identifier filtered by another's value)
+went away. Run 1 shows the advice chain end to end: the subquery refusal
+returned a `semi_join` rewrite with the filtered right dataset, the model
+materialized `cost_filtered` and ran the `semi_join` as proposed; the join
+kept the model's own mismatched identifiers, so the result was empty, and
+`value_not_found` on the next preview said that the value lives in
+`cost.patienthealthsystemstayid`, not `treatment.patientunitstayid`; from
+there the run found the `eventid` path, materialized `answer_oc_1` on the
+`matches_contract` advice and exported it. Run 3 was refused once at export
+(`CONTRACT_MISMATCH`, the dataset lacked the declared `procedure` column),
+renamed and exported three calls later.
+
+The five unadvised refusals were: a document named as a dataset
+(`describe_dataset("doc/patient.md")`), a document path with a leading slash
+(`attach_metadata("/doc/patient.md")`), a bare field as a filter condition, a
+sort by a field that a compact object's `select` had already dropped, and
+`describe_dataset("patient")` for a table that is not in the workspace. The
+first four became, in this order, the `document_as_dataset` advice (with the
+`attach_metadata` rewrite), leniency in the document resolver, the
+`predicate_not_boolean` advice, and a resolver rule that runs a compact
+object's `select` after its `sort` when the sort key would be dropped. The
+fifth already answers itself: the response lists the datasets that exist.
+These are not yet measured on a model run.
+
+## 2026-09-02 · task_44 after the harness split, before advice
+
+The harness moved to `agent_harness/` with framing, scripts and scoring
+unchanged. The model is `qwen/qwen3.5-35b-a3b` through the Kilo gateway, which
+reports no cost, so the cost column is absent from here on. Three runs on
+`task_44`:
+
+| official | mean turns | mean prompt tokens | refusals | refusals naming the accepted shape | exports | `semi_join` use |
+|---|---|---|---|---|---|---|
+| 0/3 (unchanged) | 30.0 (was 26.7) | 425k (was 336k) | 12 (11 errors, 1 needs_resolution) | 0 | 0 (was 1) | 0/3 (was 1/3) |
+
+Per run:
+
+| run | official | declared columns | turns | tool calls | refusals | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|
+| 1 | failed (no file) | `treatment_id, procedure_name` | 30 | 31 | 3 | 428k | max turns |
+| 2 | failed (no file) | `treatment_id, procedure` | 30 | 31 | 5 | 436k | max turns |
+| 3 | failed (no file) | `procedure` | 30 | 31 | 3 | 412k | max turns |
+
+All three declared in turn 1; run 3 declared the gold shape exactly, the
+first of twelve declarations across all measurements to do so. None exported.
+The refusals: three `IN (SELECT …)` subqueries answered with a parser error
+("Expected ')'"), `distinct` as a key and as a select prefix (three), `join.on`
+as an equality string (two), `LIKE` (one), an aggregate written inside
+`select` (one), an inline relation as `source` (one), a document named as a
+dataset (one). Five carried no hint, six a generic one ("Use one of the listed
+field names"), one an example of another shape; none named the shape the
+backend accepts for what the model wrote, and `semi_join` was never
+discovered.
+
+Run 2 had the answer. At turn 27 its preview of `treatment` filtered by the
+four event ids at the latest `cost` timestamp returned the four gold procedure
+names in gold order; it spent the last three turns trying to fold that into one
+pipeline (an inline relation as source, `on` as an equality string) and never
+materialized or exported it. Runs 1 and 3 filtered `treatment.patientunitstayid`
+by a `patienthealthsystemstayid` value taken from `cost`, got empty previews
+marked success, and kept previewing `cost`. The `cost.eventid →
+treatment.treatmentid` relationship is declared nowhere in the workspace: the
+SQLite foreign keys point at a `patient` table that is not there, and neither
+document mentions it. No backend fact can supply it; run 2 shows the model can
+find it.
+
+This measurement is the ground for MADR 0010: a refusal must name the accepted
+shape, and a silent failure must be named too.
 
 ## 2026-08-31 · post-semi-join task_44 experiment
 

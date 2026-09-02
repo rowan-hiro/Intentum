@@ -24,7 +24,8 @@ This server is an agent-ready data backend. Express what you want, not how to do
 - Reference datasets by name, alias, id, or a loose description ("yesterday's sales").
 - Field names may be approximate; responses report how they were resolved.
 - If a response has status "needs_resolution", pick one of the candidates and retry.
-- If a response has status "error", read `code`, `message`, `hint` and `candidates`; most errors are recoverable by fixing the intent.
+- If a response has status "error", read `code`, `message` and `advice`: each advice entry says what the backend accepts instead of what you wrote and, when the fix is mechanical, carries `rewrite`, your request as tool calls to send as-is; `candidates` lists what a name could have meant. Most errors are recoverable by fixing the intent.
+- A successful response may carry `advice` too: an empty result says where a filtered value actually occurs; a result that already has the declared output shape says so and names the next call.
 - State-changing tools are safe to retry; identical requests replay the original result.
 - Declare the shape of your deliverable with declare_output while the requirement is in front of you; export_result holds the file to it.
 The backend owns identifiers, storage layout, versions, lineage, audit and transactions.

@@ -180,3 +180,17 @@ def test_step_body_nested_under_its_own_key(backend, orders):
     assert rows(compound) == [["East", 1494.0]]
     single_measure = backend.transform_dataset("orders", {"aggregate": {"function": "max", "field": "amount"}})
     assert names(single_measure) == ["max_amount"] and rows(single_measure) == [[900.0]]
+
+
+# -- shapes from the 2026-09-02 measurement (after the recovery module) --
+
+def test_compact_select_waits_for_a_sort_by_a_dropped_field(backend, orders):
+    """{"select": [...], "sort": "-amount"} where amount is not selected: sort first, then project."""
+    response = backend.transform_dataset("orders", {"select": ["region", "customer"], "filter": "amount > 100", "sort": "-amount", "limit": 2})
+    assert names(response) == ["region", "customer"]
+    assert rows(response) == [["East", "Acme Corp"], ["East", "Umbrella"]]
+
+
+def test_compact_select_alias_can_still_be_sorted_by(backend, orders):
+    response = backend.transform_dataset("orders", {"select": ["region", "amount as revenue"], "sort": "-revenue", "limit": 1})
+    assert names(response) == ["region", "revenue"] and rows(response) == [["East", 900.0]]

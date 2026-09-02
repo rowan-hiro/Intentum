@@ -40,3 +40,10 @@ The agent side becomes agent_harness/, a top-level package beside agent_backend/
 Status: Accepted → Accepted
 
 Implemented in outcome 2026-09-02-001: agent_harness/ with config, model, loop, perception and scenarios/dataspace; tests/test_boundary.py enforces the import rules, the absence of scenario names in the backend and the wheel exclusion; the scripted DataSpace runs pass 4/4 unchanged after the move; no backend module changed.
+
+<!-- driftseal-reconciliation: eb14617b-7860-4782-8958-e2b93ae1a51f -->
+### 2026-09-02T08:04:43.066Z — Outcome `2026-09-02-002`
+
+Status: Accepted → Accepted
+
+The split held under a new module on each side: advice (language and data facts) went into the backend, pacing (the preview-streak nudge) and the convergence metrics into the harness loop and runner. One harness fix on the way: the scripted layer now writes under runs/<task>/scripted so it never wipes the model-driven layer's runs/<task>/agent.

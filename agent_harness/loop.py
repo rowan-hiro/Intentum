@@ -5,6 +5,10 @@ Every tool call is forwarded to the server and the structured response is
 handed back verbatim, truncated only for size. The loop knows nothing about
 the task: the caller names the deliverable and the prompts that steer the
 model once it has been written or when it stops calling tools.
+
+Pacing is the loop's business, not the backend's (MADR 0009, 0010): when the
+model keeps previewing one source without materializing anything, the loop
+says so, with the turns that remain.
 """
 
 from __future__ import annotations
@@ -18,6 +22,12 @@ from typing import Any
 
 from agent_harness.model import chat, openai_tools
 
+STALL_PROMPT = (
+    "You have previewed {source} {count} times in a row without materializing anything; {remaining} turns remain. "
+    "If a preview already shows the answer, materialize it with materialize_result and export it; "
+    "if it does not, change the approach rather than previewing again."
+)
+
 
 @dataclass
 class LoopResult:
@@ -28,6 +38,23 @@ class LoopResult:
     usage: dict[str, int]
     cost_usd: float
     elapsed_s: float
+    stall_nudges: int = 0            # times the loop pointed out a preview streak
+
+
+def _preview_streak(tool_events: list[dict[str, Any]]) -> tuple[str | None, int]:
+    """How many trailing tool calls previewed the same source without materializing or exporting."""
+    source: str | None = None
+    count = 0
+    for event in reversed(tool_events):
+        if event["tool"] != "transform_dataset" or (event.get("arguments") or {}).get("output_name"):
+            break
+        this = str((event.get("arguments") or {}).get("source"))
+        if source is None:
+            source = this
+        elif this != source:
+            break
+        count += 1
+    return source, count
 
 
 def _delivered(event: dict[str, Any], deliverable: Path) -> bool:
@@ -38,7 +65,8 @@ def _delivered(event: dict[str, Any], deliverable: Path) -> bool:
 
 async def run_tool_loop(server, config: dict[str, str], *, system_prompt: str, user_prompt: str,
                         deliverable: Path | None, delivered_prompt: str, nudge_prompt: str,
-                        max_turns: int, max_tool_chars: int, max_tokens: int, max_nudges: int = 2) -> LoopResult:
+                        max_turns: int, max_tool_chars: int, max_tokens: int, max_nudges: int = 2,
+                        preview_streak: int = 4, stall_prompt: str = STALL_PROMPT) -> LoopResult:
     tools = openai_tools(await server.list_tools())
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -50,6 +78,8 @@ async def run_tool_loop(server, config: dict[str, str], *, system_prompt: str, u
     tool_events: list[dict[str, Any]] = []
     stop_reason = "max_turns"
     nudges = 0
+    stall_nudges = 0
+    stall_nudged_at = 0
     delivered_once = False
     started = time.perf_counter()
 
@@ -90,7 +120,9 @@ async def run_tool_loop(server, config: dict[str, str], *, system_prompt: str, u
                     response = {"status": "error", "code": "INVALID_INTENT", "message": str(err)[:800], "recoverable": True}
                 tool_events.append({"turn": turn, "tool": name, "arguments": arguments, "status": response.get("status"),
                                     "code": response.get("code"), "summary": response.get("summary") or response.get("message"),
-                                    "resolution": response.get("resolution"), "elapsed_s": round(time.perf_counter() - c0, 3)})
+                                    "resolution": response.get("resolution"),
+                                    "advice": [a.get("kind") for a in (response.get("advice") or []) if isinstance(a, dict)],
+                                    "elapsed_s": round(time.perf_counter() - c0, 3)})
             text = json.dumps(response, ensure_ascii=False, default=str)
             if len(text) > max_tool_chars:
                 text = text[:max_tool_chars] + f"... [truncated {len(text) - max_tool_chars} chars]"
@@ -99,6 +131,13 @@ async def run_tool_loop(server, config: dict[str, str], *, system_prompt: str, u
         turns.append(record)
         print(f"  turn {turn}: " + (", ".join(f"{c['tool']}→{c['status']}" + (f"({c['code']})" if c["code"] else "") for c in record["tool_calls"])
                                  or f"text: {(message.get('content') or '')[:120]!r}"))
+
+        source, streak = _preview_streak(tool_events)
+        if streak >= preview_streak and streak - stall_nudged_at >= preview_streak:
+            stall_nudged_at = streak
+            stall_nudges += 1
+            messages.append({"role": "user", "content": stall_prompt.format(source=source, count=streak, remaining=max_turns - turn)})
+            print(f"  nudge: {streak} previews of {source} in a row")
 
         if deliverable is not None and not delivered_once and any(
             e["turn"] == turn and _delivered(e, deliverable) for e in tool_events
@@ -119,4 +158,5 @@ async def run_tool_loop(server, config: dict[str, str], *, system_prompt: str, u
             messages.append({"role": "user", "content": nudge_prompt})
 
     return LoopResult(stop_reason=stop_reason, turns=turns, tool_events=tool_events, messages=messages,
-                      usage=dict(usage_total), cost_usd=round(cost_total, 6), elapsed_s=round(time.perf_counter() - started, 1))
+                      usage=dict(usage_total), cost_usd=round(cost_total, 6), elapsed_s=round(time.perf_counter() - started, 1),
+                      stall_nudges=stall_nudges)

@@ -52,3 +52,10 @@ Implemented in outcome 2026-08-28-010: declare_output (agent_backend/core/backen
 Status: Accepted → Accepted
 
 Evidence from the third measurement: the model declared its contract at turns 7 to 28, not while the question was fresh, and in five of six runs the declaration encoded a misreading (extra descriptive columns), which export_result then enforced faithfully; one CONTRACT_MISMATCH was repaired in a single turn from the error's problem list. The mechanism works as decided; whether a fresh declaration reads the question better is the next experiment, to be run from the scenario prompt in examples/, not from core.
+
+<!-- driftseal-reconciliation: 5c29497d-050b-49de-99a1-9f307d920197 -->
+### 2026-09-02T08:04:42.976Z — Outcome `2026-09-02-002`
+
+Status: Accepted → Accepted
+
+Contracts now teach as well as hold: a preview or dataset with the declared shape is told so (matches_contract) with the materialize call, one that is a rename or projection away gets the reshape (near_contract), and CONTRACT_MISMATCH at export carries the reshape and the export as a rewrite. Measured on task_329 and task_44: every run took matches_contract up and exported within two or three calls; the verdicts stayed 0/3 because the declared shape itself carried an extra column, which the contract holds by design.

@@ -123,7 +123,9 @@ if exactly one) → `NOT_FOUND` with the list of available fields.
 are applied in the default order join → semi_join → filter → derive → select →
 aggregate → sort → limit → rename. If that compact object's `select` names a
 measure produced by its aggregate, the projection moves after the aggregate;
-an explicit list of steps always keeps the written order:
+if its `sort` names a field the projection would drop, the projection moves
+after the sort (a sort by a select alias keeps the projection first); an
+explicit list of steps always keeps the written order:
 
 ```json
 {"filter": "quantity >= 5 and region in ('West','East')",
@@ -234,6 +236,41 @@ Codes: `NOT_FOUND`, `AMBIGUOUS_REFERENCE` (rendered as `status: needs_resolution
 `TYPE_MISMATCH`, `CONFLICT`, `CONTRACT_MISMATCH`, `PERMISSION_DENIED`,
 `EXECUTION_FAILED`, `INTERNAL`.
 
+A refusal also teaches (MADR 0010). What an agent may write is an open set;
+what the backend accepts is small and closed, so every refusal is mapped onto
+the nearest accepted shape by `core/recovery` and carried as `advice`: the
+kind of mistake, what the backend read and what it accepts instead, and, when
+the mapping is mechanical, `rewrite`, the agent's own request restated as the
+tool calls to send as-is:
+
+```json
+{"status": "error", "code": "INVALID_TRANSFORM",
+ "message": "Expected ')' at position 29 in expression \"patientunitstayid IN (SELECT ...\".",
+ "advice": [{"kind": "subquery_as_semi_join",
+             "explanation": "A subquery is not an expression in this language. To keep rows of the source whose patientunitstayid appears in cost.patientunitstayid, add a semi_join step ...",
+             "rewrite": [{"tool": "materialize_result", "arguments": {"source": "cost", "transform": {"filter": "uniquepid = '025-44842'"}, "name": "cost_filtered"}},
+                         {"tool": "transform_dataset", "arguments": {"source": "treatment", "transform": [{"semi_join": {"right": "cost_filtered", "on": {"patientunitstayid": "patientunitstayid"}}}, {"select": ["treatmentid", "treatmentname"]}]}}]}]}
+```
+
+Detectors so far: a subquery in an expression (semi_join), `distinct` as a key
+or prefix (measureless `group_by`), a join `on` written as an equality (key
+mapping), `LIKE` (`contains` / `starts_with` / `ends_with`), an aggregate
+function inside `select` (aggregate step), an expression with an alias inside
+`select` (derive step), an inline relation as `source` (materialize it first),
+an unknown key (nearest accepted key), a string function on a date or
+timestamp (how dates are computed, and that rendering belongs to export), and a
+contract mismatch at export (the reshape and the export). A detector that
+cannot rewrite still explains. Every rewrite is executed in its test and must
+succeed.
+
+Two silent failures get the same treatment on *successful* responses: an empty
+result whose filter literal is absent from the filtered column says where in
+the workspace that literal does occur (`value_not_found`), and a result that
+already has, or mechanically reshapes to, the open output contract says so with
+the next call (`matches_contract`, `near_contract`). The backend teaches its own
+language and reports its own data; it still never reads the task. Pacing (the
+turn budget, repeated previews) belongs to the agent harness.
+
 ## 2. Repository structure
 
 ```
@@ -253,6 +290,7 @@ agent_backend/
 │   ├── execution/          IR → SQL compiler, executor
 │   ├── export/             export format specification (value rendering at the file boundary)
 │   ├── contracts/          output contracts: declared deliverable shape, checked at export
+│   ├── recovery/           teach on refusal: structured advice and rewrites on refusals and silent failures
 │   ├── lineage/            lineage recording and traversal
 │   └── audit/              audit trail
 ├── storage/
@@ -507,7 +545,13 @@ imports in ~2 s and the task's query runs through the semantic steps.
    backend expressiveness. Most DataSpace workspaces also carry PDFs (384 of
    410) or video (189); reading them is the harness's job
    (`agent_harness/perception/`, MADR 0009), and the first reader, chosen by
-   the first measured task that needs it, is the next step there. A validated read-only `raw_query` fallback step is
+   the first measured task that needs it, is the next step there. The
+   2026-09-02 runs showed that refusals never named the accepted shape and that
+   silent failures (empty previews, an unexported correct preview) went
+   unremarked; `core/recovery` now answers both with structured advice and
+   rewrites (MADR 0010), and the harness reports refusals without advice and
+   the repair rate beside the pass rate, so convergence is measured rather than
+   read off task by task. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating

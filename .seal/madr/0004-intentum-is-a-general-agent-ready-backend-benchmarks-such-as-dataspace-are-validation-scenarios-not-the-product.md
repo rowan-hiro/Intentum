@@ -61,3 +61,10 @@ The boundary remains intact. post-aggregate select, distinct grouping and semi_j
 Status: Accepted → Accepted
 
 Scenario code moved from examples/ to agent_harness/scenarios/dataspace/ as part of the harness split (MADR 0009). The boundary this record states is now enforced by tests/test_boundary.py: the backend names no scenario and imports nothing from the harness, and the harness reaches the backend only through its public API and agent_backend.mcp.server. Status unchanged.
+
+<!-- driftseal-reconciliation: f28448bc-0b5f-4f94-a781-5a0777b33dc4 -->
+### 2026-09-02T08:04:42.890Z — Outcome `2026-09-02-002`
+
+Status: Accepted → Accepted
+
+core/recovery stays general: it knows the transform language and the workspace's data, never a task, and its advice text names shapes of the language, not benchmark columns; the DataSpace refusals entered it only as general detectors with tests. tests/test_boundary.py still finds no scenario name in the backend.

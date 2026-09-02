@@ -214,3 +214,10 @@ The measured sequence is complete: declaration-first framing was tested before v
 Status: Accepted → Accepted
 
 The DataSpace sequence continues in the agent harness: the scenario, its evaluator, scoring and measurements now live under agent_harness/scenarios/dataspace/ with framing, scripts and scoring unchanged, so later measurements stay comparable with the 2026-08-28 to 2026-08-31 ones. Next in the sequence: the first perception reader on the harness side (PDF first; 384 of 410 workspaces carry one, 189 carry video), chosen by the first measured task that needs it.
+
+<!-- driftseal-reconciliation: 5bb20ada-82ac-4b10-b614-d3809d18779b -->
+### 2026-09-02T08:04:43.156Z — Outcome `2026-09-02-002`
+
+Status: Accepted → Accepted
+
+Fifth measurement (2026-09-02, after the recovery module): task_329 0/3 with unadvised refusals 7 to 0, turns 15.0 to 11.7; task_44 0/3 but exports 0/3 to 3/3 with the four gold values in every file, turns 30.0 to 26.0. The remaining failure on both is the declared extra column, the model's reading, outside the backend by MADRs 0007/0008. Next in the sequence: measure the four fixes from the task_44 unadvised refusals, then the first perception reader for a PDF-bearing task (MADR 0009).

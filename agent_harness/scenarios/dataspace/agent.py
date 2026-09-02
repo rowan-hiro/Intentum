@@ -36,6 +36,28 @@ from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, NUDGE_PR
 from agent_harness.scenarios.dataspace.scoring import official_verdict, run_champion_scorer, run_official_evaluator
 
 
+def convergence(tool_events: list[dict[str, Any]], window: int = 2) -> dict[str, Any]:
+    """How the backend's refusals were taken up (MADR 0010).
+
+    A refusal is an error or needs_resolution response; it is unadvised when an
+    error carries no advice; it is repaired when a call of the same tool succeeds
+    within ``window`` later calls.
+    """
+    refusals = [i for i, e in enumerate(tool_events) if e["status"] in ("error", "needs_resolution")]
+    unadvised = [i for i in refusals if tool_events[i]["status"] == "error" and not tool_events[i].get("advice")]
+    repaired = [i for i in refusals if any(
+        later["tool"] == tool_events[i]["tool"] and later["status"] == "success"
+        for later in tool_events[i + 1:i + 1 + window])]
+    advice_kinds: Counter = Counter(kind for e in tool_events for kind in (e.get("advice") or []))
+    return {
+        "refusals": len(refusals),
+        "unadvised_refusals": len(unadvised),
+        "repaired_refusals": len(repaired),
+        "repair_rate": round(len(repaired) / len(refusals), 3) if refusals else None,
+        "advice_kinds": dict(advice_kinds),
+    }
+
+
 async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, config: dict[str, str], *,
                    max_turns: int, max_tool_chars: int, max_tokens: int) -> dict[str, Any]:
     context_dir = task_context(benchmark, task)
@@ -61,7 +83,8 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
         "prediction": str(prediction_path) if prediction_path.exists() else None,
         "tool_histogram": dict(Counter(e["tool"] for e in loop.tool_events)),
         "status_histogram": dict(Counter(f"{e['status']}:{e['code']}" if e["code"] else str(e["status"]) for e in loop.tool_events)),
-        "integrity_ok": integrity["ok"], "tool_events": loop.tool_events, "turn_log": loop.turns,
+        "integrity_ok": integrity["ok"], "stall_nudges": loop.stall_nudges, "convergence": convergence(loop.tool_events),
+        "tool_events": loop.tool_events, "turn_log": loop.turns,
     }
     if prediction_path.exists():
         official = run_official_evaluator(pred_root, benchmark, task, run_dir)
@@ -82,11 +105,16 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
 
     codes: Counter = Counter()
     tools: Counter = Counter()
+    advice_kinds: Counter = Counter()
     for r in results:
         for key, count in r["status_histogram"].items():
             codes[key] += count
         for key, count in r["tool_histogram"].items():
             tools[key] += count
+        for key, count in r["convergence"]["advice_kinds"].items():
+            advice_kinds[key] += count
+    refusals = sum(r["convergence"]["refusals"] for r in results)
+    repaired = sum(r["convergence"]["repaired_refusals"] for r in results)
     return {
         "runs": len(results),
         "passed": sum(1 for r in results if r["official"]["passed"]),
@@ -101,6 +129,11 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "stop_reasons": dict(Counter(r["stop_reason"] for r in results)),
         "tool_status_codes": dict(codes),
         "tool_usage": dict(tools),
+        "refusals": refusals,
+        "unadvised_refusals": sum(r["convergence"]["unadvised_refusals"] for r in results),
+        "repair_rate": round(repaired / refusals, 3) if refusals else None,
+        "advice_kinds": dict(advice_kinds),
+        "stall_nudges": sum(r["stall_nudges"] for r in results),
         "champion_scores": [(r.get("champion_scorer") or {}).get("score") for r in results],
     }
 
@@ -140,8 +173,10 @@ def main() -> int:
         result = asyncio.run(run_once(args.task, question, benchmark, run_dir, config, max_turns=args.max_turns,
                                       max_tool_chars=args.max_tool_chars, max_tokens=args.max_tokens))
         results.append(result)
+        c = result["convergence"]
         print(f"  → passed={result['official']['passed']} turns={result['turns']} tool_calls={result['tool_calls']} "
-              f"tokens={result['usage'].get('total_tokens')} cost=${result['cost_usd']:.4f} stop={result['stop_reason']}")
+              f"tokens={result['usage'].get('total_tokens')} cost=${result['cost_usd']:.4f} stop={result['stop_reason']} "
+              f"refusals={c['refusals']} unadvised={c['unadvised_refusals']} repair_rate={c['repair_rate']} nudges={result['stall_nudges']}")
         summary = summarize(results)
         (out_dir / "agent_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\n=== summary ===")
