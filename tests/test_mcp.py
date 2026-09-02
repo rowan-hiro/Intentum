@@ -61,7 +61,7 @@ def test_output_contract_through_mcp(server, tmp_path):
     assert call(server, "import_dataset", path=str(ORDERS_CSV))["status"] == "success"
     declared = call(server, "declare_output", columns=["region", "revenue"], rows={"one_per": ["region"]})
     assert declared["status"] == "success" and declared["contract"]["id"] == "oc_1", declared
-    assert call(server, "declare_output", columns="region")["code"] == "CONFLICT"
+    assert call(server, "declare_output", columns="region", rows="at_least_one")["code"] == "CONFLICT"
     call(server, "materialize_result", source="orders", transform={"group_by": ["region"], "measures": ["revenue", "count"]}, name="wide")
     refused = call(server, "export_result", dataset="wide", path=str(tmp_path / "p.csv"))
     assert refused["code"] == "CONTRACT_MISMATCH" and refused["details"]["repair"] == {"select": ["region", "revenue"]}

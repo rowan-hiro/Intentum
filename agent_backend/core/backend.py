@@ -31,7 +31,15 @@ from ..storage.metadata.sqlite import SqliteMetadataStore
 from .recovery import Advice, advise_contract, advise_empty_result, advise_error, call as tool_call
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
-from .contracts import contract_summary, parse_contract, repair_transform, verify_columns, verify_rows
+from .contracts import (
+    ContractSpec,
+    contract_summary,
+    organizing_keys,
+    parse_contract,
+    repair_transform,
+    verify_columns,
+    verify_rows,
+)
 from .errors import (
     AmbiguousReferenceError,
     BackendError,
@@ -1334,12 +1342,17 @@ class Backend:
             evidence = (self._verify_contract(contract, ds, version, export={"path": str(target), "format": fmt,
                                                                          "format_spec": format_spec, "overwrite": overwrite})
                         if contract is not None else None)
+            # What the contract carries, in its order, sorted the way it declares:
+            # the organizing columns are needed in the dataset and left out of the
+            # file (MADR 0012). Without a contract the dataset is written as it is.
+            projection = [c.name for c in contract.columns] if contract is not None and organizing_keys(contract) else None
+            ordering = [(o.name, o.descending) for o in contract.order_by] if contract is not None else []
             renderer: ValueRenderer | None = None
             columns: list[str] = []
             data: list[Any] = []
             if spec is not None:
                 # Prepared before anything is staged, so a bad column key costs no work.
-                columns, data = self.engine.read_table(version.physical_table)
+                columns, data = self.engine.read_table(version.physical_table, columns=projection, order_by=ordering)
                 renderer = ValueRenderer(spec, columns)
                 for key, column, how in renderer.lenient:
                     notes.append(ResolutionNote("format_spec.columns", key, column, how))
@@ -1349,7 +1362,8 @@ class Backend:
             with TemporaryDirectory(prefix=".intentum-export-", dir=target.parent) as staging_dir:
                 staged = Path(staging_dir) / target.name
                 if renderer is None:
-                    rows = self.engine.export_table(version.physical_table, staged, fmt)
+                    rows = self.engine.export_table(version.physical_table, staged, fmt,
+                                                    columns=projection, order_by=ordering)
                 else:
                     rows = write_formatted_csv(staged, columns, data, renderer)
                 content_hash = self.workspace.content_hash(staged)
@@ -1380,7 +1394,7 @@ class Backend:
                     "path": str(target),
                     "format": fmt,
                     "rows": rows,
-                    "columns": [c.name for c in ds.columns],
+                    "columns": projection or [c.name for c in ds.columns],
                     "content_hash": content_hash,
                     "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}."
                                + (" Values were rendered with the given format specification." if spec is not None else ""),
@@ -1401,6 +1415,7 @@ class Backend:
         columns: Any,
         *,
         rows: Any = None,
+        order_by: Any = None,
         description: str | None = None,
         reason: str | None = None,
         principal: str | None = None,
@@ -1413,14 +1428,22 @@ class Backend:
         unsatisfied is an amendment and needs a ``reason``, which is recorded.
         Re-declaring the same shape changes nothing and is not an error.
         """
-        spec = parse_contract(columns, rows, description)
-        intent = _jsonable({"columns": columns, "rows": rows, "description": description, "reason": reason})
+        try:
+            spec = parse_contract(columns, rows, order_by, description)
+        except BackendError as err:
+            # Teach on refusal: a declaration is refused with the grammar it accepts.
+            err.advice = advise_error(err, tool="declare_output", arguments={
+                "columns": columns, "rows": rows, "order_by": order_by, "description": description})
+            raise
+        intent = _jsonable({"columns": columns, "rows": rows, "order_by": order_by, "description": description,
+                            "reason": reason})
         with self._operation(OperationKind.DECLARE_OUTPUT, intent, principal) as op:
             op.canonical_ir = {
                 "operation": "declare_output",
                 "columns": [{"name": c.name, "type": str(c.logical_type) if c.logical_type else None} for c in spec.columns],
                 "rows": str(spec.rows) if spec.rows else None,
                 "row_keys": spec.row_keys,
+                "order_by": [{"column": o.name, "descending": o.descending} for o in spec.order_by],
             }
             current = self.store.latest_contract()
             now = self.clock()
@@ -1447,6 +1470,7 @@ class Backend:
                 current.columns = spec.columns
                 current.rows = spec.rows
                 current.row_keys = spec.row_keys
+                current.order_by = spec.order_by
                 if spec.description:
                     current.description = spec.description
                 current.revision += 1
@@ -1464,12 +1488,13 @@ class Backend:
                         "summary": f"Output contract {current.id} amended to revision {current.revision}: "
                                    f"{self._contract_sentence(current)}",
                     }
+                    self._add_name_facts(response, spec)
                     self._complete(op, response, None, None, now)
                 log_event("state.committed", operation_id=op.id, contract_id=current.id, amended=True)
                 return response
             contract = OutputContract(id=self.store.allocate_id("oc"), columns=spec.columns, rows=spec.rows,
-                                      row_keys=spec.row_keys, description=spec.description, operation_id=op.id,
-                                      created_at=now, updated_at=now)
+                                      row_keys=spec.row_keys, order_by=spec.order_by, description=spec.description,
+                                      operation_id=op.id, created_at=now, updated_at=now)
             with self.store.transaction():
                 self.store.insert_contract(contract)
                 details: dict[str, Any] = {"contract": contract_summary(contract)}
@@ -1481,9 +1506,66 @@ class Backend:
                     "status": "success", "operation_id": op.id, "contract": contract_summary(contract),
                     "summary": f"Output contract {contract.id} declared: {self._contract_sentence(contract)}",
                 }
+                self._add_name_facts(response, spec)
                 self._complete(op, response, None, None, now)
             log_event("state.committed", operation_id=op.id, contract_id=contract.id)
             return response
+
+    def _add_name_facts(self, response: dict[str, Any], spec: ContractSpec) -> None:
+        facts = self._declared_name_facts(spec)
+        if facts:
+            response["names"] = facts
+
+    def _declared_name_facts(self, spec: ContractSpec) -> list[dict[str, Any]]:
+        """What the workspace holds under each name a declaration uses.
+
+        The backend never sees the question, so it cannot know whether a name
+        belongs in the answer. What it can do is say what the name is *here* —
+        which dataset carries it, its type and role, and whether it is unique
+        per row, which is what tells a locator apart from a value — and leave
+        the reading to the agent (MADR 0010: the backend owns the data facts).
+        """
+        datasets = self.store.list_datasets()
+        facts: list[dict[str, Any]] = []
+        carried = {normalize(c.name) for c in spec.columns}
+        for name in [c.name for c in spec.columns] + organizing_keys(spec):
+            matches: list[dict[str, Any]] = []
+            for dataset in datasets:
+                if len(matches) == 3:
+                    break
+                column = next((c for c in self.store.get_columns(dataset.id)
+                               if normalize(c.name) == normalize(name)), None)
+                if column is None:
+                    continue
+                match: dict[str, Any] = {"dataset": dataset.name, "column": column.name,
+                                         "type": str(column.logical_type)}
+                if column.semantic_role != SemanticRole.UNKNOWN:
+                    match["role"] = str(column.semantic_role)
+                unique = self._column_is_unique(dataset, column.name)
+                if unique is not None:
+                    match["unique_per_row"] = unique
+                matches.append(match)
+            fact: dict[str, Any] = {"name": name, "carried": normalize(name) in carried}
+            if matches:
+                fact["matches"] = matches
+                locators = [m["dataset"] for m in matches if m.get("unique_per_row")]
+                if locators and fact["carried"]:
+                    fact["note"] = (f"{name!r} is unique per row in {', '.join(locators)}, which is what a locator "
+                                    "looks like rather than a value; the answer will carry it.")
+            else:
+                fact["note"] = f"no dataset in this workspace has a column named {name!r} yet."
+            facts.append(fact)
+        return facts
+
+    def _column_is_unique(self, dataset: Dataset, column: str) -> bool | None:
+        """Whether the column has a different value in every row, when that is cheap to know."""
+        version = self.store.get_version(dataset.id, dataset.version)
+        if version is None or version.row_count <= 1:
+            return None
+        try:
+            return self.engine.count_distinct_rows(version.physical_table, [column]) == version.row_count
+        except BackendError:
+            return None
 
     def _verify_contract(self, contract: OutputContract, ds: Dataset, version: DatasetVersion,
                          export: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1550,6 +1632,9 @@ class Backend:
             text += f", one row per [{', '.join(contract.row_keys)}]"
         elif contract.rows is not None:
             text += f", rows {contract.rows.replace('_', ' ')}"
+        if contract.order_by:
+            text += (", ordered by ["
+                     + ", ".join(o.name + (" desc" if o.descending else "") for o in contract.order_by) + "]")
         return text
 
     @staticmethod
@@ -1562,6 +1647,13 @@ class Backend:
             text += " and at least one row"
         elif contract.rows == RowCardinality.ONE_PER:
             text += f" and one row per [{', '.join(contract.row_keys)}]"
+        if contract.order_by:
+            text += (", sorted by ["
+                     + ", ".join(o.name + (" descending" if o.descending else "") for o in contract.order_by) + "]")
+        keys = organizing_keys(contract)
+        if keys:
+            text += (f"; [{', '.join(keys)}] organize the answer without being part of it, so the dataset must carry "
+                     "them and the file will not")
         if contract.status == ContractStatus.SATISFIED:
             return text + f"; satisfied by {contract.satisfied_by}."
         return text + "; export_result will refuse anything else."

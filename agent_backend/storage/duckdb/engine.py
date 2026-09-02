@@ -94,10 +94,12 @@ class AnalyticsEngine(Protocol):
     def count_distinct_rows(self, table: str, columns: list[str]) -> int: ...
     def column_contains(self, table: str, column: str, value: Any) -> bool: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
-    def read_table(self, table: str) -> tuple[list[str], list[tuple[Any, ...]]]: ...
+    def read_table(self, table: str, *, columns: list[str] | None = None,
+                   order_by: list[tuple[str, bool]] | None = None) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def drop_table(self, table: str) -> None: ...
     def list_tables(self) -> list[str]: ...
-    def export_table(self, table: str, path: Path, fmt: str) -> int: ...
+    def export_table(self, table: str, path: Path, fmt: str, *, columns: list[str] | None = None,
+                     order_by: list[tuple[str, bool]] | None = None) -> int: ...
     def close(self) -> None: ...
 
 
@@ -313,9 +315,19 @@ class DuckDBEngine:
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)
 
-    def read_table(self, table: str) -> tuple[list[str], list[tuple[Any, ...]]]:
-        """Every row of a table as typed Python values (used by formatted exports)."""
-        return self.query(f"SELECT * FROM {quote_ident(table)}")
+    def read_table(self, table: str, *, columns: list[str] | None = None,
+                   order_by: list[tuple[str, bool]] | None = None) -> tuple[list[str], list[tuple[Any, ...]]]:
+        """Every row of a table as typed Python values (used by formatted exports).
+
+        ``columns`` and ``order_by`` project and sort as ``export_table`` does,
+        so both export paths write the same rows in the same order.
+        """
+        projection = ", ".join(quote_ident(c) for c in columns) if columns else "*"
+        ordering = ""
+        if order_by:
+            ordering = " ORDER BY " + ", ".join(
+                quote_ident(c) + (" DESC" if descending else " ASC") for c, descending in order_by)
+        return self.query(f"SELECT {projection} FROM {quote_ident(table)}{ordering}")
 
     def drop_table(self, table: str) -> None:
         self.conn.execute(f"DROP TABLE IF EXISTS {quote_ident(table)}")
@@ -327,16 +339,28 @@ class DuckDBEngine:
         ).fetchall()
         return [str(r[0]) for r in rows]
 
-    def export_table(self, table: str, path: Path, fmt: str) -> int:
-        """Write a table to a file; returns the row count written."""
+    def export_table(self, table: str, path: Path, fmt: str, *, columns: list[str] | None = None,
+                     order_by: list[tuple[str, bool]] | None = None) -> int:
+        """Write a table to a file; returns the row count written.
+
+        ``columns`` writes those columns, in that order, instead of every
+        column; ``order_by`` names ``(column, descending)`` pairs to sort by,
+        which need not be among the columns written.
+        """
         if fmt == "csv":
             options = "FORMAT CSV, HEADER TRUE, DELIMITER ',', NULL ''"
         elif fmt == "parquet":
             options = "FORMAT PARQUET"
         else:
             raise InvalidSchemaError(f"Unsupported export format {fmt!r}; supported formats are csv and parquet.", field="format")
+        projection = ", ".join(quote_ident(c) for c in columns) if columns else "*"
+        ordering = ""
+        if order_by:
+            ordering = " ORDER BY " + ", ".join(
+                quote_ident(c) + (" DESC" if descending else " ASC") for c, descending in order_by)
         try:
-            self.conn.execute(f"COPY (SELECT * FROM {quote_ident(table)}) TO {_literal(str(path))} ({options})")
+            self.conn.execute(
+                f"COPY (SELECT {projection} FROM {quote_ident(table)}{ordering}) TO {_literal(str(path))} ({options})")
         except duckdb.Error as exc:
             raise ExecutionFailedError(f"Export failed: {exc}", details={"path": str(path)}) from exc
         return self.row_count(table)

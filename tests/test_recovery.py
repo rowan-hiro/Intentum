@@ -275,7 +275,7 @@ def test_a_preview_with_the_declared_shape_is_told_so_and_the_export_accepted(ba
 
 
 def test_a_preview_one_reshape_away_from_the_contract_gets_the_reshape(backend, orders):
-    backend.declare_output(["region", "revenue"])
+    backend.declare_output(["region", "revenue"], rows="at_least_one")
     preview = backend.transform_dataset("orders", {"group_by": ["region", "product"], "metric": "revenue"})
     found = advice(preview, "near_contract")
     assert "'product' is not in the contract" in found["explanation"]
@@ -286,13 +286,13 @@ def test_a_preview_one_reshape_away_from_the_contract_gets_the_reshape(backend, 
 
 
 def test_a_preview_missing_a_declared_column_gets_no_contract_advice(backend, orders):
-    backend.declare_output(["region", "revenue"])
+    backend.declare_output(["region", "revenue"], rows="at_least_one")
     preview = backend.transform_dataset("orders", {"group_by": ["region"], "measures": [{"function": "sum", "field": "amount", "alias": "total"}]})
     assert preview["status"] == "success" and "advice" not in preview
 
 
 def test_a_contract_mismatch_at_export_carries_the_reshape_and_the_export(backend, orders, tmp_path):
-    backend.declare_output(["region", "revenue"])
+    backend.declare_output(["region", "revenue"], rows="at_least_one")
     wide = backend.materialize_result("orders", {"group_by": ["region", "product"], "metric": "revenue"}, "wide")
     assert wide["status"] == "success"
     target = tmp_path / "answer.csv"
@@ -308,7 +308,7 @@ def test_a_contract_mismatch_at_export_carries_the_reshape_and_the_export(backen
 
 
 def test_a_contract_mismatch_that_needs_data_explains_without_a_rewrite(backend, orders, tmp_path):
-    backend.declare_output(["region", "revenue", "orders"])
+    backend.declare_output(["region", "revenue", "orders"], rows="at_least_one")
     backend.materialize_result("orders", {"group_by": ["region"], "metric": "revenue"}, "narrow")
     refused = backend.export_result("narrow", str(tmp_path / "answer.csv"))
     found = advice(refused, "contract_mismatch")
@@ -352,3 +352,12 @@ def test_a_bare_field_as_a_filter_is_explained(backend, orders):
     assert response["code"] == "INVALID_TRANSFORM"
     found = advice(response, "predicate_not_boolean")
     assert "is not null" in found["explanation"] and "rewrite" not in found
+
+
+def test_a_declaration_without_rows_is_refused_with_the_grammar(backend):
+    refused = backend.declare_output(["treatmentname"])
+    assert refused["code"] == "INVALID_INTENT" and refused["field"] == "rows"
+    found = advice(refused, "declaration_rows")
+    assert "one_per" in found["explanation"] and "rewrite" not in found
+    order = backend.declare_output(["treatmentname"], rows="one", order_by=[{"column": "x", "direction": "up-ish"}])
+    assert advice(order, "declaration_order")["explanation"].startswith("order_by names")

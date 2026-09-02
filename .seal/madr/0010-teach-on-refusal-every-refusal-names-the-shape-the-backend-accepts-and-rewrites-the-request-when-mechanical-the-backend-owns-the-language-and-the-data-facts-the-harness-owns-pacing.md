@@ -56,3 +56,10 @@ Sixth measurement (task_44 with the four post-round fixes): 1/3 official, refusa
 Status: Accepted → Accepted
 
 limit_tail_as_step added (a SQL LIMIT tail inside a filter becomes a limit step, rewrite executed in its test). In the informed-framing runs the remaining unadvised refusal was one TYPE_MISMATCH (string compared with integer), which already carries the types.
+
+<!-- driftseal-reconciliation: c935bfde-0c44-46a7-b4c9-b9568ae28cf5 -->
+### 2026-09-02T09:23:15.817Z — Outcome `2026-09-02-006`
+
+Status: Accepted → Accepted
+
+Two detectors extend teach-on-refusal to declare_output, which had none: declaration_rows names the three row cardinalities and says a one_per key need not be carried; declaration_order names the order_by shapes and says a sort column does not belong in columns. Neither carries a rewrite - the backend cannot guess the cardinality. The successful declaration now also carries data facts (what each declared name is in this workspace, and whether it is unique per row), which is the same division of labour on a response rather than a refusal: the backend owns the facts, the agent owns the reading.
