@@ -4,7 +4,15 @@ The agent writes the contract down while the requirement is in front of it;
 the backend keeps it and holds every export to it (MADR 0007). This module
 owns the two halves that do not touch storage: reading a loose declaration
 into a canonical one, and comparing a canonical contract with what a dataset
-actually is. The trust model behind it (MADR 0008): a fresh declaration is
+actually is.
+
+A contract names two kinds of column (MADR 0012). The ones in ``columns`` are
+what the answer *carries*, in order. The ones in ``order_by`` and in the
+``one_per`` keys are what it is *organized by*: a question that says "in
+treatment id order" or "per day" names a column in an adverbial role, and that
+column does not have to be part of the answer. Organizing columns are expected
+in the dataset at export, so the backend can order and count by them, and are
+left out of the file. The trust model behind it (MADR 0008): a fresh declaration is
 taken as given, and anything the agent later reproduces from memory is
 checked against this record rather than believed.
 """
@@ -16,7 +24,7 @@ from typing import Any
 
 from ..errors import InvalidIntentError
 from ..ir.typing import comparable
-from ..models.entities import ContractColumn, LogicalType, OutputContract, RowCardinality
+from ..models.entities import ContractColumn, ContractOrder, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize
 
 TYPE_ALIASES: dict[str, LogicalType] = {
@@ -42,6 +50,7 @@ class ContractSpec:
     columns: list[ContractColumn]
     rows: RowCardinality | None
     row_keys: list[str]
+    order_by: list[ContractOrder]
     description: str
 
     def same_shape_as(self, contract: OutputContract) -> bool:
@@ -49,6 +58,7 @@ class ContractSpec:
             [(c.name, c.logical_type) for c in self.columns] == [(c.name, c.logical_type) for c in contract.columns]
             and self.rows == contract.rows
             and self.row_keys == contract.row_keys
+            and [(o.name, o.descending) for o in self.order_by] == [(o.name, o.descending) for o in contract.order_by]
         )
 
 
@@ -72,11 +82,31 @@ class ContractProblem:
 # Reading a declaration
 # --------------------------------------------------------------------------
 
-def parse_contract(columns: Any, rows: Any = None, description: Any = None) -> ContractSpec:
+def parse_contract(columns: Any, rows: Any = None, order_by: Any = None, description: Any = None) -> ContractSpec:
     parsed = _parse_columns(columns)
     cardinality, keys = _parse_rows(rows, parsed)
-    return ContractSpec(columns=parsed, rows=cardinality, row_keys=keys,
+    order = _parse_order(order_by, parsed)
+    return ContractSpec(columns=parsed, rows=cardinality, row_keys=keys, order_by=order,
                         description=str(description).strip() if description else "")
+
+
+def organizing_keys(contract: OutputContract | ContractSpec) -> list[str]:
+    """The columns the deliverable is organized by but does not carry.
+
+    The export needs them in the dataset — it orders and counts by them — and
+    leaves them out of the file. A column that is both ordered by and carried
+    is not one of these: it is simply carried.
+    """
+    carried = {normalize(c.name) for c in contract.columns}
+    keys: list[str] = []
+    seen: set[str] = set()
+    for name in [o.name for o in contract.order_by] + list(contract.row_keys):
+        key = normalize(name)
+        if key in carried or key in seen:
+            continue
+        seen.add(key)
+        keys.append(name)
+    return keys
 
 
 def _parse_type(value: Any, column: str) -> LogicalType:
@@ -130,9 +160,20 @@ def _parse_columns(loose: Any) -> list[ContractColumn]:
     return columns
 
 
+ROWS_ALLOWED: list[Any] = ["one", "at_least_one", {"one_per": ["column", "..."]}]
+_ROWS_HINT = ('A single value is rows="one"; one row for every day is rows={"one_per": ["day"]}; '
+              'an unknown number of rows is rows="at_least_one". A one_per key does not have to be '
+              "a column the answer carries.")
+
+
 def _parse_rows(loose: Any, columns: list[ContractColumn]) -> tuple[RowCardinality | None, list[str]]:
-    if loose is None or loose == "" or loose == {}:
-        return None, []
+    if loose is None or loose == "" or loose == {} or loose == []:
+        # Required: how many rows the answer has, and one row per what, is part
+        # of reading the requirement, and the backend can check it for free.
+        raise InvalidIntentError(
+            "rows is required: say how many rows the answer has.", field="rows",
+            hint=_ROWS_HINT, details={"allowed": ROWS_ALLOWED},
+        )
     if isinstance(loose, bool):
         raise InvalidIntentError("rows must be 'one', 'at_least_one' or {\"one_per\": [columns]}.", field="rows")
     if isinstance(loose, int):
@@ -160,22 +201,85 @@ def _parse_rows(loose: Any, columns: list[ContractColumn]) -> tuple[RowCardinali
         keys = [raw_keys] if isinstance(raw_keys, str) else list(raw_keys or [])
         if not keys or not all(isinstance(k, str) and k.strip() for k in keys):
             raise InvalidIntentError("one_per needs at least one key column name.", field="rows")
-        declared = {c.name for c in columns}
+        # A key names the grain, not the payload: "the daily maximum" is one row
+        # per day whether or not the answer carries the day. A key that is also
+        # a declared column keeps that column's spelling.
         by_norm = {normalize(c.name): c.name for c in columns}
         resolved: list[str] = []
         for key in keys:
             key = key.strip()
-            if key in declared:
-                resolved.append(key)
-            elif normalize(key) in by_norm:
-                resolved.append(by_norm[normalize(key)])
-            else:
-                raise InvalidIntentError(f"one_per key {key!r} is not one of the declared columns.", field="rows",
-                                         candidates=sorted(declared))
-        if len(set(resolved)) != len(resolved):
+            resolved.append(by_norm.get(normalize(key), key))
+        if len({normalize(k) for k in resolved}) != len(resolved):
             raise InvalidIntentError("one_per lists the same key twice.", field="rows")
         return RowCardinality.ONE_PER, resolved
     raise InvalidIntentError(f"Unsupported rows declaration {loose!r}.", field="rows")
+
+
+_DIRECTIONS: dict[str, bool] = {"asc": False, "ascending": False, "up": False, "increasing": False,
+                                "desc": True, "descending": True, "down": True, "decreasing": True}
+
+
+def _parse_order(loose: Any, columns: list[ContractColumn]) -> list[ContractOrder]:
+    """Read the columns the answer is sorted by; they need not be carried."""
+    if loose is None or loose == "" or loose == [] or loose == {}:
+        return []
+    if isinstance(loose, (str, dict)):
+        loose = [loose]
+    if not isinstance(loose, list):
+        raise InvalidIntentError(
+            "order_by must name the column(s) the answer is sorted by.", field="order_by",
+            hint='Example: ["treatmentid"], or [{"column": "day", "direction": "desc"}]. Prefix a name with '
+                 '"-" for descending. A sort column does not have to be one the answer carries.',
+        )
+    by_norm = {normalize(c.name): c.name for c in columns}
+    parsed: list[ContractOrder] = []
+    for item in loose:
+        if isinstance(item, str):
+            name, descending = _parse_order_text(item)
+        elif isinstance(item, dict):
+            name, descending = _parse_order_object(item)
+        else:
+            raise InvalidIntentError(f"Invalid order_by entry {item!r}.", field="order_by")
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidIntentError(f"order_by entry {item!r} names no column.", field="order_by")
+        parsed.append(ContractOrder(name=by_norm.get(normalize(name.strip()), name.strip()), descending=descending))
+    seen: set[str] = set()
+    for order in parsed:
+        key = normalize(order.name)
+        if key in seen:
+            raise InvalidIntentError(f"order_by names {order.name!r} twice.", field="order_by")
+        seen.add(key)
+    return parsed
+
+
+def _parse_order_text(item: str) -> tuple[str, bool]:
+    text = item.strip()
+    if text.startswith("-"):
+        return text[1:].strip(), True
+    if text.startswith("+"):
+        return text[1:].strip(), False
+    lowered = text.lower()
+    for word, descending in _DIRECTIONS.items():
+        if lowered.endswith(" " + word):
+            return text[: -(len(word) + 1)].strip(), descending
+    return text, False
+
+
+def _parse_order_object(item: dict[str, Any]) -> tuple[Any, bool]:
+    unknown = sorted(k for k in item if k not in ("name", "column", "field", "direction", "order", "descending", "desc"))
+    if unknown:
+        raise InvalidIntentError(f"Unknown key(s) {unknown} in an order_by entry.", field="order_by",
+                                 details={"allowed_keys": ["column", "direction"]})
+    name = next((item[k] for k in ("column", "name", "field") if k in item), None)
+    raw = next((item[k] for k in ("direction", "order") if k in item), None)
+    if raw is not None:
+        word = str(raw).strip().lower()
+        if word not in _DIRECTIONS:
+            raise InvalidIntentError(f"Unknown sort direction {raw!r}.", field="order_by",
+                                     details={"allowed": ["asc", "desc"]})
+        return name, _DIRECTIONS[word]
+    flag = next((item[k] for k in ("descending", "desc") if k in item), None)
+    return name, bool(flag)
 
 
 # --------------------------------------------------------------------------
@@ -214,12 +318,30 @@ def verify_columns(contract: OutputContract, actual: list[tuple[str, LogicalType
                 problems.append(ContractProblem(
                     "type", f"{declared.name!r} was declared {declared.logical_type} but is {actual_types[found]}.", declared.name))
     used = {m for m in matched if m is not None}
+    # Organizing columns are expected in the dataset and left out of the file:
+    # the export orders and counts by them (MADR 0012).
+    for key in organizing_keys(contract):
+        if key in actual_types:
+            found = key
+        else:
+            near = by_norm.get(normalize(key), [])
+            found = near[0] if len(near) == 1 else None
+            if found is not None:
+                problems.append(ContractProblem(
+                    "renamed", f"the contract is organized by {key!r}, which exists as {found!r}.", key, found))
+            else:
+                problems.append(ContractProblem(
+                    "missing", f"the contract is organized by {key!r}, which is not in the dataset; the export "
+                               "needs it to order and count by, and does not write it to the file.", key))
+        if found is not None:
+            used.add(found)
     for name in actual_names:
         if name not in used:
             problems.append(ContractProblem("extra", f"column {name!r} is not in the contract.", name))
     present = [m for m in matched if m is not None]
-    if not any(p.kind in ("missing", "extra") for p in problems) and present != actual_names:
-        problems.append(ContractProblem("order", f"columns are ordered {actual_names}, the contract says {[c.name for c in contract.columns]}."))
+    carried = [name for name in actual_names if name in set(present)]
+    if not any(p.kind in ("missing", "extra") for p in problems) and present != carried:
+        problems.append(ContractProblem("order", f"the carried columns are ordered {carried}, the contract says {[c.name for c in contract.columns]}."))
     return problems
 
 
@@ -243,9 +365,10 @@ def verify_rows(contract: OutputContract, row_count: int, distinct_keys: int | N
 def repair_transform(contract: OutputContract, problems: list[ContractProblem]) -> dict[str, Any] | None:
     """The transform that would give the dataset the declared shape, when one exists.
 
-    Only column problems can be repaired mechanically (rename near-misses,
-    then select the declared columns in order); a missing column or a row
-    problem needs the agent to go back to the data.
+    Only column problems can be repaired mechanically (rename near-misses, then
+    select the declared columns in order, keeping the organizing columns the
+    export needs); a missing column or a row problem needs the agent to go back
+    to the data.
     """
     if not problems or any(p.kind in ("missing", "type", "rows") for p in problems):
         return None
@@ -253,7 +376,7 @@ def repair_transform(contract: OutputContract, problems: list[ContractProblem]) 
     transform: dict[str, Any] = {}
     if renames:
         transform["rename"] = renames
-    transform["select"] = [c.name for c in contract.columns]
+    transform["select"] = [c.name for c in contract.columns] + organizing_keys(contract)
     return transform
 
 
@@ -267,6 +390,11 @@ def contract_summary(contract: OutputContract) -> dict[str, Any]:
     }
     if contract.rows is not None:
         body["rows"] = {"one_per": contract.row_keys} if contract.rows == RowCardinality.ONE_PER else str(contract.rows)
+    if contract.order_by:
+        body["order_by"] = [{"column": o.name, "direction": "desc" if o.descending else "asc"} for o in contract.order_by]
+    keys = organizing_keys(contract)
+    if keys:
+        body["organizing_columns"] = keys
     if contract.description:
         body["description"] = contract.description
     if contract.satisfied_by:

@@ -198,14 +198,29 @@ requirement is in front of it, and the backend holds every export to it
 (MADR 0007):
 
 ```json
-{"columns": ["treatmentname"], "rows": {"one_per": ["treatmentname"]}}
+{"columns": ["treatmentname"], "rows": {"one_per": ["treatmentid"]},
+ "order_by": ["treatmentid"]}
 ```
 
+A contract names two kinds of column (MADR 0012). `columns` is what the answer
+**carries**, in order. `order_by` and the `one_per` keys are what it is
+**organized by** — a question that says "in treatment id order" or "the daily
+maximum" names a column in an adverbial role, and that column does not have to
+be part of the answer. An organizing column is expected in the dataset at
+export, so the backend can sort and count by it, and is left out of the file.
+Without the distinction the two roles share one list and a sort key has nowhere
+to go but the payload.
+
 `declare_output` records the ordered column names (optionally typed), the row
-cardinality (`one`, `at_least_one`, `{"one_per": [keys]}`) and a description
-as an operation and an audit event. `export_result` then checks the dataset
-against the current contract — names, order, declared types by family, row
-cardinality — before anything is read or written. A mismatch is a recoverable
+cardinality (`one`, `at_least_one`, `{"one_per": [keys]}`, required), the
+ordering and a description as an operation and an audit event. It answers with
+what the workspace holds under each declared name — which dataset carries it,
+its type and role, and whether it is unique per row, which is what tells a
+locator apart from a value — without ever seeing the question. `export_result`
+then checks the dataset against the current contract — names, order, declared
+types by family, row cardinality, the organizing columns — before anything is
+read or written, and writes the carried columns in the declared order, sorted
+the declared way. A mismatch is a recoverable
 `CONTRACT_MISMATCH` that shows the declared and the actual shape, lists the
 problems, and, when the fix is mechanical, carries the transform that repairs
 it (`{"select": [...]}`, with `rename` for near-miss names); a matching export

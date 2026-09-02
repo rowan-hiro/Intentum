@@ -626,6 +626,38 @@ def _limit_tail(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advi
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), rebuilt)))])
 
 
+def _declaration_rows(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A declaration that does not say how many rows the answer has, or says it in a shape the contract cannot hold."""
+    if err.code != ErrorCode.INVALID_INTENT or err.field != "rows":
+        return None
+    return Advice(
+        "declaration_rows",
+        "A declaration says how many rows the answer has: rows=\"one\" for a single value, "
+        "rows={\"one_per\": [\"day\"]} for one row for every day, rows=\"at_least_one\" when the number is not "
+        "known in advance. A one_per key names the grain, not the payload: it does not have to be a column the "
+        "answer carries, and the backend counts by it and leaves it out of the file.",
+    )
+
+
+def _declaration_order(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A declaration whose order_by is not a shape the contract can hold."""
+    if err.code != ErrorCode.INVALID_INTENT or err.field != "order_by":
+        return None
+    return Advice(
+        "declaration_order",
+        "order_by names the columns the answer is sorted by, as names or {\"column\", \"direction\"} objects: "
+        "order_by=[\"treatmentid\"], order_by=[\"-treatmenttime\"] or "
+        "order_by=[{\"column\": \"day\", \"direction\": \"desc\"}]. A column the answer is only sorted by does "
+        "not belong in columns: the backend sorts by it and leaves it out of the file, as long as the dataset you "
+        "export carries it.",
+    )
+
+
+_DECLARATION_DETECTORS: list[Callable[[BackendError, str, dict[str, Any]], Advice | None]] = [
+    _declaration_rows, _declaration_order,
+]
+
+
 _DETECTORS: list[Callable[[BackendError, str, dict[str, Any]], Advice | None]] = [
     _subquery, _limit_tail, _like, _distinct, _join_on, _aggregate_in_select, _expression_in_select, _inline_source,
     _unknown_key, _temporal_as_text, _document_as_dataset, _predicate_not_boolean,
@@ -636,6 +668,8 @@ def advise_error(err: BackendError, *, tool: str, arguments: dict[str, Any]) -> 
     """Advice for a refusal of ``tool`` called with ``arguments``, the loose request as written."""
     if tool == "describe_dataset":
         detectors = [_document_as_dataset]
+    elif tool == "declare_output":
+        detectors = _DECLARATION_DETECTORS
     elif tool in _TRANSFORM_TOOLS:
         detectors = _DETECTORS
     else:

@@ -15,6 +15,7 @@ from ...core.models.entities import (
     AuditEvent,
     Column,
     ContractColumn,
+    ContractOrder,
     ContractStatus,
     Dataset,
     DatasetStatus,
@@ -132,6 +133,7 @@ CREATE TABLE IF NOT EXISTS output_contracts (
     columns_json TEXT NOT NULL,
     rows TEXT,
     row_keys_json TEXT NOT NULL DEFAULT '[]',
+    order_by_json TEXT NOT NULL DEFAULT '[]',
     description TEXT NOT NULL DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 1,
     operation_id TEXT NOT NULL,
@@ -155,6 +157,7 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("datasets", "source_locator", "TEXT"),
     ("columns", "unit", "TEXT NOT NULL DEFAULT ''"),
     ("operations", "parent_operation_id", "TEXT"),
+    ("output_contracts", "order_by_json", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 
@@ -599,6 +602,8 @@ class SqliteMetadataStore:
                      for c in json.loads(r["columns_json"])],
             rows=RowCardinality(r["rows"]) if r["rows"] else None,
             row_keys=json.loads(r["row_keys_json"]),
+            order_by=[ContractOrder(name=o["column"], descending=bool(o.get("descending")))
+                      for o in json.loads(r["order_by_json"] or "[]")],
             description=r["description"],
             revision=int(r["revision"]),
             operation_id=r["operation_id"],
@@ -618,6 +623,7 @@ class SqliteMetadataStore:
             json.dumps(columns, ensure_ascii=False),
             str(c.rows) if c.rows else None,
             json.dumps(c.row_keys, ensure_ascii=False),
+            json.dumps([{"column": o.name, "descending": o.descending} for o in c.order_by], ensure_ascii=False),
             c.description,
             c.revision,
             c.operation_id,
@@ -630,16 +636,18 @@ class SqliteMetadataStore:
 
     def insert_contract(self, contract: OutputContract) -> None:
         self.conn.execute(
-            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, description, revision, "
-            "operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, order_by_json, description, "
+            "revision, operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             self._contract_values(contract),
         )
 
     def update_contract(self, contract: OutputContract) -> None:
         values = self._contract_values(contract)
         self.conn.execute(
-            "UPDATE output_contracts SET status=?, columns_json=?, rows=?, row_keys_json=?, description=?, revision=?, "
-            "operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, created_at=?, updated_at=? WHERE id=?",
+            "UPDATE output_contracts SET status=?, columns_json=?, rows=?, row_keys_json=?, order_by_json=?, "
+            "description=?, revision=?, operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, "
+            "created_at=?, updated_at=? WHERE id=?",
             values[1:] + (contract.id,),
         )
 

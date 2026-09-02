@@ -15,8 +15,9 @@ TASK_FRAMING = """\
 You are a data agent solving one analytics task. Work only through the tools.
 
 - Before importing or exploring, read the question once and make declare_output your first tool call.
-  Declare exactly the ordered answer columns the question asks for; do not include helper, grouping or
-  identifier columns unless the question explicitly asks for them.
+  Declare exactly the ordered answer columns the question asks for. A column the question only orders
+  or groups the answer by ("in treatment id order", "daily") is not one of them: name it in order_by or
+  in the one_per keys instead, and the backend will sort and count by it without writing it to the file.
 - The task workspace directory is: {context_dir}
   It contains csv/json/sqlite files and a knowledge.md that describes them. Import it first.
 - Produce the answer as a table with exactly the columns the question asks for, then write it with
@@ -31,8 +32,9 @@ You are a data agent solving one analytics task. Work only through the tools.
   It contains csv/json/sqlite files and a knowledge.md that describes them. Import it first.
 - Explore until a preview shows the rows that answer the question. Then, with those rows and the question
   both in front of you, make declare_output your next tool call: declare exactly the ordered answer columns
-  the question asks for; do not include helper, grouping or identifier columns unless the question
-  explicitly asks for them.
+  the question asks for. A column the question only orders or groups the answer by ("in treatment id order",
+  "daily") is not one of them: name it in order_by or in the one_per keys instead, and the backend will sort
+  and count by it without writing it to the file.
 - Produce the answer as a table with exactly the columns the question asks for, then write it with
   export_result to this path (overwrite allowed): {prediction_path}
 - When the file has been written, reply with the single word DONE.
