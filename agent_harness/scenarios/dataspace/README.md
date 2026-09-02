@@ -193,7 +193,7 @@ Per run, informed:
 | `task_329` | 2 | failed (extra column) | `day, daily_max_volume` | 8 | 11 | 10 | 0 | 107k | said DONE |
 | `task_329` | 3 | **passed** | `max_enteral_formula_volume_ml` | 8 | 11 | 10 | 0 | 118k | said DONE |
 
-What the comparison shows. Across both tasks, declarations made with the
+What the declaration timing comparison shows. Across both tasks, declarations made with the
 answer rows in view named the gold shape three times out of six against one
 out of six for declarations made from the question alone (and that one was
 the fresh-arm run that had ignored its framing and declared at turn 21).
