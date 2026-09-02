@@ -304,12 +304,20 @@ agent_backend/
 agent_harness/              the agent side, kept apart from the backend (MADR 0009); not in the wheel
 ├── config.py               .env and model gateway settings
 ├── model.py                OpenAI-compatible chat client (stdlib only)
-├── loop.py                 tool-calling loop over an MCP server
-├── perception/             readers of unstructured sources (documents, video, audio)
+├── loop.py                 in-process reference loop over an MCP server (the control arm)
+├── hosts/                  external agent hosts: opencode.py runs OpenCode with only the backend tools (MADR 0011)
+├── perception/             reserved for an MCP-exposed reader if the restricted arm ever needs one
 └── scenarios/dataspace/    framing, scripted agents, vendored evaluator, scoring, runners, measurements
 tests/                      agent-unreliability, end-to-end and boundary tests
 examples/                   orders.csv, demo.py, mcp_config.json
 ```
+
+The harness does not own the model loop any more (MADR 0011): `--host opencode`
+runs OpenCode against the backend's MCP server with every builtin tool disabled
+and only the backend's tools allowed, and its JSON event stream is normalized
+into the same tool-event record the in-process loop produces, so the
+convergence metrics and the scoring apply to both. Pacing and perception are
+the host's; the harness keeps the scenario, the measurement and the adapters.
 
 `agent_backend` and `agent_harness` are two packages in one repository. The
 harness imports from the backend only its public API and
@@ -561,7 +569,13 @@ imports in ~2 s and the task's query runs through the semantic steps.
    answer rows), measured against each other in the DataSpace README: on
    twelve runs the informed declarations named the gold shape three times out
    of six against one for fresh, and passes went from 1/6 to 3/6, so
-   `informed` is the default. A validated read-only `raw_query` fallback step is
+   `informed` is the default. The runner now hands the loop to OpenCode by
+   default (`--host opencode`, MADR 0011): the model sees only the backend's
+   MCP tools, and the same record and metrics come out of its event stream.
+   Measured against the in-process loop on the same day, the host changed no
+   verdict on `task_44` (2/3 under both) and cost 0/3 against 1/3 on `task_329`,
+   within noise at three runs; the with-and-without-backend comparison on one
+   host is the next experiment. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating

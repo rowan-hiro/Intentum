@@ -235,3 +235,10 @@ task_44 1/3 on 2026-09-02 after the fixes, the first official pass of the model-
 Status: Accepted → Accepted
 
 Seventh measurement (declaration timing): informed framing 3/6 against fresh 1/6 on task_44 and task_329, task_329's first pass. limit_tail_as_step added from the sixth measurement's unadvised refusals. Next: the first perception reader for a PDF-bearing task (MADR 0009).
+
+<!-- driftseal-reconciliation: 4747f25f-c102-4b34-b6b7-4dedebfb86ee -->
+### 2026-09-02T09:08:37.054Z — Outcome `2026-09-02-005`
+
+Status: Accepted → Accepted
+
+Eighth measurement (OpenCode as host): task_44 2/3, task_329 0/3, both informed framing, against the loop's 2/3 and 1/3. Next in the sequence: parse JSON strings where objects are expected at the MCP layer and widen the inline-relation detector to string forms and join right sides (from this round's unadvised refusals); then the with-and-without-backend comparison on one host, which is the hypothesis test; then the first PDF-bearing task, read by the host.

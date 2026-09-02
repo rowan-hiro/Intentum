@@ -68,3 +68,10 @@ Scenario code moved from examples/ to agent_harness/scenarios/dataspace/ as part
 Status: Accepted → Accepted
 
 core/recovery stays general: it knows the transform language and the workspace's data, never a task, and its advice text names shapes of the language, not benchmark columns; the DataSpace refusals entered it only as general detectors with tests. tests/test_boundary.py still finds no scenario name in the backend.
+
+<!-- driftseal-reconciliation: fe1cc49d-8a6d-4219-a493-fe7002709d42 -->
+### 2026-09-02T09:08:37.141Z — Outcome `2026-09-02-005`
+
+Status: Accepted → Accepted
+
+The host switch keeps the boundary: nothing benchmark-specific entered agent_backend; the OpenCode adapter lives in the harness and the backend is reached only through its MCP server, exactly as any external agent would reach it.

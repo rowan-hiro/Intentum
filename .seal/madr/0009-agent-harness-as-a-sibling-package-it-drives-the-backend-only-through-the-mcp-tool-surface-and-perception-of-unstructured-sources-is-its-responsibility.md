@@ -47,3 +47,10 @@ Implemented in outcome 2026-09-02-001: agent_harness/ with config, model, loop, 
 Status: Accepted → Accepted
 
 The split held under a new module on each side: advice (language and data facts) went into the backend, pacing (the preview-streak nudge) and the convergence metrics into the harness loop and runner. One harness fix on the way: the scripted layer now writes under runs/<task>/scripted so it never wipes the model-driven layer's runs/<task>/agent.
+
+<!-- driftseal-reconciliation: 6c3fc3d4-bbe9-43b1-906d-891bd969312e -->
+### 2026-09-02T09:08:36.969Z — Outcome `2026-09-02-005`
+
+Status: Accepted → Accepted
+
+Partly superseded by 0011: the harness no longer owns the model loop; OpenCode runs it with only the backend's MCP tools. The boundary itself holds (tests/test_boundary.py unchanged: the hosts package imports nothing from the backend), perception now comes from the host, and agent_harness/perception/ is reserved for an MCP-exposed reader only if the tool-restricted arm ever needs one.
