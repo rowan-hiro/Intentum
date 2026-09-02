@@ -166,6 +166,51 @@ step (the response lists the fields that are) and, twice, a SQL `LIMIT` tail
 written inside a filter expression (`... IS NOT NULL LIMIT 5`), which is the
 next detector: strip the tail into a limit step.
 
+### Declaration timing: fresh versus informed (`task_44`, `task_329`)
+
+The framing has two modes now (`--declaration`, see `framing.py`). `fresh` asks
+for `declare_output` before anything else, the framing measured since
+2026-08-31; `informed` asks for it once a preview shows the rows that answer
+the question. Everything else in the framing is the same text. Three runs per
+task and mode, same day, same model and gateway, the fresh arm being the runs
+recorded just above (task_44 with the four fixes; task_329 round 2).
+
+| task | framing | official | declarations with the gold shape | declaration turns | mean turns | mean prompt tokens | refusals | unadvised | repair rate | nudges | exports |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | fresh | 1/3 | 1/3 | 21, 1, 1 | 26.7 | 368k | 6 | 3 | 1.0 | 4 | 2/3 |
+| `task_44` | informed | **2/3** | 2/3 | 26, 17, 24 | 26.3 | 346k | 5 | 1 | 1.0 | 3 | 3/3 |
+| `task_329` | fresh | 0/3 | 0/3 | 1, 7, 1 | 11.7 | 126k | 2 | 0 | 1.0 | 1 | 3/3 |
+| `task_329` | informed | **1/3** | 1/3 | 8, 8, 8 | 11.0 | 116k | 0 | 0 | — | 0 | 3/3 |
+
+Per run, informed:
+
+| task | run | official | declared columns | declaration turn | turns | tool calls | refusals (advised) | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | failed (extra column) | `treatmentid, treatmentname` | 26 | 30 | 29 | 2 (1) | 432k | said DONE |
+| `task_44` | 2 | **passed** | `treatmentname` | 17 | 21 | 20 | 3 (3), one of them `CONTRACT_MISMATCH` at export, reshaped in two calls | 232k | said DONE |
+| `task_44` | 3 | **passed** | `treatmentname` | 24 | 28 | 27 | 0 | 373k | said DONE |
+| `task_329` | 1 | failed (extra column) | `date, max_volume` | 8 | 11 | 10 | 0 | 123k | said DONE |
+| `task_329` | 2 | failed (extra column) | `day, daily_max_volume` | 8 | 11 | 10 | 0 | 107k | said DONE |
+| `task_329` | 3 | **passed** | `max_enteral_formula_volume_ml` | 8 | 11 | 10 | 0 | 118k | said DONE |
+
+What the comparison shows. Across both tasks, declarations made with the
+answer rows in view named the gold shape three times out of six against one
+out of six for declarations made from the question alone (and that one was
+the fresh-arm run that had ignored its framing and declared at turn 21).
+Passes went from 1/6 to 3/6, `task_329`'s first pass among them, with turns,
+prompt tokens, refusals and nudges no worse in either task. The traces show
+the mechanism: a model declaring from the question alone adds the identifier
+or date column it expects to need; with the rows in front of it, it more
+often drops that column. The contract does the same work in both arms: an
+informed declaration is held at export like a fresh one (`task_44` run 2 was
+refused once at export and reshaped). Twelve runs is a small sample; the
+effect points the same way on both tasks. For the trust model (MADR 0008)
+nothing changes: a declaration is the agent's fresh output when it is made,
+whatever the turn. What changes is the reading of "while the requirement is
+in front of you" (MADR 0007): the requirement is the question and the shape of
+the data together. The runner's default framing is `informed` from here on;
+each measurement records which framing it used.
+
 ## 2026-09-02 · task_44 after the harness split, before advice
 
 The harness moved to `agent_harness/` with framing, scripts and scoring

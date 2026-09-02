@@ -1,6 +1,7 @@
 """DataSpace smoke test, layer 2: a real model drives one task through the MCP tools.
 
     uv run python -m agent_harness.scenarios.dataspace.agent --task task_10 --runs 3
+    uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --declaration informed
 
 A deliberately thin agent loop (no framework, no SQL, no dialect rules): the
 model sees the MCP server's own instructions, the task framing, the question
@@ -8,7 +9,8 @@ and the tool schemas; every tool call is forwarded to the MCP server and the
 structured response is handed back verbatim (truncated only for size). The
 prediction it exports is scored with the official evaluator; per-run traces
 (messages, tool calls, usage, cost) and an aggregated summary are written
-under runs/<task>/agent/.
+under runs/<task>/agent-informed/ (--declaration informed, the default since the
+2026-09-02 timing experiment) or runs/<task>/agent/ (--declaration fresh; see framing.py).
 
 Settings (environment or the repository .env):
     DEFAULT_MODEL_API_URL, DEFAULT_MODEL_API_KEY, DEFAULT_MODEL_NAME
@@ -32,7 +34,7 @@ from agent_backend.mcp.server import INSTRUCTIONS, create_server
 from agent_harness.config import model_config
 from agent_harness.loop import run_tool_loop
 from agent_harness.scenarios.dataspace import RUNS, benchmark_root, champion_root, task_context, task_question
-from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, NUDGE_PROMPT, TASK_FRAMING
+from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, FRAMINGS, NUDGE_PROMPT
 from agent_harness.scenarios.dataspace.scoring import official_verdict, run_champion_scorer, run_official_evaluator
 
 
@@ -59,7 +61,7 @@ def convergence(tool_events: list[dict[str, Any]], window: int = 2) -> dict[str,
 
 
 async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, config: dict[str, str], *,
-                   max_turns: int, max_tool_chars: int, max_tokens: int) -> dict[str, Any]:
+                   max_turns: int, max_tool_chars: int, max_tokens: int, declaration: str = "fresh") -> dict[str, Any]:
     context_dir = task_context(benchmark, task)
     pred_root = run_dir / "predictions"
     prediction_path = pred_root / task / "prediction.csv"
@@ -68,7 +70,7 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
         server = create_server(backend)
         loop = await run_tool_loop(
             server, config,
-            system_prompt=INSTRUCTIONS + "\n" + TASK_FRAMING.format(context_dir=context_dir, prediction_path=prediction_path),
+            system_prompt=INSTRUCTIONS + "\n" + FRAMINGS[declaration].format(context_dir=context_dir, prediction_path=prediction_path),
             user_prompt=question, deliverable=prediction_path,
             delivered_prompt=DELIVERED_PROMPT, nudge_prompt=NUDGE_PROMPT,
             max_turns=max_turns, max_tool_chars=max_tool_chars, max_tokens=max_tokens,
@@ -77,8 +79,11 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
     finally:
         backend.close()
 
+    declared = [e["turn"] for e in loop.tool_events if e["tool"] == "declare_output" and e["status"] == "success"]
     result: dict[str, Any] = {
-        "task": task, "model": config["model"], "stop_reason": loop.stop_reason, "turns": len(loop.turns),
+        "task": task, "model": config["model"], "declaration": declaration,
+        "declaration_turn": declared[0] if declared else None,
+        "stop_reason": loop.stop_reason, "turns": len(loop.turns),
         "tool_calls": len(loop.tool_events), "elapsed_s": loop.elapsed_s, "usage": loop.usage, "cost_usd": loop.cost_usd,
         "prediction": str(prediction_path) if prediction_path.exists() else None,
         "tool_histogram": dict(Counter(e["tool"] for e in loop.tool_events)),
@@ -117,6 +122,8 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     repaired = sum(r["convergence"]["repaired_refusals"] for r in results)
     return {
         "runs": len(results),
+        "declaration": results[0]["declaration"] if results else None,
+        "declaration_turns": [r.get("declaration_turn") for r in results],
         "passed": sum(1 for r in results if r["official"]["passed"]),
         "pass_rate": round(sum(1 for r in results if r["official"]["passed"]) / len(results), 3) if results else None,
         "turns": {"mean": mean([r["turns"] for r in results]), "values": [r["turns"] for r in results]},
@@ -146,7 +153,9 @@ def main() -> int:
     parser.add_argument("--max-tool-chars", type=int, default=8000)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--benchmark", default=None, help="benchmark package root (default: $DATASPACE_BENCHMARK)")
-    parser.add_argument("--out", default=None, help="output directory (default runs/<task>/agent beside this module)")
+    parser.add_argument("--declaration", choices=sorted(FRAMINGS), default="informed",
+                        help="when the framing asks for declare_output: fresh (first call) or informed (once a preview shows the answer)")
+    parser.add_argument("--out", default=None, help="output directory (default runs/<task>/agent or agent-informed beside this module)")
     parser.add_argument("--check-config", action="store_true", help="only validate model configuration and benchmark paths")
     args = parser.parse_args()
 
@@ -162,7 +171,7 @@ def main() -> int:
         print("configuration ok")
         return 0
 
-    out_dir = Path(args.out) if args.out else RUNS / args.task / "agent"
+    out_dir = Path(args.out) if args.out else RUNS / args.task / ("agent" if args.declaration == "fresh" else f"agent-{args.declaration}")
     results: list[dict[str, Any]] = []
     for index in range(1, args.runs + 1):
         run_dir = out_dir / f"run_{index}"
@@ -171,12 +180,14 @@ def main() -> int:
         run_dir.mkdir(parents=True)
         print(f"\n=== run {index}/{args.runs} ===")
         result = asyncio.run(run_once(args.task, question, benchmark, run_dir, config, max_turns=args.max_turns,
-                                      max_tool_chars=args.max_tool_chars, max_tokens=args.max_tokens))
+                                      max_tool_chars=args.max_tool_chars, max_tokens=args.max_tokens,
+                                      declaration=args.declaration))
         results.append(result)
         c = result["convergence"]
         print(f"  → passed={result['official']['passed']} turns={result['turns']} tool_calls={result['tool_calls']} "
               f"tokens={result['usage'].get('total_tokens')} cost=${result['cost_usd']:.4f} stop={result['stop_reason']} "
-              f"refusals={c['refusals']} unadvised={c['unadvised_refusals']} repair_rate={c['repair_rate']} nudges={result['stall_nudges']}")
+              f"refusals={c['refusals']} unadvised={c['unadvised_refusals']} repair_rate={c['repair_rate']} nudges={result['stall_nudges']} "
+              f"declared_at={result['declaration_turn']}")
         summary = summarize(results)
         (out_dir / "agent_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\n=== summary ===")

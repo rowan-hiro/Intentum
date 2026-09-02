@@ -2,6 +2,13 @@
 
 The wording is part of the measured conditions (see README.md); change it
 only as a recorded experiment.
+
+Two framings differ in one bullet, when to declare the output contract:
+``fresh`` asks for the declaration before anything else (the framing measured
+from 2026-08-31 to 2026-09-02); ``informed`` asks for it once a preview shows
+the rows that answer the question, and is the runner's default since the
+2026-09-02 timing experiment (README.md). ``FRAMINGS`` maps the mode name to
+the text.
 """
 
 TASK_FRAMING = """\
@@ -16,6 +23,22 @@ You are a data agent solving one analytics task. Work only through the tools.
   export_result to this path (overwrite allowed): {prediction_path}
 - When the file has been written, reply with the single word DONE.
 """
+
+TASK_FRAMING_INFORMED = """\
+You are a data agent solving one analytics task. Work only through the tools.
+
+- The task workspace directory is: {context_dir}
+  It contains csv/json/sqlite files and a knowledge.md that describes them. Import it first.
+- Explore until a preview shows the rows that answer the question. Then, with those rows and the question
+  both in front of you, make declare_output your next tool call: declare exactly the ordered answer columns
+  the question asks for; do not include helper, grouping or identifier columns unless the question
+  explicitly asks for them.
+- Produce the answer as a table with exactly the columns the question asks for, then write it with
+  export_result to this path (overwrite allowed): {prediction_path}
+- When the file has been written, reply with the single word DONE.
+"""
+
+FRAMINGS = {"fresh": TASK_FRAMING, "informed": TASK_FRAMING_INFORMED}
 
 DELIVERED_PROMPT = "The prediction file has been written. Reply DONE if you are finished, or continue if you still want to change it."
 

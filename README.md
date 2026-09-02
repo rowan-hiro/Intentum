@@ -256,8 +256,9 @@ Detectors so far: a subquery in an expression (semi_join), `distinct` as a key
 or prefix (measureless `group_by`), a join `on` written as an equality (key
 mapping), `LIKE` (`contains` / `starts_with` / `ends_with`), an aggregate
 function inside `select` (aggregate step), an expression with an alias inside
-`select` (derive step), an inline relation as `source` (materialize it first),
-an unknown key (nearest accepted key), a string function on a date or
+`select` (derive step), a SQL `LIMIT` tail inside a filter (limit step), an
+inline relation as `source` (materialize it first), an unknown key (nearest
+accepted key), a string function on a date or
 timestamp (how dates are computed, and that rendering belongs to export), and a
 contract mismatch at export (the reshape and the export). A detector that
 cannot rewrite still explains. Every rewrite is executed in its test and must
@@ -554,7 +555,13 @@ imports in ~2 s and the task's query runs through the semantic steps.
    read off task by task. With advice in place the model-driven layer
    exported the correct `task_44` values in five of six runs and scored its
    first official pass on that task (1/3 on 2026-09-02), the passing run
-   having declared its output after seeing the data rather than first. A validated read-only `raw_query` fallback step is
+   having declared its output after seeing the data rather than first. The
+   runner therefore has two framings, `--declaration fresh` (declare before
+   exploring) and `--declaration informed` (declare once a preview shows the
+   answer rows), measured against each other in the DataSpace README: on
+   twelve runs the informed declarations named the gold shape three times out
+   of six against one for fresh, and passes went from 1/6 to 3/6, so
+   `informed` is the default. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
