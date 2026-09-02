@@ -175,6 +175,23 @@ def test_a_string_function_on_a_timestamp_is_explained(backend, orders):
     assert "strftime(field, '%Y-%m-%d')" in found["explanation"] and "format_spec" in found["explanation"] and "rewrite" not in found
 
 
+def test_a_limit_tail_in_a_filter_becomes_a_limit_step(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "amount > 100 LIMIT 2", "select": ["order_id", "amount"], "sort": "-amount"})
+    assert response["code"] == "INVALID_TRANSFORM" and "LIMIT" in response["message"]
+    found = advice(response, "limit_tail_as_step")
+    assert found["rewrite"][0]["arguments"]["transform"] == {"filter": "amount > 100", "select": ["order_id", "amount"], "sort": "-amount", "limit": 2}
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [[1006, 900.0], [1010, 594.0]]
+
+    typed = backend.transform_dataset("orders", [{"type": "filter", "filter": "region = 'East' limit 1"}])
+    assert advice(typed, "limit_tail_as_step")["rewrite"][0]["arguments"]["transform"] == [{"type": "filter", "filter": "region = 'East'"}, {"limit": 1}]
+    (result,) = run(backend, advice(typed, "limit_tail_as_step")["rewrite"])
+    assert result["result"]["row_count"] == 1
+
+    doubled = backend.transform_dataset("orders", {"filter": "amount > 100 limit 5", "limit": 2})
+    assert "rewrite" not in advice(doubled, "limit_tail_as_step")
+
+
 def test_an_inline_relation_as_source_is_materialized_first(backend, orders):
     response = backend.transform_dataset(
         [{"dataset": "orders", "filter": "region = 'East'", "select": ["order_id", "customer", "amount"]},

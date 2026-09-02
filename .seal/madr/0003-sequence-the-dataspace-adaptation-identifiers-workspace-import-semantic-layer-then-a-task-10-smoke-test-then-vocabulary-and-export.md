@@ -228,3 +228,10 @@ Fifth measurement (2026-09-02, after the recovery module): task_329 0/3 with una
 Status: Accepted → Accepted
 
 task_44 1/3 on 2026-09-02 after the fixes, the first official pass of the model-driven layer on that task; exports 2/3 both with the gold values. Next in the sequence: a detector for a LIMIT tail inside a filter, an experiment on declaration timing (fresh versus informed), then the first perception reader (MADR 0009).
+
+<!-- driftseal-reconciliation: 61e9120e-89bd-439f-af68-967421a3009e -->
+### 2026-09-02T08:25:06.946Z — Outcome `2026-09-02-004`
+
+Status: Accepted → Accepted
+
+Seventh measurement (declaration timing): informed framing 3/6 against fresh 1/6 on task_44 and task_329, task_329's first pass. limit_tail_as_step added from the sixth measurement's unadvised refusals. Next: the first perception reader for a PDF-bearing task (MADR 0009).

@@ -586,9 +586,49 @@ def _predicate_not_boolean(err: BackendError, tool: str, arguments: dict[str, An
     )
 
 
+_LIMIT_TAIL_RE = re.compile(r"\s+limit\s+(?P<n>\d+)\s*$", re.IGNORECASE)
+
+
+def _limit_tail(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """``... LIMIT 5`` at the end of a filter expression is a limit step."""
+    steps = _steps(arguments.get("transform"))
+    rebuilt: list[dict[str, Any]] = []
+    changed = False
+    incomplete = False
+    for step in steps:
+        limit: int | None = None
+        for path, text in _expression_texts(step):
+            match = _LIMIT_TAIL_RE.search(text)
+            if match is None:
+                continue
+            limit = int(match.group("n"))
+            _set_path(step, path, text[: match.start()].strip())
+        if limit is None:
+            rebuilt.append(step)
+            continue
+        changed = True
+        typed = any(k in step for k in _TYPE_KEYS)
+        if any(k in step for k in ("limit", "top", "head")):
+            incomplete = True
+            rebuilt.append(step)
+        elif typed:
+            rebuilt.extend([step, {"limit": limit}])
+        else:
+            step["limit"] = limit
+            rebuilt.append(step)
+    if not changed:
+        return None
+    explanation = ("LIMIT is not part of an expression: a filter is only the condition. The number of rows to keep "
+                   "is a limit step ({\"limit\": n}), which runs after filter and sort in a compact object.")
+    if incomplete:
+        return Advice("limit_tail_as_step", explanation + " The step already has a limit; keep one of the two.")
+    return Advice("limit_tail_as_step", explanation,
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), rebuilt)))])
+
+
 _DETECTORS: list[Callable[[BackendError, str, dict[str, Any]], Advice | None]] = [
-    _subquery, _like, _distinct, _join_on, _aggregate_in_select, _expression_in_select, _inline_source, _unknown_key,
-    _temporal_as_text, _document_as_dataset, _predicate_not_boolean,
+    _subquery, _limit_tail, _like, _distinct, _join_on, _aggregate_in_select, _expression_in_select, _inline_source,
+    _unknown_key, _temporal_as_text, _document_as_dataset, _predicate_not_boolean,
 ]
 
 

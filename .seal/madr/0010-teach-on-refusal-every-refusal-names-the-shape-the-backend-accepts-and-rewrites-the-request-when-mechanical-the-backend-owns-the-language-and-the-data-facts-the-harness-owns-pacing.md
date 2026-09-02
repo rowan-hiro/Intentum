@@ -49,3 +49,10 @@ Implemented in outcome 2026-09-02-002: agent_backend/core/recovery with eleven d
 Status: Accepted → Accepted
 
 Sixth measurement (task_44 with the four post-round fixes): 1/3 official, refusals 10 to 6, unadvised 5 to 3, repair rate 1.0. The four fixes did not fire on this sample (the shapes did not recur); the pass came through near_contract, taken up under the proposed name. Next detector from the unadvised refusals: a SQL LIMIT tail inside a filter expression (twice).
+
+<!-- driftseal-reconciliation: 5b85e14f-d13b-469d-a86f-b340e4844664 -->
+### 2026-09-02T08:25:07.019Z — Outcome `2026-09-02-004`
+
+Status: Accepted → Accepted
+
+limit_tail_as_step added (a SQL LIMIT tail inside a filter becomes a limit step, rewrite executed in its test). In the informed-framing runs the remaining unadvised refusal was one TYPE_MISMATCH (string compared with integer), which already carries the types.

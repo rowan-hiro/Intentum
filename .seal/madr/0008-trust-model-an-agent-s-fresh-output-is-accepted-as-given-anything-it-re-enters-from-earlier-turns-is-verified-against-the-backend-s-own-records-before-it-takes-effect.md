@@ -55,3 +55,10 @@ Observed in the third measurement: a wrong first reading enforced as faithfully 
 Status: Accepted → Accepted
 
 The deferred reference-by-record consequence is implemented as semi_join: the right dataset and version remain explicit in canonical IR, validation, plan and lineage, and duplicate right keys do not duplicate left rows. The task_44 follow-up also confirms the trust limit: a fresh output contract with helper columns and a fresh choice of mismatched stay identifiers are enforced faithfully because the backend has no task truth against which to correct them.
+
+<!-- driftseal-reconciliation: 7c1e401c-d108-4605-a7f1-f0e1ab7df4fa -->
+### 2026-09-02T08:25:06.875Z — Outcome `2026-09-02-004`
+
+Status: Accepted → Accepted
+
+Unaffected by the timing experiment: a declaration is the agent's fresh output when it is made, at turn 1 or turn 24, and later exports are verified against it either way. The experiment moved when the fresh output is produced, not how it is trusted.

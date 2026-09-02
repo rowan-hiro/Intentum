@@ -66,3 +66,10 @@ Contracts now teach as well as hold: a preview or dataset with the declared shap
 Status: Accepted → Accepted
 
 First counter-example to declaration-first: the run that passed task_44 declared at turn 21 with the answer rows in view and named the gold shape exactly; both turn-1 declarations in the same round added an identifier column, as every early declaration has. One run is not evidence; the trust model (fresh accepted, recalled verified) is unaffected, but when to declare belongs in the next experiment.
+
+<!-- driftseal-reconciliation: d8d21ad2-5115-482e-ac3e-92d77b2e55be -->
+### 2026-09-02T08:25:06.800Z — Outcome `2026-09-02-004`
+
+Status: Accepted → Accepted
+
+Declaration timing measured (2026-09-02, twelve runs): declarations made once a preview showed the answer rows named the gold shape 3/6 times against 1/6 for declarations made from the question alone; passes 1/6 to 3/6 (task_44 2/3, task_329 1/3, its first), turns, tokens and refusals no worse. The contract held informed declarations at export exactly as fresh ones. 'While the requirement is in front of you' now reads as the question and the shape of the data together; the harness default framing is informed. The MCP instruction sentence is unchanged and compatible; small sample, same direction on both tasks.
