@@ -207,3 +207,10 @@ Champion comparison recorded (2026-08-30): upstream/main at bdc874f, one run per
 Status: Accepted → Accepted
 
 The measured sequence is complete: declaration-first framing was tested before vocabulary changes; post-aggregate projection, measureless grouping and semi_join were then implemented as general transforms; full scripted coverage stayed 4/4. The post-semi-join task_44 measurement remained 0/3: one run discovered semi_join but chose mismatched stay identifiers, one exported the four correct procedures with a helper id column, and one exhausted its turns. The next finding is model reading and relationship selection, not an unimplemented semantic step.
+
+<!-- driftseal-reconciliation: 8f7690d1-eb66-49a8-a94f-fd0009303e4e -->
+### 2026-09-02T06:18:35.936Z — Outcome `2026-09-02-001`
+
+Status: Accepted → Accepted
+
+The DataSpace sequence continues in the agent harness: the scenario, its evaluator, scoring and measurements now live under agent_harness/scenarios/dataspace/ with framing, scripts and scoring unchanged, so later measurements stay comparable with the 2026-08-28 to 2026-08-31 ones. Next in the sequence: the first perception reader on the harness side (PDF first; 384 of 410 workspaces carry one, 189 carry video), chosen by the first measured task that needs it.

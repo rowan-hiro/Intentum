@@ -262,9 +262,23 @@ agent_backend/
 ├── mcp/
 │   ├── server/             MCPServer entry point (`agent-backend-mcp`)
 │   └── tools/              thin tool definitions
-tests/                      agent-unreliability and end-to-end tests
-examples/                   orders.csv, demo.py, mcp_config.json, DataSpace smoke layers
+agent_harness/              the agent side, kept apart from the backend (MADR 0009); not in the wheel
+├── config.py               .env and model gateway settings
+├── model.py                OpenAI-compatible chat client (stdlib only)
+├── loop.py                 tool-calling loop over an MCP server
+├── perception/             readers of unstructured sources (documents, video, audio)
+└── scenarios/dataspace/    framing, scripted agents, vendored evaluator, scoring, runners, measurements
+tests/                      agent-unreliability, end-to-end and boundary tests
+examples/                   orders.csv, demo.py, mcp_config.json
 ```
+
+`agent_backend` and `agent_harness` are two packages in one repository. The
+harness imports from the backend only its public API and
+`agent_backend.mcp.server`; the backend imports nothing from the harness and
+names no scenario; `tests/test_boundary.py` checks both. Reading a PDF, a
+video or an audio track is the harness's job: a reader is a tool beside the
+backend's, and what it extracts enters the backend through `import_dataset`
+or `attach_metadata`, as a fresh agent output with provenance (MADR 0009).
 
 ## 3. Running the prototype
 
@@ -470,12 +484,12 @@ imports in ~2 s and the task's query runs through the semantic steps.
 
 0. **DataSpace smoke tests** — four public-reference tasks (`task_10`,
    `task_44`, `task_127`, `task_329`) run in both layers.
-   `examples/dataspace_smoke.py --task all --check` (scripted agent, six or
+   `python -m agent_harness.scenarios.dataspace.smoke --task all --check` (scripted agent, six or
    seven MCP tool calls per task, each declaring its output contract first)
-   passes the official evaluator on all four; `examples/dataspace_agent.py`
+   passes the official evaluator on all four; `python -m agent_harness.scenarios.dataspace.agent`
    (qwen3.5-35b-a3b through the MCP tools, no SQL or dialect rules in the
    prompt) passes 3/3 on `task_10` and `task_127`. The third measurement
-   (2026-08-30, `examples/dataspace/README.md`) re-ran `task_44` and
+   (2026-08-30, `agent_harness/scenarios/dataspace/README.md`) re-ran `task_44` and
    `task_329` after the output contract and the vocabulary the second
    measurement asked for: the `strftime` refusals are gone, turns and tokens
    fell on both tasks, and five of six runs again exported the correct values
@@ -486,8 +500,14 @@ imports in ~2 s and the task's query runs through the semantic steps.
    mistaken answer shapes; the result confirms the trust boundary rather than
    fixing the reading. Compound post-aggregate projection, measureless
    grouping as distinct, and a lineage-preserving `semi_join` now cover the
-   three general vocabulary findings; the next model run should measure
-   `task_44` against that surface. A validated read-only `raw_query` fallback step is
+   three general vocabulary findings; the post-semi-join run on `task_44`
+   (2026-08-31) stayed 0/3: one run reached for `semi_join` on the wrong stay
+   identifier, one exported the right values with a declared helper column,
+   so the remaining gap is the model's reading and relationship choice, not
+   backend expressiveness. Most DataSpace workspaces also carry PDFs (384 of
+   410) or video (189); reading them is the harness's job
+   (`agent_harness/perception/`, MADR 0009), and the first reader, chosen by
+   the first measured task that needs it, is the next step there. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating

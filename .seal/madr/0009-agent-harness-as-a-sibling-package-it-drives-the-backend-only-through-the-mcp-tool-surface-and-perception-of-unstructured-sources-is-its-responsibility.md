@@ -1,0 +1,42 @@
+# 9. Agent harness as a sibling package: it drives the backend only through the MCP tool surface, and perception of unstructured sources is its responsibility
+
+Date: 2026-09-02
+
+## Status
+
+Accepted
+
+## Context and Problem Statement
+
+Intentum's validation scenario, DataSpace, has 410 task workspaces: 384 carry PDF documents, 189 carry mp4 video and 368 carry markdown documents beyond knowledge.md. The four tasks measured so far are purely tabular. The champion pipeline handles the rest with agent-side preprocessing (PDF to markdown, video frame and slide extraction, speech transcription) before any reasoning. Until now the model loop, the scripted agents, the vendored evaluator and the measurements lived as scripts under examples/, importing the backend in-process; the backend's import_workspace lists non-tabular files as skipped. The question is where perception of unstructured sources lives, and how the agent side and the backend are kept apart while one developer iterates on both.
+
+## Decision Drivers
+
+* Keep the backend's contract at structured data with lineage (MADR 0004): perception is probabilistic and belongs with the agent
+* Findings from the harness must flow back into general backend requirements quickly, which a second repository would slow
+* The separation must be checkable by a test, not a convention
+
+## Considered Options
+
+* Backend ingests PDFs, video and audio into datasets itself (rejected: puts probabilistic extraction behind the deterministic commit path and hides the agent's reading from the trust model)
+* Harness in a separate repository depending on agent-backend as a package (deferred: the import boundary makes this split mechanical later; today it would slow the finding-to-requirement loop)
+* Sibling package in the same repository with an enforced import boundary (chosen)
+
+## Decision Outcome
+
+The agent side becomes agent_harness/, a top-level package beside agent_backend/ in the same repository, excluded from the wheel. It holds the model client, a generic tool-calling loop over an MCP server, a perception package for readers of unstructured sources, and scenario packages, scenarios/dataspace/ first. The boundary: agent_harness imports from agent_backend only the public API (Backend, BackendError, ErrorCode) and agent_backend.mcp.server; agent_backend never imports agent_harness and never names a benchmark; a pytest test enforces both. The model sees one tool list, backend tools for structured data and harness tools for perception; whatever perception produces enters the backend only through import_dataset or attach_metadata, so it is a fresh agent output under MADR 0008 and carries provenance from the moment it is imported. The backend's contract stays structured data plus lineage; it does not read PDFs, video or audio.
+
+## Consequences
+
+* Scenario code, prompts, evaluators and measurements move from examples/ to agent_harness/scenarios/; examples/ keeps the backend's own demo
+* Multimodal DataSpace tasks are addressed by adding readers under agent_harness/perception/ and registering them as tools beside the backend's, never by widening import_workspace
+* The harness can later move to its own repository without touching agent_backend
+
+## Decision History
+
+<!-- driftseal-reconciliation: 974ac638-d2f6-446b-8418-f3c0cb276668 -->
+### 2026-09-02T06:18:36.009Z — Outcome `2026-09-02-001`
+
+Status: Accepted → Accepted
+
+Implemented in outcome 2026-09-02-001: agent_harness/ with config, model, loop, perception and scenarios/dataspace; tests/test_boundary.py enforces the import rules, the absence of scenario names in the backend and the wheel exclusion; the scripted DataSpace runs pass 4/4 unchanged after the move; no backend module changed.

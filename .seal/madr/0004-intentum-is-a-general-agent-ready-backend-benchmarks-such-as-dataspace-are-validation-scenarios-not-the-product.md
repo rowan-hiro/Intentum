@@ -54,3 +54,10 @@ The champion comparison supports the boundary: the full-SQL pipeline misreads ta
 Status: Accepted → Accepted
 
 The boundary remains intact. post-aggregate select, distinct grouping and semi_join are general IR operations with no benchmark identifiers or evaluator logic in agent_backend; declaration framing, model traces, scoring and task-specific findings remain under examples/. The post-semi-join measurement did not justify any task-specific core behavior.
+
+<!-- driftseal-reconciliation: 18f98098-276d-4bd6-b55b-a8b67f3f4775 -->
+### 2026-09-02T06:18:35.861Z — Outcome `2026-09-02-001`
+
+Status: Accepted → Accepted
+
+Scenario code moved from examples/ to agent_harness/scenarios/dataspace/ as part of the harness split (MADR 0009). The boundary this record states is now enforced by tests/test_boundary.py: the backend names no scenario and imports nothing from the harness, and the harness reaches the backend only through its public API and agent_backend.mcp.server. Status unchanged.
