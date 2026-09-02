@@ -73,3 +73,10 @@ First counter-example to declaration-first: the run that passed task_44 declared
 Status: Accepted → Accepted
 
 Declaration timing measured (2026-09-02, twelve runs): declarations made once a preview showed the answer rows named the gold shape 3/6 times against 1/6 for declarations made from the question alone; passes 1/6 to 3/6 (task_44 2/3, task_329 1/3, its first), turns, tokens and refusals no worse. The contract held informed declarations at export exactly as fresh ones. 'While the requirement is in front of you' now reads as the question and the shape of the data together; the harness default framing is informed. The MCP instruction sentence is unchanged and compatible; small sample, same direction on both tasks.
+
+<!-- driftseal-reconciliation: 3b443840-d174-45ce-95e6-a11144fab492 -->
+### 2026-09-02T09:23:08.930Z — Outcome `2026-09-02-008`
+
+Status: Accepted → Accepted
+
+The contract grammar now separates the columns the deliverable carries from the columns it is organized by (MADR 0012): order_by and the one_per keys may name columns the answer does not carry, the export sorts and counts by them and leaves them out of the file, and rows is required. The declaration is also answered with what the workspace holds under each declared name. What the backend holds the export to is unchanged; what the agent can say in a declaration is wider.

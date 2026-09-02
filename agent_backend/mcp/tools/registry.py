@@ -93,18 +93,24 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         return backend.attach_metadata(source, dataset=dataset, overwrite=overwrite)
 
     @server.tool(name="declare_output", annotations=annotations("write"),
-                 description="Declare the shape of the deliverable before you work towards it: `columns` is the "
-                             "ordered list of column names the answer file must carry, exactly and only those "
+                 description="Declare the shape of the deliverable before you work towards it. `columns` is the "
+                             "ordered list of column names the answer file will CARRY, exactly and only those "
                              "(strings, or {\"name\", \"type\"} objects with type integer/float/string/boolean/"
-                             "date/timestamp); optional `rows` is \"one\", \"at_least_one\" or "
-                             "{\"one_per\": [key columns]}; optional `description`. Do this while the requirement "
-                             "is in front of you: the backend keeps the contract and export_result refuses a dataset "
-                             "that does not match it, so you cannot drift away from it later. One contract is "
-                             "current per workspace; declaring a different shape while one is open needs `reason`, "
-                             "which is recorded as an amendment. Re-declaring the same shape changes nothing.")
+                             "date/timestamp). `rows` is required and says how many rows the answer has: \"one\", "
+                             "\"at_least_one\", or {\"one_per\": [key columns]}. `order_by` names the columns the "
+                             "answer is SORTED by ([\"treatmentid\"], or [{\"column\": ..., \"direction\": "
+                             "\"desc\"}]; a leading \"-\" also means descending). A column that only orders or "
+                             "groups the answer does not belong in `columns`: put it in `order_by` or in the "
+                             "`one_per` keys and the backend will sort and count by it and leave it out of the "
+                             "file, as long as the dataset you export carries it. Optional `description`. The "
+                             "backend keeps the contract and export_result refuses a dataset that does not match "
+                             "it, so you cannot drift away from it later. One contract is current per workspace; "
+                             "declaring a different shape while one is open needs `reason`, which is recorded as "
+                             "an amendment. Re-declaring the same shape changes nothing.")
     def declare_output(columns: list[Any] | dict[str, Any] | str, rows: str | int | dict[str, Any] | None = None,
+                       order_by: list[Any] | dict[str, Any] | str | None = None,
                        description: str | None = None, reason: str | None = None) -> dict[str, Any]:
-        return backend.declare_output(columns, rows=rows, description=description, reason=reason)
+        return backend.declare_output(columns, rows=rows, order_by=order_by, description=description, reason=reason)
 
     @server.tool(name="transform_dataset", annotations=annotations("write"),
                  description="Run a semantic transform on a dataset and preview the result (or persist it when "
