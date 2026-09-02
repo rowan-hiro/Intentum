@@ -1,30 +1,34 @@
 # DataSpace smoke tests
 
 Scripts for running Intentum against the [DataSpace](https://dataspace-bench.github.io)
-benchmark (KDD Cup 2026 Data Agent track).
+benchmark (KDD Cup 2026 Data Agent track). This scenario lives in the agent
+harness, beside the backend and apart from it (MADR 0009); it moved here from
+`examples/` on 2026-09-02 with framing, scripts and scoring unchanged, so the
+measurements below are comparable across the move.
 
 - `evaluate.py` — the official evaluator, vendored unmodified from
   `HKUSTDial/DataSpace` (commit `6491caa`, MIT). Task Accuracy is binary per
   task: one one-to-one column mapping must make the whole predicted table equal
   to the gold table under the task's config (types, precision, row order).
   A prediction with more columns than the gold table fails outright.
-- `../dataspace_smoke.py` — drives a task end to end through the MCP tool
+- `smoke.py` — drives a task end to end through the MCP tool
   surface with a scripted agent (no LLM), writes
   `predictions/<task>/prediction.csv`, scores it with the official evaluator
   and (when the champion repository is available) with its local
   column-signature scorer, and records the full tool-call trace in
   `smoke_result.json`.
-- `../dataspace_agent.py` — the same tool surface driven by a real model: a
+- `agent.py` — the same tool surface driven by a real model: a
   thin OpenAI-compatible agent loop with no SQL and no dialect rules in the
   prompt, scored the same way, with per-run traces and an aggregated summary.
 
 The benchmark package itself (task inputs, 60 public `gold.csv` files and
-their configs) is expected at `$DATASPACE_BENCHMARK` or
-`$DATASPACE_BENCHMARK`.
+their configs) is expected at `$DATASPACE_BENCHMARK`, and the champion
+repository for the comparison scorer at `$KDDCUP_CHAMPION`; both are read from
+the environment or the repository `.env`, like the model settings.
 
 ```sh
-uv run python examples/dataspace_smoke.py --task all --check
-uv run python examples/dataspace_agent.py --task task_127 --runs 3
+uv run python -m agent_harness.scenarios.dataspace.smoke --task all --check
+uv run python -m agent_harness.scenarios.dataspace.agent --task task_127 --runs 3
 ```
 
 ## Tasks under measurement
@@ -193,7 +197,7 @@ Two things in that are worth acting on:
    before materializing — the degenerate "contract declared at the last
    moment" that 0007 names. Whether an early declaration would have read the
    question better is untested; it is the next experiment, and it belongs in
-   the scenario framing under `examples/`, not in core.
+   the scenario framing under `agent_harness/scenarios/dataspace/`, not in core.
 2. **The one `CONTRACT_MISMATCH` was repaired in one turn.** `task_329` run 1
    tried to export the un-aggregated table against a contract naming
    `max_ml`; the error named the missing and the extra column, and the next

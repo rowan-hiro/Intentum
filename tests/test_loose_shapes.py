@@ -1,7 +1,7 @@
 """Loose intent shapes a model actually produced against the DataSpace tasks.
 
 Each test here corresponds to a shape observed in the qwen3.5-35b-a3b runs of
-2026-08-28 (examples/dataspace/README.md) that the resolver used to refuse.
+2026-08-28 (agent_harness/scenarios/dataspace/README.md) that the resolver used to refuse.
 """
 
 from tests.conftest import write_csv
@@ -105,7 +105,7 @@ def test_strftime_computes_a_date_part(backend, orders):
     assert wrong["code"] == "TYPE_MISMATCH"
 
 
-# -- shapes from the second measurement (examples/dataspace/README.md, 2026-08-28) --
+# -- shapes from the second measurement (agent_harness/scenarios/dataspace/README.md, 2026-08-28) --
 
 def test_strftime_accepts_the_pattern_first_and_says_so(backend, orders):
     """Thirteen refusals in the task_329 runs were strftime('%Y-%m-%d', column)."""

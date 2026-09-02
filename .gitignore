@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 workspace/
-examples/dataspace/runs/
+agent_harness/scenarios/dataspace/runs/
 .env
 *.egg-info/
 dist/
