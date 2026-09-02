@@ -18,7 +18,10 @@ measurements below are comparable across the move.
   column-signature scorer, and records the full tool-call trace in
   `runs/<task>/scripted/smoke_result.json`; the model-driven layer writes
   under `runs/<task>/agent/` and neither layer touches the other's directory.
-- `agent.py` — the same tool surface driven by a real model: a
+- `agent.py` — the same tool surface driven by a real model, either through the
+  in-process reference loop or through OpenCode (`--host opencode`, MADR 0011:
+  only the `backend_*` MCP tools are enabled; runs land under
+  `runs/<task>/opencode-<declaration>/` with the host's event stream): a
   thin OpenAI-compatible agent loop with no SQL and no dialect rules in the
   prompt, scored the same way, with per-run traces and an aggregated summary.
 
@@ -210,6 +213,64 @@ whatever the turn. What changes is the reading of "while the requirement is
 in front of you" (MADR 0007): the requirement is the question and the shape of
 the data together. The runner's default framing is `informed` from here on;
 each measurement records which framing it used.
+
+### OpenCode as the host (`task_44`, `task_329`, informed framing)
+
+The harness no longer owns the model loop (MADR 0011). `--host opencode` runs
+OpenCode 1.18.26 (`opencode run --format json --auto --pure`) against the
+backend's MCP server with every builtin tool disabled and only the `backend_*`
+tools allowed; the agent prompt is the backend's instructions plus the same
+informed framing; the event stream is normalized into the harness's tool-event
+record, so the metrics below are computed the same way as for the in-process
+loop. No turn cap and no nudge apply under OpenCode; a run is bounded by a
+900 s timeout, which no run reached. Same model and gateway, same day; the loop
+rows are the informed runs recorded above.
+
+| task | host | official | declarations with the gold shape | declaration steps | mean steps | mean prompt tokens | refusals | unadvised | repair rate | mean elapsed |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | loop | 2/3 | 2/3 | 26, 17, 24 | 26.3 | 346k | 5 | 1 | 1.0 | — |
+| `task_44` | OpenCode | 2/3 | 2/3 | 19, 24, 18 | 23.3 | 447k | 11 | 7 | 0.91 | 77 s |
+| `task_329` | loop | 1/3 | 1/3 | 8, 8, 8 | 11.0 | 116k | 0 | 0 | — | — |
+| `task_329` | OpenCode | 0/3 | 0/3 | 10, 12, 17 | 16.3 | 288k | 2 | 1 | 1.0 | 54 s |
+
+Per run, OpenCode:
+
+| task | run | official | declared columns | declaration step | steps | tool calls | refusals (advised) | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | **passed** | `treatmentname` | 19 | 22 | 21 | 1 (0): a transform sent as a malformed JSON string, refused by the MCP SDK's argument validation | 421k | done |
+| `task_44` | 2 | failed (extra column) | `treatmentid, treatmentname` | 24 | 26 | 25 | 3 (1): `subquery_as_semi_join`; a string compared with an integer; a field out of scope | 513k | done |
+| `task_44` | 3 | **passed** | `treatmentname` | 18 | 22 | 21 | 7 (3): `join_on_as_mapping` + `unknown_key`, `reshape_to_contract` at export (taken up: `answer_oc_1`); unadvised: an aliased inline source list sent as a string, a `semi_join.right` given as a spec, fields out of scope ×3 | 408k | done |
+| `task_329` | 1 | failed (extra column) | `day (date), max_bolus_amt_ml (float)` | 10 | 14 | 13 | 0 | 271k | done |
+| `task_329` | 2 | failed (extra column) | `bolus_date, daily_max_bolus_ml` | 12 | 15 | 14 | 1 (1): `expression_as_derive` | 250k | done |
+| `task_329` | 3 | failed (extra column) | `day, max_bolus_amt` | 17 | 20 | 19 | 1 (0): a derive naming its result twice | 343k | done |
+
+What the comparison shows. On `task_44` the host made no difference to the
+verdict: 2/3 under both, the same two gold-shape declarations, made at similar
+points (steps 18 to 24), and in fewer steps under OpenCode (23.3 against
+26.3). On `task_329` OpenCode declared later (steps 10 to 17 against 8) and
+all three declarations carried a date column, 0/3 against the loop's 1/3; with
+three runs per arm that is within noise, but it is the direction to watch. The
+advice chain works under a foreign host exactly as under the loop: the
+`CONTRACT_MISMATCH` rewrite in `task_44` run 3 was taken up under the proposed
+name, `expression_as_derive` and `join_on_as_mapping` were repaired on the next
+call, and `matches_contract` preceded every export. Prompt tokens are higher
+under OpenCode (447k against 346k on `task_44`, 288k against 116k on
+`task_329`): the host does not truncate tool results as the loop does (8000
+characters) and carries its own context, and `task_329`'s longer runs compound
+it. Every OpenCode run ended by itself, none by the timeout; the host's own
+pacing replaced the loop's nudge without loss on these two tasks.
+
+Refusals the loop never showed came from the host boundary and the model's
+argument shapes: eight of the eleven `task_44` refusals had no advice, among
+them a transform sent as a malformed JSON string (refused by the MCP SDK before
+the backend saw it, so no advice is possible there today), an inline aliased
+source list sent as a string and a `semi_join.right` given as a spec (the
+`source_as_dataset` detector reads only a real list, not its string form or a
+join's right side), and fields out of scope after a join or select (the
+response lists the fields that are). The first three are the next fixes: parse
+a JSON string where an object is expected at the MCP layer, and widen the
+inline-relation detector to string forms and to `right`. OpenCode is the
+runner's default host from here on; the loop stays as `--host loop`.
 
 ## 2026-09-02 · task_44 after the harness split, before advice
 

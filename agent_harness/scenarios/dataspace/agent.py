@@ -2,6 +2,12 @@
 
     uv run python -m agent_harness.scenarios.dataspace.agent --task task_10 --runs 3
     uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --declaration informed
+    uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --host opencode
+
+Two hosts can run the model: OpenCode with only the backend's MCP tools enabled
+(--host opencode, the default since MADR 0011; see agent_harness/hosts/opencode.py),
+or the in-process reference loop below (--host loop, the control arm); both
+produce the same run record.
 
 A deliberately thin agent loop (no framework, no SQL, no dialect rules): the
 model sees the MCP server's own instructions, the task framing, the question
@@ -32,6 +38,7 @@ from agent_backend import Backend
 from agent_backend.mcp.server import INSTRUCTIONS, create_server
 
 from agent_harness.config import model_config
+from agent_harness.hosts.opencode import opencode_version, run_opencode
 from agent_harness.loop import run_tool_loop
 from agent_harness.scenarios.dataspace import RUNS, benchmark_root, champion_root, task_context, task_question
 from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, FRAMINGS, NUDGE_PROMPT
@@ -61,35 +68,54 @@ def convergence(tool_events: list[dict[str, Any]], window: int = 2) -> dict[str,
 
 
 async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, config: dict[str, str], *,
-                   max_turns: int, max_tool_chars: int, max_tokens: int, declaration: str = "fresh") -> dict[str, Any]:
+                   max_turns: int, max_tool_chars: int, max_tokens: int, declaration: str = "fresh",
+                   host: str = "loop", host_timeout: int = 900) -> dict[str, Any]:
     context_dir = task_context(benchmark, task)
     pred_root = run_dir / "predictions"
     prediction_path = pred_root / task / "prediction.csv"
-    backend = Backend(run_dir / "workspace", export_root=run_dir)  # exports are confined to the run directory
-    try:
-        server = create_server(backend)
-        loop = await run_tool_loop(
-            server, config,
-            system_prompt=INSTRUCTIONS + "\n" + FRAMINGS[declaration].format(context_dir=context_dir, prediction_path=prediction_path),
-            user_prompt=question, deliverable=prediction_path,
-            delivered_prompt=DELIVERED_PROMPT, nudge_prompt=NUDGE_PROMPT,
-            max_turns=max_turns, max_tool_chars=max_tool_chars, max_tokens=max_tokens,
-        )
-        integrity = backend.integrity_report()
-    finally:
-        backend.close()
+    system_prompt = INSTRUCTIONS + "\n" + FRAMINGS[declaration].format(context_dir=context_dir, prediction_path=prediction_path)
+    messages: list[dict[str, Any]] | None = None
+    turn_log: list[dict[str, Any]] = []
+    host_version: str | None = None
+    if host == "opencode":
+        # The host launches the backend's MCP server itself on this run's workspace; exports are confined to run_dir.
+        ran = run_opencode(run_dir, prompt=question, system_prompt=system_prompt, settings=config,
+                           timeout_s=host_timeout, title=task)
+        tool_events, turns, usage, cost = ran.tool_events, ran.turns, ran.usage, ran.cost_usd
+        stop_reason, elapsed, nudges = ran.stop_reason, ran.elapsed_s, 0
+        host_version = opencode_version()
+        backend = Backend(run_dir / "workspace", export_root=run_dir)
+        try:
+            integrity = backend.integrity_report()
+        finally:
+            backend.close()
+    else:
+        backend = Backend(run_dir / "workspace", export_root=run_dir)  # exports are confined to the run directory
+        try:
+            server = create_server(backend)
+            loop = await run_tool_loop(
+                server, config, system_prompt=system_prompt, user_prompt=question, deliverable=prediction_path,
+                delivered_prompt=DELIVERED_PROMPT, nudge_prompt=NUDGE_PROMPT,
+                max_turns=max_turns, max_tool_chars=max_tool_chars, max_tokens=max_tokens,
+            )
+            integrity = backend.integrity_report()
+        finally:
+            backend.close()
+        tool_events, turns, usage, cost = loop.tool_events, len(loop.turns), loop.usage, loop.cost_usd
+        stop_reason, elapsed, nudges = loop.stop_reason, loop.elapsed_s, loop.stall_nudges
+        messages, turn_log = loop.messages, loop.turns
 
-    declared = [e["turn"] for e in loop.tool_events if e["tool"] == "declare_output" and e["status"] == "success"]
+    declared = [e["turn"] for e in tool_events if e["tool"] == "declare_output" and e["status"] == "success"]
     result: dict[str, Any] = {
-        "task": task, "model": config["model"], "declaration": declaration,
+        "task": task, "model": config["model"], "host": host, "host_version": host_version, "declaration": declaration,
         "declaration_turn": declared[0] if declared else None,
-        "stop_reason": loop.stop_reason, "turns": len(loop.turns),
-        "tool_calls": len(loop.tool_events), "elapsed_s": loop.elapsed_s, "usage": loop.usage, "cost_usd": loop.cost_usd,
+        "stop_reason": stop_reason, "turns": turns,
+        "tool_calls": len(tool_events), "elapsed_s": elapsed, "usage": usage, "cost_usd": cost,
         "prediction": str(prediction_path) if prediction_path.exists() else None,
-        "tool_histogram": dict(Counter(e["tool"] for e in loop.tool_events)),
-        "status_histogram": dict(Counter(f"{e['status']}:{e['code']}" if e["code"] else str(e["status"]) for e in loop.tool_events)),
-        "integrity_ok": integrity["ok"], "stall_nudges": loop.stall_nudges, "convergence": convergence(loop.tool_events),
-        "tool_events": loop.tool_events, "turn_log": loop.turns,
+        "tool_histogram": dict(Counter(e["tool"] for e in tool_events)),
+        "status_histogram": dict(Counter(f"{e['status']}:{e['code']}" if e["code"] else str(e["status"]) for e in tool_events)),
+        "integrity_ok": integrity["ok"], "stall_nudges": nudges, "convergence": convergence(tool_events),
+        "tool_events": tool_events, "turn_log": turn_log,
     }
     if prediction_path.exists():
         official = run_official_evaluator(pred_root, benchmark, task, run_dir)
@@ -99,7 +125,8 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
         result["champion_scorer"] = (champion or {}).get("result")
     else:
         result["official"] = {"passed": False, "task": None}
-    (run_dir / "messages.json").write_text(json.dumps(loop.messages, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    if messages is not None:
+        (run_dir / "messages.json").write_text(json.dumps(messages, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     (run_dir / "run_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return result
 
@@ -122,6 +149,8 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     repaired = sum(r["convergence"]["repaired_refusals"] for r in results)
     return {
         "runs": len(results),
+        "host": results[0].get("host") if results else None,
+        "host_version": results[0].get("host_version") if results else None,
         "declaration": results[0]["declaration"] if results else None,
         "declaration_turns": [r.get("declaration_turn") for r in results],
         "passed": sum(1 for r in results if r["official"]["passed"]),
@@ -153,6 +182,9 @@ def main() -> int:
     parser.add_argument("--max-tool-chars", type=int, default=8000)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--benchmark", default=None, help="benchmark package root (default: $DATASPACE_BENCHMARK)")
+    parser.add_argument("--host", choices=["loop", "opencode"], default="opencode",
+                        help="who runs the model loop: the in-process reference loop, or OpenCode with only the backend tools")
+    parser.add_argument("--host-timeout", type=int, default=900, help="seconds an external host run may take")
     parser.add_argument("--declaration", choices=sorted(FRAMINGS), default="informed",
                         help="when the framing asks for declare_output: fresh (first call) or informed (once a preview shows the answer)")
     parser.add_argument("--out", default=None, help="output directory (default runs/<task>/agent or agent-informed beside this module)")
@@ -166,12 +198,17 @@ def main() -> int:
         return 2
     config = model_config()
     question = task_question(benchmark, args.task)
-    print(f"task {args.task} · model {config['model']} · {question}")
+    print(f"task {args.task} · host {args.host} · model {config['model']} · declaration {args.declaration} · {question}")
     if args.check_config or args.runs <= 0:
         print("configuration ok")
         return 0
 
-    out_dir = Path(args.out) if args.out else RUNS / args.task / ("agent" if args.declaration == "fresh" else f"agent-{args.declaration}")
+    if args.out:
+        out_dir = Path(args.out)
+    elif args.host == "loop":  # the reference loop keeps its historical directory names
+        out_dir = RUNS / args.task / ("agent" if args.declaration == "fresh" else f"agent-{args.declaration}")
+    else:
+        out_dir = RUNS / args.task / f"{args.host}-{args.declaration}"
     results: list[dict[str, Any]] = []
     for index in range(1, args.runs + 1):
         run_dir = out_dir / f"run_{index}"
@@ -181,7 +218,7 @@ def main() -> int:
         print(f"\n=== run {index}/{args.runs} ===")
         result = asyncio.run(run_once(args.task, question, benchmark, run_dir, config, max_turns=args.max_turns,
                                       max_tool_chars=args.max_tool_chars, max_tokens=args.max_tokens,
-                                      declaration=args.declaration))
+                                      declaration=args.declaration, host=args.host, host_timeout=args.host_timeout))
         results.append(result)
         c = result["convergence"]
         print(f"  → passed={result['official']['passed']} turns={result['turns']} tool_calls={result['tool_calls']} "

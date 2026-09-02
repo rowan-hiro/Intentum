@@ -10,8 +10,9 @@ the MCP interface in `mcp/`, all under `agent_backend/`.
 
 The agent side lives in `agent_harness/`, a sibling package that drives the
 backend only through its MCP tool surface and is not shipped in the wheel. It
-owns the model loop, the task framing, perception of unstructured sources
-(documents, video, audio) and the validation scenarios. The boundary is
+owns the task framing, the measurement, the host adapters (OpenCode runs the
+model loop, MADR 0011; an in-process loop remains as the control arm) and the
+validation scenarios. The boundary is
 enforced by `tests/test_boundary.py` and recorded in MADR 0009: the harness
 imports from `agent_backend` only its public API and `agent_backend.mcp.server`;
 the backend imports nothing from the harness and names no scenario; what
@@ -47,7 +48,8 @@ perception extracts enters the backend only through `import_dataset` or
 | `tests/conftest.py` | Shared temporary workspace, backend, sample orders, and deterministic clock fixtures. |
 | `examples/` | Sample `orders.csv`, runnable `demo.py`, and MCP client configuration in `mcp_config.json`. |
 | `agent_harness/` | The agent side: `config.py` (`.env` and model gateway settings), `model.py` (OpenAI-compatible chat client), `loop.py` (tool-calling loop over an MCP server). |
-| `agent_harness/perception/` | Readers of unstructured sources, exposed to the model as tools beside the backend's; empty until the first measured task needs one. |
+| `agent_harness/hosts/` | External agent hosts (MADR 0011): `opencode.py` writes a per-run `opencode.json`, runs `opencode run --format json` with only the `backend_*` MCP tools allowed, and normalizes the event stream into the harness's tool-event record. |
+| `agent_harness/perception/` | Reserved for an MCP-exposed reader of unstructured sources if the tool-restricted arm ever needs one; perception otherwise comes from the host. |
 | `agent_harness/scenarios/dataspace/` | DataSpace validation: task framing, scripted agents, the vendored official evaluator, scoring, the runners `smoke.py` (scripted) and `agent.py` (model-driven), run output under `runs/`, and the measurement README. |
 | `pyproject.toml` | Package metadata, dependencies, CLI entry point, build configuration, and test settings. |
 | `uv.lock` | Locked dependency resolution for uv. |

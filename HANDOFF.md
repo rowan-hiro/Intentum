@@ -21,6 +21,11 @@ driftseal status
 driftseal log --last 3
 ```
 
+- Outcome `2026-09-02-005` made OpenCode the agent host (`--host opencode`,
+  MADR 0011): the model sees only the backend's MCP tools, and the event
+  stream is normalized into the same run record as the in-process loop.
+  Outcomes `-003` and `-004` measured the recovery module's fixes and the
+  declaration timing (informed beats fresh; it is the default).
 - Outcome `2026-09-02-002` added `agent_backend/core/recovery/`: every
   refusal now carries `advice` naming what the backend accepts, with the
   request rewritten as tool calls when mechanical; empty results and results
@@ -42,6 +47,8 @@ MADRs, in reading order (`.seal/madr/`):
 
 - `0004` — what Intentum is: a general backend; benchmarks validate it, they
   do not define it.
+- `0011` — OpenCode as the agent host: what the harness keeps (scenario,
+  measurement, adapters) and what the host owns (loop, pacing, perception).
 - `0010` — teach on refusal: why refusals carry advice and rewrites instead of
   the resolver accepting every shape, and what convergence is measured by.
 - `0009` — the harness/backend boundary, and why perception of unstructured
@@ -66,5 +73,10 @@ scenario from the repository root:
 
 ```sh
 uv run python -m agent_harness.scenarios.dataspace.smoke --task all --check
-uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3
+uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3              # OpenCode, backend tools only (default)
+uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --host loop  # in-process loop, the control arm
 ```
+
+The OpenCode host needs `opencode` on the PATH (1.18.26 was used); each run
+writes its own `opencode.json`, `prompt.txt`, `events.jsonl` and `host.log`
+beside the run's workspace.
