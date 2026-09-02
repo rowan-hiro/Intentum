@@ -551,7 +551,10 @@ imports in ~2 s and the task's query runs through the semantic steps.
    unremarked; `core/recovery` now answers both with structured advice and
    rewrites (MADR 0010), and the harness reports refusals without advice and
    the repair rate beside the pass rate, so convergence is measured rather than
-   read off task by task. A validated read-only `raw_query` fallback step is
+   read off task by task. With advice in place the model-driven layer
+   exported the correct `task_44` values in five of six runs and scored its
+   first official pass on that task (1/3 on 2026-09-02), the passing run
+   having declared its output after seeing the data rather than first. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
