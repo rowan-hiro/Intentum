@@ -9,3 +9,4 @@ agent_harness/scenarios/dataspace/runs/
 dist/
 build/
 .claude/
+.agents/
