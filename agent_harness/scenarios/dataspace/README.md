@@ -58,11 +58,119 @@ allows correcting an earlier misreading; a dataset mismatch alone does not
 justify changing the declaration. The new wording names no task or data field
 and does not prescribe adding or removing columns.
 
-This changes the prompt conditions for both hosts. No model runs have measured
-this addition yet, so the results below remain measurements of the earlier
-wording. A future measurement should include cases where the declaration
+This changes the prompt conditions for both hosts. The third round below is
+the first measurement of this addition; earlier rounds used the earlier
+wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
+
+## 2026-09-09, third round · after declaration-response review (`eed47b7`)
+
+**The official verdicts stayed at 3/3 for `task_44` and 0/3 for `task_329`;
+none of the six runs amended a successful declaration.** The initial carried
+columns already matched the reference shape in every `task_44` run. Every
+`task_329` run declared and exported an extra date column, including two runs
+whose declaration response explained the consequence of carrying the sort key.
+The new review instructions did not produce an observable correction in this
+sample. This does not establish whether the model internally reconsidered a
+declaration before retaining it.
+
+Conditions: source `eed47b7`, model `qwen/qwen3.5-35b-a3b`, OpenCode 1.18.26
+in the container, informed declaration framing, three sequential runs per task
+with the runner's defaults and a 900 s timeout. The image was rebuilt before
+the runs; its recorded ID is
+`sha256:191e4f563e6978f906e52fa8cc7071f3c83bc9683de13ae3d903e14fc6f05443`.
+First-step input tokens were 5,546 on every `task_44` run and 5,553 on every
+`task_329` run, against about 5.2k in the preceding round. The new instructions
+are available before the first declaration as well as when its response is
+read, so this comparison cannot isolate the effect of reviewing the response.
+No backend, prompt, runner or evaluator code was changed during this round.
+
+| task | round | official | amendments | mean steps | mean prompt tokens | refusals | unadvised | repair rate | mean elapsed |
+|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | preceding round (`2ec5175`) | 3/3 | 0 | 19.7 | 326k | 7 | 2 | 1.0 | 72 s |
+| `task_44` | declaration review (`eed47b7`) | 3/3 | 0 | 26.3 | 548k | 13 | 8 | 0.462 | 106.7 s |
+| `task_329` | preceding round (`2ec5175`) | 0/3 | 0 | 15.3 | 230k | 5 | 3 | 0.80 | 51 s |
+| `task_329` | declaration review (`eed47b7`) | 0/3 | 0 | 14.3 | 205k | 4 | 4 | 0.75 | 51.1 s |
+
+Per run. All six successful declarations used `rows: at_least_one`; none used
+`one_per`. Each stayed at revision 1, with no amendment or amendment reason.
+The columns below are both the first successfully declared and the final
+declared columns. A refused declaration followed by a corrected first
+declaration is counted as refusal repair, not as an amendment.
+
+| task | run | official | declared columns (initial = final) | `order_by` | declaration step | steps / calls | refusals (unadvised) | repaired | prompt tokens | elapsed |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | passed | `treatmentname` | `treatmentid asc` | 15 | 20 / 19 | 1 (0) | 1/1 | 381,277 | 83.6 s |
+| `task_44` | 2 | passed | `treatmentname` | `eventid asc` | 30 | 38 / 37 | 11 (8) | 4/11 | 936,781 | 168.7 s |
+| `task_44` | 3 | passed | `treatmentname` | `treatmentid asc` | 18 | 21 / 20 | 1 (0) | 1/1 | 324,896 | 67.9 s |
+| `task_329` | 1 | failed: extra column | `day (string), max_amount_ml (float)` | `day asc` | 5 | 10 / 10 | 1 (1) | 1/1 | 125,675 | 39.0 s |
+| `task_329` | 2 | failed: extra column | `date, max_ml` | `date asc` | 10 | 15 / 14 | 1 (1) | 1/1 | 226,045 | 57.8 s |
+| `task_329` | 3 | failed: extra column | `date, max_amount_ml` | none | 12 | 18 / 17 | 2 (2) | 1/2 | 264,399 | 56.4 s |
+
+The declaration response and the actions that followed it:
+
+- `task_44` never named a key in both lists. Every response described one
+  carried column and a separate sort key. Runs 1 and 3 first tried `rows: 4`,
+  received `declaration_rows`, and then made their first successful declaration;
+  that is failure-side recovery. After declaration, each run continued with
+  transforms or materialization and exported the correct four-row, one-column
+  file. Run 2 accounts for most of the extra work: all eleven of its refusals
+  occurred before declaration, largely while expressing the join and projection.
+- `task_329` runs 1 and 2 named `day` or `date` in both `columns` and `order_by`.
+  Their responses contained `carried: true`, `organizing: [order_by]` and the
+  sentence explaining that the column would be written, whereas naming it only
+  in `order_by` would sort without writing it. Run 1 declared at step 5, then
+  previewed at 6, attempted materialization at 7, materialized at 8 and exported
+  at 9. Run 2 declared at 10, attempted a transform at 11, materialized through
+  a transform at 12 and exported at 13. Neither amended the declaration.
+- `task_329` run 3 used neither organizing field, so the both-lists sentence
+  did not fire. Its declaration summary still said that the file would carry
+  `date` and `max_amount_ml`. It declared at 12, previewed at 13, materialized
+  at 14 and exported at 15. A second export at 16 was refused because the file
+  existed; the agent inspected the operation at 17 and ended. All three files
+  had one row and two columns against the reference's one row and one column.
+
+Every first dependent call above occurred in a later model step than the
+successful declaration response. The trace therefore contains a response
+boundary at which reconsideration was possible. It contains no visible
+explanation of retaining or revising a declaration: the only text events after
+successful declarations are `DONE`. The records show unchanged declarations,
+not whether the model read, ignored or agreed with the feedback. No run
+attempted an amendment, so the revised amendment guidance was not exercised
+through an amendment call.
+
+All six runs ended normally and passed the backend integrity check; no run
+reached the timeout, and all official evaluator processes returned 0. The
+optional champion scorer initially reported `prediction missing`: the relative
+`--out` path was interpreted under its own working directory. Those original
+records are retained. Re-running only that local auxiliary scorer with absolute
+prediction paths produced 1.0 on all `task_44` runs and 0.95 on all `task_329`
+runs (one matching value column plus one extra column), saved separately as
+`champion_absolute_path_check.json` in each run. Official results and model
+runs were not replaced or repeated.
+
+Raw runs and extracted declaration records are retained under
+[`task_44/opencode-informed-20260909-0834`](runs/task_44/opencode-informed-20260909-0834/)
+and [`task_329/opencode-informed-20260909-0834`](runs/task_329/opencode-informed-20260909-0834/).
+Each directory contains `agent_summary.json`, `declaration_review.json` and
+three run directories with the event stream, prompt, prediction and evaluator
+result. These are new directories; the previous round's raw runs are preserved.
+Commands used, after rebuilding the image:
+
+```sh
+PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --out agent_harness/scenarios/dataspace/runs/task_44/opencode-informed-20260909-0834
+PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task task_329 --runs 3 --out agent_harness/scenarios/dataspace/runs/task_329/opencode-informed-20260909-0834
+```
+
+Six runs on two already studied tasks are insufficient to establish either
+generalization or a causal effect. The two both-lists exposures are also too
+few to estimate a correction rate. What this round establishes is narrower:
+the general review guidance was present, the existing declaration feedback was
+returned, and none of these runs revised its successful declaration. The
+correct initial declarations stayed correct; the incorrect ones stayed
+incorrect. Broader validation still needs both retention and correction cases
+with other deliverable shapes.
 
 ## 2026-09-09, second round · after `declare_output` answered a name given as both carried and organizing (`2ec5175`)
 
