@@ -3,7 +3,7 @@
 Read these, in this order, before changing anything. Nothing else is needed
 to start.
 
-1. `AGENTS.md` — the DriftSeal protocol you must follow and the module map.
+1. `AGENTS.md` — the Inkan protocol you must follow and the module map.
    `CLAUDE.md` is a symlink to it.
 2. `README.md` — architecture. Sections 1 ("Output contracts", "Transform
    language", "Exporting an answer", "Failure semantics"), 2 (the two
@@ -17,9 +17,13 @@ to start.
 Then re-anchor:
 
 ```sh
-driftseal status
-driftseal log --last 3
+inkan status
+inkan log -n 3
 ```
+
+The outcomes named below closed under DriftSeal, before the repository moved
+to Inkan; `inkan log` does not carry them. Read them in `.seal/HISTORY.md`,
+which is the frozen rendering of that history.
 
 - Outcome `2026-09-02-006` split the output contract in two (MADR 0012):
   `columns` is what the answer carries, `order_by` and the `one_per` keys are
@@ -50,7 +54,7 @@ driftseal log --last 3
 - Outcome `2026-08-28-010` is where output contracts and the trust model
   came from; its closing note is still the best summary of the backend.
 
-MADRs, in reading order (`.seal/madr/`):
+MADRs, in reading order (`.inkan/decisions/`):
 
 - `0004` — what Intentum is: a general backend; benchmarks validate it, they
   do not define it.
