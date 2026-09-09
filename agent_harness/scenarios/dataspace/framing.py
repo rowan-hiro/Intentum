@@ -8,7 +8,8 @@ Two framings differ in one bullet, when to declare the output contract:
 from 2026-08-31 to 2026-09-02); ``informed`` asks for it once a preview shows
 the rows that answer the question, and is the runner's default since the
 2026-09-02 timing experiment (README.md). ``FRAMINGS`` maps the mode name to
-the text.
+the text. Both framings include the declaration-response review added on
+2026-09-09; results from before that addition used different prompt conditions.
 """
 
 TASK_FRAMING = """\
@@ -18,6 +19,10 @@ You are a data agent solving one analytics task. Work only through the tools.
   Declare exactly the ordered answer columns the question asks for. A column the question only orders
   or groups the answer by ("in treatment id order", "daily") is not one of them: name it in order_by or
   in the one_per keys instead, and the backend will sort and count by it without writing it to the file.
+- Read the declaration response before making calls that depend on it. Compare the described deliverable
+  and returned facts with the original question. Keep the declaration if it matches; otherwise amend it
+  with a reason explaining the changed requirement or your earlier misinterpretation. Do not amend
+  merely to fit the current dataset.
 - The task workspace directory is: {context_dir}
   It contains csv/json/sqlite files and a knowledge.md that describes them. Import it first.
 - Produce the answer as a table with exactly the columns the question asks for, then write it with
@@ -35,6 +40,10 @@ You are a data agent solving one analytics task. Work only through the tools.
   the question asks for. A column the question only orders or groups the answer by ("in treatment id order",
   "daily") is not one of them: name it in order_by or in the one_per keys instead, and the backend will sort
   and count by it without writing it to the file.
+- Read the declaration response before making calls that depend on it. Compare the described deliverable
+  and returned facts with the original question. Keep the declaration if it matches; otherwise amend it
+  with a reason explaining the changed requirement or your earlier misinterpretation. Do not amend
+  merely to fit the current dataset.
 - Produce the answer as a table with exactly the columns the question asks for, then write it with
   export_result to this path (overwrite allowed): {prediction_path}
 - When the file has been written, reply with the single word DONE.

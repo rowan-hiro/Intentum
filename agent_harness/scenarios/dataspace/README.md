@@ -47,6 +47,23 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+## Current prompt conditions · declaration review added 2026-09-09
+
+After the rounds below, the shared MCP instructions, `declare_output` tool
+description and both declaration framings gained a general review step: read
+the declaration response before dependent calls, compare its consequences
+with the original request, and either retain it or amend with a reason for a
+changed requirement or corrected interpretation. Amendment guidance also
+allows correcting an earlier misreading; a dataset mismatch alone does not
+justify changing the declaration. The new wording names no task or data field
+and does not prescribe adding or removing columns.
+
+This changes the prompt conditions for both hosts. No model runs have measured
+this addition yet, so the results below remain measurements of the earlier
+wording. A future measurement should include cases where the declaration
+should be retained as well as corrected, across different deliverable shapes;
+an increased amendment rate alone would not establish improvement.
+
 ## 2026-09-09, second round · after `declare_output` answered a name given as both carried and organizing (`2ec5175`)
 
 The round below found the model reading `columns` and `order_by`/`one_per` as

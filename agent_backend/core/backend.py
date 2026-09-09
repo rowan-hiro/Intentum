@@ -1464,7 +1464,8 @@ class Backend:
                         "changing it is an amendment and needs a reason.",
                         field="reason",
                         details={"contract": contract_summary(current)},
-                        hint="Pass reason='why the requirement changed' to amend the open contract, or export what it declares.",
+                        hint="To amend the open contract, pass reason explaining the changed requirement or the "
+                             "earlier misinterpretation. Otherwise produce what the current contract declares.",
                     )
                 before = contract_summary(current)
                 current.columns = spec.columns
@@ -1625,10 +1626,12 @@ class Backend:
                 field="dataset",
                 candidates=[n for n, _ in actual],
                 details=details,
-                hint=first + " call declare_output again with a reason if the requirement itself changed.",
+                hint=first + " call declare_output again with a reason if the requirement changed or the earlier "
+                            "declaration misinterpreted it.",
             )
             problem_text = " ".join(p.message for p in problems)
-            amend = " Amend the contract with declare_output and a reason only if the requirement itself changed."
+            amend = (" Amend the contract with declare_output and a reason if the requirement changed or the earlier "
+                     "declaration misinterpreted it; a mismatch with this dataset alone is not a reason to amend.")
             if repair is not None:
                 answer = f"answer_{contract.id}"
                 rewrite = [tool_call("materialize_result", source=ds.name, transform=repair, name=answer,
