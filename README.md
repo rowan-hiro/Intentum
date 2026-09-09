@@ -636,3 +636,18 @@ imports in ~2 s and the task's query runs through the semantic steps.
 8. **Protocol-level input errors**: the MCP SDK currently reports wrong-typed
    arguments (e.g. a string `transform`) as tool errors with pydantic text;
    mapping those to the same structured error shape would close the last gap.
+9. **Reversibility as a property of each call**: on the data side regret is
+   cheap. A transform creates a new dataset rather than replacing one,
+   `delete_dataset` has `restore_dataset`, and a failed operation drops its
+   own table. The one call that cannot be undone is `export_result` with
+   `overwrite=true`, which replaces a file outside the workspace; metadata
+   edits are softer, audited with their new values but not their old ones.
+   The MCP annotations say the opposite, `delete_dataset` marked destructive
+   and `export_result` not, because they are per tool while reversibility is
+   per call. Three steps, deferred until a scenario asks for them: the plan
+   states whether each step can be undone and at what cost; a step that
+   cannot be undone runs only on an explicit commit; and an agent can declare
+   several operations as one intent, so that every precondition is checked
+   before any step runs, with compensation in the shape of MADR 0001 where
+   the world does not allow atomicity. Whether to ask the user before
+   committing is the host's policy (MADR 0008), not the backend's.
