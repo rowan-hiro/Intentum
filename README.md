@@ -235,6 +235,16 @@ as an amendment with the shape before and after; re-declaring the same shape
 changes nothing; a new contract can be declared freely once the previous one is
 satisfied. Exports without a contract behave as before.
 
+After a declaration returns, the agent reads its contract, summary and any
+name facts and compares the described deliverable with the original request
+before making calls that depend on it. If the declaration matches, it keeps
+it and continues. A changed requirement or a corrected interpretation can
+justify an explicit amendment; a mismatch with the current dataset alone
+cannot. The backend records the reason without judging the interpretation.
+This review is an interaction instruction, not an additional confirmation API
+or a backend model: a successful declaration records what the agent said,
+not whether it understood the request correctly.
+
 This is the trust model of MADR 0008 made concrete: the declaration made
 fresh is the reference, the export attempted twenty turns later is the thing
 that gets checked, and the check runs outside the agent's context.
@@ -462,7 +472,7 @@ Tools exposed (all semantic; no SQL, no file or table primitives):
 //    "message": "regional_sales_with_counts does not have the shape declared in output contract oc_1: column 'orders' is not in the contract.",
 //    "details": {"contract": {...}, "actual": {...}, "problems": [{"kind": "extra", "column": "orders", ...}],
 //                "repair": {"select": ["region", "revenue"]}},
-//    "hint": "Reshape it with materialize_result(source='regional_sales_with_counts', transform={\"select\": [\"region\", \"revenue\"]}) and export that dataset, or call declare_output again with a reason if the requirement itself changed."}
+//    "hint": "Reshape it with materialize_result(source='regional_sales_with_counts', transform={\"select\": [\"region\", \"revenue\"]}) and export that dataset, or call declare_output again with a reason if the requirement changed or the earlier declaration misinterpreted it."}
 
 // the matching export satisfies the contract and records the evidence
 {"name": "export_result", "arguments": {"dataset": "regional_sales", "path": "prediction.csv"}}

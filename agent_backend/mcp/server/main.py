@@ -28,6 +28,7 @@ This server is an agent-ready data backend. Express what you want, not how to do
 - A successful response may carry `advice` too: an empty result says where a filtered value actually occurs; a result that already has the declared output shape says so and names the next call.
 - State-changing tools are safe to retry; identical requests replay the original result.
 - Declare the shape of your deliverable with declare_output while the requirement is in front of you; export_result holds the file to it.
+- After declare_output returns, read its contract, summary and any names facts before making calls that depend on the declaration. Compare the described deliverable with the original request. If it matches, keep the declaration and continue; if the requirement changed or you misinterpreted it, call declare_output again with a reason explaining the correction. Do not amend merely to fit the current dataset. A successful declaration records your interpretation; it does not verify that interpretation against the request.
 The backend owns identifiers, storage layout, versions, lineage, audit and transactions.
 """
 

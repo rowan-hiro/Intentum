@@ -106,7 +106,11 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "backend keeps the contract and export_result refuses a dataset that does not match "
                              "it, so you cannot drift away from it later. One contract is current per workspace; "
                              "declaring a different shape while one is open needs `reason`, which is recorded as "
-                             "an amendment. Re-declaring the same shape changes nothing.")
+                             "an amendment. A reason may explain a changed requirement or correct an earlier "
+                             "misinterpretation; a mismatch with the current dataset alone is not a reason to amend. "
+                             "Read the returned contract, summary and any names facts against the original request "
+                             "before dependent calls; keep the declaration if it matches, otherwise amend with the "
+                             "reason. Re-declaring the same shape changes nothing.")
     def declare_output(columns: list[Any] | dict[str, Any] | str, rows: str | int | dict[str, Any] | None = None,
                        order_by: list[Any] | dict[str, Any] | str | None = None,
                        description: str | None = None, reason: str | None = None) -> dict[str, Any]:
