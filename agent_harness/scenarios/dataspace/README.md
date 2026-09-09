@@ -47,6 +47,105 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+## 2026-09-09 · after the contract separated payload from organizing keys (MADR 0012)
+
+`declare_output` now names two kinds of column (MADR 0012, landed in `79f311f`).
+`columns` is what the file carries, in order; `order_by` and the `one_per` keys
+of `rows` are what the answer is organized by — they may name columns the file
+does not carry, the backend sorts and counts by them, and it leaves them out of
+the file. `rows` became required. The prediction recorded in 0012 was that
+early declarations should stop carrying the sort key. This is the first
+measurement since that change.
+
+Same conditions as the OpenCode container arm below: OpenCode 1.18.26 in a
+freshly built image from `agent_harness/hosts/opencode.Dockerfile`,
+`--declaration informed`, the same model and gateway, the runner's defaults
+untouched. `framing.py`, the MCP tool descriptions and the backend are
+unchanged by this round; the framing has carried the 0012 wording since
+`79f311f` and was not strengthened for this measurement. Six container runs,
+all ended by themselves; none reached the 900 s timeout, and none failed for an
+infrastructure reason. First-step prompt tokens are 5.2k against the baseline's
+5.0k, which is the 0012 sentence in the framing.
+
+The baseline is the OpenCode container arm of 2026-09-02 below, which predates
+`79f311f`.
+
+| task | round | official | declarations with the gold shape | declaration steps | mean steps | mean prompt tokens | first-step tokens | refusals | unadvised | repair rate | mean elapsed |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | baseline, before 0012 | 2/3 | 2/3 | 33, 16, 19 | 25.7 | 483k | 5.0k | 7 | 4 | 0.57 | 93 s |
+| `task_44` | this round, after 0012 | 1/3 | 1/3 | 13, 21, 37 | 29.0 | 635k | 5.2k | 15 | 11 | 0.60 | 120 s |
+| `task_329` | baseline, before 0012 | 0/3 | 0/3 | 11, 9, 11 | 14.3 | 218k | 5.0k | 4 | 0 | 1.0 | 56 s |
+| `task_329` | this round, after 0012 | 0/3 | 0/3 | 15, 13, 10 | 16.7 | 254k | 5.2k | 6 | 3 | 1.0 | 58 s |
+
+Per run. The `order_by` / `one_per` column is new and is the point of this
+round: whether the run used the organizing fields at all, and which keys it
+named there. It is recorded apart from the verdict on purpose, because a
+verdict can stay put for reasons that have nothing to do with 0012, while the
+shape of the declaration is the direct evidence.
+
+| task | run | official | declared columns | `order_by` / `one_per` | declaration step | steps | tool calls | refusals (advised) | advice taken up | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | failed (extra column) | `treatmentid, treatmentname` | `order_by: treatmentid`; `rows: at_least_one`, no `one_per` | 13 | 18 | 17 | 2 (2): `declaration_rows` (`rows` given as `4`); `join_on_as_mapping` | 2/2 | 272k | done |
+| `task_44` | 2 | failed (extra column) | `treatmentid, treatmentname` | `order_by: treatmentid asc`; `rows: at_least_one`, no `one_per` | 21 | 28 | 27 | 3 (2): `subquery_as_semi_join`; `contract_mismatch` at export; unadvised: an invalid transform | 2/3 | 601k | done |
+| `task_44` | 3 | **passed** | `treatmentname` | `order_by: treatmentid asc`; `one_per: treatmentid` | 37 | 41 | 40 | 10 (0): nine transforms naming a column the workspace does not hold, one `NOT_FOUND` at export | 5/10 | 1.03M | done |
+| `task_329` | 1 | failed (extra column) | `intake_date, daily_max` | `one_per: intake_date`; no `order_by` | 15 | 19 | 18 | 3 (2): `like_as_function`; `expression_as_derive`; unadvised: an invalid transform | 3/3 | 305k | done |
+| `task_329` | 2 | failed (extra column) | `date (date), max_volume_ml (float)` | neither; `rows: at_least_one` | 13 | 18 | 17 | 2 (0): an invalid transform, a missing name | 2/2 | 296k | done |
+| `task_329` | 3 | failed (extra column) | `date (date), max_bolus_amt_ml (float)` | `order_by: date asc`; `rows: at_least_one`, no `one_per` | 10 | 13 | 12 | 1 (1): `like_as_function` | 1/1 | 162k | done |
+
+**The prediction did not hold.** 0012 expected early declarations to stop
+carrying the sort key. Across six runs the key was moved out of `columns` once.
+
+The grammar is being used: five of the six runs named at least one organizing
+key, and before 0012 there was nowhere to name one. But naming a key in
+`order_by` or `one_per` did not, for this model, mean taking it out of the
+payload. In four of those five runs the same key sits in both lists at once —
+`task_44` runs 1 and 2 declare `order_by: treatmentid` and still carry
+`treatmentid`; `task_329` run 1 declares `one_per: intake_date` and still
+carries `intake_date`. The two lists are read as additive rather than as a
+relocation. `task_329` run 2 used neither field and reproduced the baseline
+shape exactly.
+
+The verdicts moved from 2/3 to 1/3 on `task_44` and stayed at 0/3 on
+`task_329`. All five failures are the same official error as every round since
+2026-08-31: `column_count_mismatch`, "Expected 1 columns; received 2". Not one
+of the extra columns is an invented business column; every one is the sort key
+or the grain key, which is the observation 0012 was built on. That observation
+still stands; the remedy did not take.
+
+What did work is the mechanism. `task_44` run 3 declared `treatmentname` alone
+with `order_by: treatmentid` and `one_per: treatmentid`, and the export carried
+one column in treatment-id order, which the official evaluator accepted on both
+values and order — so the backend's final sort-then-project step delivers what
+0012 says it delivers, once the model declares that way. The new
+`declaration_rows` detector also fired and was repaired: `task_44` run 1 gave
+`rows` as `4`, was refused with advice naming the three accepted forms, and got
+it right on the next call. The one run that produced the predicted shape is
+also the longest and most confused of the six — 41 steps, 1.03M prompt tokens,
+ten refusals of which nine were transforms hunting for a column name that does
+not exist — and it declared at step 37, after that exploration rather than from
+reading the framing. So the single instance is not evidence that the wording
+taught the behaviour.
+
+The cost side moved on `task_44` and not on `task_329`: refusals 7 to 15,
+prompt tokens 483k to 635k, mean steps 25.7 to 29.0, elapsed 93 s to 120 s,
+almost all of it from run 3 alone. The champion column-signature scorer barely
+separates the runs (0.95, 0.95, 1.0 on `task_44`; 0.95 three times on
+`task_329`), as it did before.
+
+Six runs is a small sample. Three runs per task means the 2/3 to 1/3 move on
+`task_44` is one run and carries no weight by itself; that is why the
+declaration shape was recorded separately from the verdict. On shape the count
+is one of six against a prediction that expected most, and that is the number
+this round reports.
+
+What the failure now is, stated for the next round rather than acted on here:
+it is no longer that the model has nowhere to put the sort key. It has
+somewhere, it puts it there, and it keeps a copy in the payload. Whether that
+wants different wording, or a fact reported back at declaration time — the
+backend already answers a declaration with what it holds under each name,
+including whether a column is unique per row — is a judgment for the next
+outcome, not something this measurement settles.
+
 ## 2026-09-02 · after the recovery module (teach on refusal, MADR 0010)
 
 The backend now answers every refusal with `advice` (what it accepts instead,
