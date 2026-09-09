@@ -216,7 +216,12 @@ cardinality (`one`, `at_least_one`, `{"one_per": [keys]}`, required), the
 ordering and a description as an operation and an audit event. It answers with
 what the workspace holds under each declared name — which dataset carries it,
 its type and role, and whether it is unique per row, which is what tells a
-locator apart from a value — without ever seeing the question. `export_result`
+locator apart from a value — without ever seeing the question. A name given both
+as a carried column and in `order_by` or the `one_per` keys is answered with what
+that means: the file will carry it, and naming it only as organizing would order
+or set the grain of the answer without writing it. Both readings are legal —
+some answers do want the sort key in the file — so the backend states the
+consequence and leaves the choice alone. `export_result`
 then checks the dataset against the current contract — names, order, declared
 types by family, row cardinality, the organizing columns — before anything is
 read or written, and writes the carried columns in the declared order, sorted

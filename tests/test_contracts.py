@@ -309,3 +309,50 @@ def test_a_name_no_dataset_carries_yet_is_named_as_such(backend, orders):
     (fact,) = declared["names"]
     assert fact == {"name": "max_revenue", "carried": True,
                     "note": "no dataset in this workspace has a column named 'max_revenue' yet."}
+
+
+def test_a_name_in_both_lists_is_answered_with_what_that_means(backend, orders, tmp_path: Path):
+    """Naming one column as carried and as organizing is legal, and some answers do want
+    the sort key in the file (MADR 0012). The backend says what the declaration means
+    here and leaves the reading to the agent; it does not refuse or change anything."""
+    declared = backend.declare_output(["region", "revenue"], rows={"one_per": ["region"]}, order_by=["-revenue"])
+    facts = {f["name"]: f for f in declared["names"]}
+    assert facts["region"]["organizing"] == ["one_per"]
+    assert "named both as a carried column and in the one_per keys; the file will carry it" in facts["region"]["note"]
+    assert "Named only in the one_per keys it would set the grain of the answer" in facts["region"]["note"]
+    assert facts["revenue"]["organizing"] == ["order_by"]
+    assert "Named only in order_by it would order the answer" in facts["revenue"]["note"]
+    # the declaration is held exactly as written: both columns carried, in the declared order
+    assert [c["name"] for c in declared["contract"]["columns"]] == ["region", "revenue"]
+    assert "organizing_columns" not in declared["contract"]
+    backend.materialize_result("orders", {"group_by": ["region"], "metric": "revenue"}, "by_region")
+    target = tmp_path / "p.csv"
+    assert backend.export_result("by_region", str(target))["status"] == "success"
+    assert _read(target)[0] == ["region", "revenue"]
+
+
+def test_an_organizing_name_the_answer_does_not_carry_says_which_field_named_it(backend, orders):
+    declared = backend.declare_output(["revenue"], rows={"one_per": ["region"]}, order_by=["region"])
+    facts = {f["name"]: f for f in declared["names"]}
+    assert facts["region"]["carried"] is False
+    assert facts["region"]["organizing"] == ["order_by", "one_per"]
+    assert "note" not in facts["region"]  # it is not carried: there is no consequence to point out
+    assert "organizing" not in facts["revenue"]
+
+
+def test_a_carried_name_in_both_organizing_fields_names_both(backend, orders):
+    declared = backend.declare_output(["region", "revenue"], rows={"one_per": ["region"]}, order_by=["region"])
+    fact = {f["name"]: f for f in declared["names"]}["region"]
+    assert fact["organizing"] == ["order_by", "one_per"]
+    assert "in order_by and the one_per keys" in fact["note"]
+    assert "it would order and set the grain of the answer" in fact["note"]
+
+
+def test_the_locator_fact_and_the_both_lists_fact_are_both_said(backend, orders):
+    """Two different facts about one name: what it is in the workspace, and what
+    declaring it twice means. Neither tells the agent what the answer should be."""
+    declared = backend.declare_output(["order_id"], rows="at_least_one", order_by=["order_id"])
+    (fact,) = declared["names"]
+    assert fact["organizing"] == ["order_by"]
+    assert "is what a locator looks like" in fact["note"]
+    assert "named both as a carried column and in order_by" in fact["note"]
