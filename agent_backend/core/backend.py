@@ -1528,6 +1528,8 @@ class Backend:
         datasets = self.store.list_datasets()
         facts: list[dict[str, Any]] = []
         carried = {normalize(c.name) for c in spec.columns}
+        ordered = {normalize(o.name) for o in spec.order_by}
+        grain = {normalize(k) for k in spec.row_keys}
         for name in [c.name for c in spec.columns] + organizing_keys(spec):
             matches: list[dict[str, Any]] = []
             for dataset in datasets:
@@ -1546,16 +1548,40 @@ class Backend:
                     match["unique_per_row"] = unique
                 matches.append(match)
             fact: dict[str, Any] = {"name": name, "carried": normalize(name) in carried}
+            organizing = [field for field, named in (("order_by", ordered), ("one_per", grain))
+                          if normalize(name) in named]
+            if organizing:
+                fact["organizing"] = organizing
+            notes: list[str] = []
             if matches:
                 fact["matches"] = matches
                 locators = [m["dataset"] for m in matches if m.get("unique_per_row")]
                 if locators and fact["carried"]:
-                    fact["note"] = (f"{name!r} is unique per row in {', '.join(locators)}, which is what a locator "
-                                    "looks like rather than a value; the answer will carry it.")
+                    notes.append(f"{name!r} is unique per row in {', '.join(locators)}, which is what a locator "
+                                 "looks like rather than a value; the answer will carry it.")
             else:
-                fact["note"] = f"no dataset in this workspace has a column named {name!r} yet."
+                notes.append(f"no dataset in this workspace has a column named {name!r} yet.")
+            if organizing and fact["carried"]:
+                notes.append(self._both_lists_sentence(name, organizing))
+            if notes:
+                fact["note"] = " ".join(notes)
             facts.append(fact)
         return facts
+
+    @staticmethod
+    def _both_lists_sentence(name: str, organizing: list[str]) -> str:
+        """What it means to name one column both as carried and as organizing.
+
+        Both are legal and the contract holds the declaration as written: a
+        column that is ordered by and carried is simply carried (MADR 0012).
+        Some answers do want the sort key in the file. The backend never sees
+        the question, so it says what the declaration means here and leaves the
+        reading to the agent (MADR 0010).
+        """
+        where = " and ".join("order_by" if field == "order_by" else "the one_per keys" for field in organizing)
+        does = " and ".join("order" if field == "order_by" else "set the grain of" for field in organizing)
+        return (f"{name!r} is named both as a carried column and in {where}; the file will carry it. "
+                f"Named only in {where} it would {does} the answer without being written to the file.")
 
     def _column_is_unique(self, dataset: Dataset, column: str) -> bool | None:
         """Whether the column has a different value in every row, when that is cheap to know."""
