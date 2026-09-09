@@ -14,7 +14,7 @@ agent to everything it later reproduces from memory. An export is checked
 against the output contract declared at the start; a replayed request against
 its recorded fingerprint. The failure this exists to catch is *knew but did
 not do*; *did not know* belongs to the model and the agent framework
-(`.seal/madr/0004`, `0007`, `0008`).
+(`.inkan/decisions/0004`, `0007`, `0008`).
 
 Research hypothesis under test: a general-purpose agent interacts with a
 structured data system more reliably through a small semantic intent interface
@@ -545,7 +545,7 @@ and pending operations.
 
 The backend is being validated on the [DataSpace](https://github.com/BugMaker-Boyan/DataSpace)
 benchmark (410 heterogeneous task workspaces) against the KDD Cup 2026 champion
-pipeline as baseline; see `.seal/madr/0003-*` for the sequence. Unicode
+pipeline as baseline; see `.inkan/decisions/0003-*` for the sequence. Unicode
 identifiers, `import_workspace` and `attach_metadata` are done; a real
 `task_10` workspace (8 csv, 8 sqlite tables, 1 wrapper json, knowledge.md)
 imports in ~2 s and the task's query runs through the semantic steps.

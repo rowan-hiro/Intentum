@@ -35,3 +35,5 @@ A contract names two kinds of column. columns is what the answer carries, in ord
 * A one_per key no longer has to be a declared column; that refusal is gone
 * rows is required, which changes declare_output for every caller; the refusal carries advice naming the three forms (MADR 0010)
 * The effect on reading is a prediction, not a measurement: early declarations should stop carrying the sort key. It is testable on task_44 and task_329 against the recorded fresh and informed arms, and is the next outcome
+
+## Decision History

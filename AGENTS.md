@@ -55,92 +55,28 @@ perception extracts enters the backend only through `import_dataset` or
 | `uv.lock` | Locked dependency resolution for uv. |
 | `README.md` | Detailed architecture, transform language, setup, MCP usage, examples, and next steps. |
 | `HANDOFF.md` | What a new agent reads, and in what order: documents, the last outcomes, the MADRs. |
-| `.seal/` | DriftSeal outcome history and MADR records; follow the protocols below. |
+| `.inkan/` | Inkan sealed outcomes and decision records; follow the protocol below. |
+| `.seal/` | Frozen DriftSeal archive: `HISTORY.md` renders the 21 outcomes closed before the move to Inkan. Read-only history. |
 
 Runtime data belongs to the configured backend workspace: `metadata.sqlite`
 stores metadata, `analytics.duckdb` stores analytical tables, and `files/`
 holds imported sources. These are runtime artifacts, not source directories.
 
-<!-- driftseal -->
-<!-- driftseal-version: 2.1 -->
-<!-- driftseal-log-language: en -->
+<!-- inkan -->
+<!-- inkan-protocol: 7 -->
+<!-- inkan-lang: en -->
 
-## Agent protocol: outcome write-ahead log
+## Agent protocol: sealed outcomes
 
-This repository uses DriftSeal (`driftseal`) to prevent agent drift. This
-`AGENTS.md` protocol is the source of truth; use the CLI by default, with MCP
-and lifecycle hooks as optional adapters.
+This repository uses Inkan (`inkan`, alias `ink`). Inkan keeps a trustworthy record of what the work was meant to deliver and what was declared at close. It does not inspect commits, run tests, or judge the result; the repository's own checks do that. Write outcome prose in en. This block states the policy; `inkan help` gives the command syntax.
 
-**Log language:** `en`. Write outcome-log prose (outcome, extension, note,
-verify-result, and reclaim/unreclaim reason) in that language. Keep command
-names, flags, status tokens, ids, and lane names in English.
+1. **Seal before durable changes.** Before changing code, configuration, documentation, or dependencies, run `inkan status`; if it shows an open outcome that is not your work, follow rule 4 first. Then run `inkan begin` with the outcome, one observable acceptance criterion at a time, and every decision record the work is bound by. File the outcome by lane only when the repository already files outcomes by lane.
+2. **The seal is a fact.** Deliver what it says. If circumstances change, do not reinterpret it: run `inkan amend` with the reason and the added or withdrawn criteria. The original text stays. Never question why the outcome was sealed the way it was at the time.
+3. **Close with dispositions, then commit.** Run `inkan end` with a disposition, met or unmet, for every live criterion and a note on what happened. Commit the outcome record with the work. Include the printed `Inkan-Outcome: <id>` trailer in the final paragraph of the landing commit message, beside any other trailers with no blank line between them. Never report success without closing the outcome.
+4. **Re-anchor after context loss.** Run `inkan status` and `inkan log -n 3`. An open outcome that is the work you were asked to do is your task: continue it, or close it with a note. An open outcome that is not your work belongs to another session: leave it alone. Never close, amend, or abandon an outcome you did not work on, and do not judge why it is still open. Before beginning your own outcome beside it, stop and tell the person it is there, and ask whether your work should run in its own git worktree, because separate worktrees keep each session's edits apart.
+5. **Closed outcomes are final.** Reviewing the log is reading, not re-checking. Never re-verify, re-attest, or re-close a closed outcome. If a past declaration now looks wrong, that is a new outcome with its own seal. When reading history, use commit trailers only as references. Missing trailers or unavailable referenced records are missing information, not failed outcomes or a reason to verify delivery or repair history.
 
-1. **Write the outcome first**, before changing durable project content:
-   `driftseal begin "<coherent delivery outcome>" --accept "<observable result>" --verify "<exact command that proves the cumulative contract>"`.
-   Repeat `--accept` for independently observable criteria and add one
-   `--decision <id>` for each existing MADR this outcome may change.
-   Record outcomes for changes intended to persist in the project: code,
-   configuration, documentation, dependencies, and equivalent files, inside or
-   outside Git. Git operations, checks, temporary auxiliary work, and external
-   state changes are exempt when they do not write durable project content here.
-2. **Extend only the same outcome.** For another step toward the same coherent
-   delivery goal, append `driftseal extend "<addition>"`. It may add
-   `--accept`, `--decision`, and a replacement `--verify`; adding acceptance
-   requires a replacement verifier that proves the complete accumulated contract.
-   Every extension invalidates earlier verification and MADR reconciliation. If
-   the delivery goal changes, close the current outcome honestly and begin a new one.
-   One open outcome belongs to one worktree, or one configured non-Git project
-   root. Every agent changing durable content in the same root re-anchors and
-   continues it; separate worktrees hold separate outcomes.
-   Outcomes belong to one named lane (`driftseal lane`). The default lane is
-   `main`; untagged history lives there. Re-anchoring and `driftseal log`
-   follow the current lane. Close the open outcome before switching lanes.
-   Create a lane only for a long-lived capability you expect to leave and resume.
-3. **Reconcile, verify, then close.** After the final extension, reconcile every
-   linked MADR with `driftseal decision update`. Inspect `driftseal status`,
-   then run `driftseal verify` for an acceptance-bound outcome. A verifier
-   without matching local provenance is untrusted and requires
-   `--allow-tracked-command` after inspection. Finish with
-   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>"`.
-   Completed outcomes require fresh successful verification bound to both the
-   current contract hash and Git-visible workspace. Never report success without
-   closing the outcome.
-4. **Re-anchor after context loss or handoff:** run `driftseal status` and
-   `driftseal log --last 3` before changing durable content. Both follow the
-   current lane. Resume the open outcome when it still matches; otherwise close
-   it and begin a new one. If the requested work belongs to a different existing
-   lane, switch first.
+Decision records live in `.inkan/decisions/`. Their Context and Decision sections record the scenario at the time and are never edited. To challenge one, run `inkan decision update` with the new status and the reason, or add a new record that supersedes it.
 
-**Log access goes only through DriftSeal.** Never read, edit, move, or delete
-`.seal/outcomes/events.jsonl` (or its configured equivalent) directly. Use
-`reclaim`/`unreclaim` for visibility markers and `absorb` after merge
-collisions or when Decision History outcome references are stale. These operations preserve append-only single-lineage history.
-
-Seal root: `.seal/` (override with `$DRIFTSEAL_HOME`); outcome log:
-`.seal/outcomes/events.jsonl`; commit `.seal/` with the code.
-<!-- /driftseal -->
-
-<!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 2.1 -->
-<!-- driftseal-log-language: en -->
-
-## Agent protocol: decision log
-
-Record a MADR only when it preserves context that the outcome log and Git cannot
-recover: rejected or deferred paths worth revisiting, non-obvious rationale for
-long-lived or costly-to-reverse choices, and deprecated or superseded decisions.
-Do not record routine, local, readily reversible choices.
-
-**Log language:** `en`. Write decision-log prose (title, context,
-outcome, drivers, options, consequences, and update notes) in that language.
-Keep MADR section headings, status tokens, and ids in English.
-
-`driftseal decision add "<title>" --context "<problem and constraints>" --outcome "<decision and rationale>" --driver "<decision driver>" --option "<considered option>" --consequence "<result>"`
-
-Use `proposed|accepted|rejected|deferred|deprecated|superseded` statuses. Link
-existing MADRs from `begin` or `extend`, then reconcile each linked record
-with `driftseal decision update` before successful or partial closure. After a
-merge, `driftseal absorb` remaps colliding ids and repairs managed Decision History
-outcome references; it never auto-merges concurrent edits of a shared MADR.
-Commit `.seal/madr/` with the code.
-<!-- /driftseal-decisions -->
+Outcome log: `.inkan/outcomes/<id>.jsonl`, one append-only file per outcome. Commit `.inkan/` with the code. Do not edit these files by hand.
+<!-- /inkan -->
