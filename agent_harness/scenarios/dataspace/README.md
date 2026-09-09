@@ -64,6 +64,120 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-09, fourth round · `anthropic/claude-opus-5` through the same host on the same source (`eed47b7`)
+
+**With the model changed from `qwen/qwen3.5-35b-a3b` to `anthropic/claude-opus-5`
+and nothing else, the official verdicts were 3/3 on `task_44` and 3/3 on
+`task_329`.** The `task_329` passes are the first by the model-driven layer on
+that task. Every `task_329` run declared `day` under `one_per` and `order_by`
+and only the value column under `columns`, the shape MADR 0012 was built for
+and which no qwen round produced; each exported file carried one row and one
+column. Every `task_44` run declared `treatmentname` carried and `treatmentid`
+organizing, materialized both columns and exported one. All six declarations
+succeeded on their first call and stayed at revision 1; no run amended. Steps
+and tool calls fell to about a third of the qwen round on `task_44` and to
+about half on `task_329`; refusals fell from thirteen to two and from four to
+none.
+
+Conditions: source `eed47b7` for everything the container runs (the two commits
+since, `66f9a0f` and `4588056`, changed READMEs only), the same image
+`intentum-opencode:1.18.26` with the ID recorded in the third round
+(`sha256:191e4f56…`), OpenCode 1.18.26, informed declaration framing, three
+sequential runs per task with the runner's defaults and a 900 s timeout. The
+model reached the container through the same Kilo gateway and the same
+OpenAI-compatible provider block; only `DEFAULT_MODEL_NAME` differed, set in the
+environment of the two commands below. No backend, prompt, runner, host or
+evaluator code was changed. The third round, qwen on the same source, is the
+control arm.
+
+| task | model | official | mean steps | mean calls | mean prompt tokens (uncached + cache reads) | refusals | unadvised | mean elapsed |
+|---|---|---|---|---|---|---|---|---|
+| `task_44` | `qwen/qwen3.5-35b-a3b` (third round) | 3/3 | 26.3 | 25.3 | 548k | 13 | 8 | 106.7 s |
+| `task_44` | `anthropic/claude-opus-5` | 3/3 | 10.0 | 10.0 | 127k | 2 | 2 | 57.6 s |
+| `task_329` | `qwen/qwen3.5-35b-a3b` (third round) | 0/3 | 14.3 | 13.7 | 205k | 4 | 4 | 51.1 s |
+| `task_329` | `anthropic/claude-opus-5` | 3/3 | 8.0 | 7.7 | 96k | 0 | 0 | 42.0 s |
+
+Per run. The declared columns are both initial and final.
+
+| task | run | official | declared columns | `rows` | `order_by` | declaration step | steps / calls | refusals (unadvised) | prompt tokens (uncached + cache read) | elapsed |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | passed | `treatmentname` | `at_least_one` | `treatmentid` | 5 | 8 / 8 | 1 (1) | 15,044 + 81,777 | 43.5 s |
+| `task_44` | 2 | passed | `treatmentname` | `at_least_one` | `treatmentid` | 6 | 9 / 10 | 0 (0) | 8,207 + 108,776 | 51.8 s |
+| `task_44` | 3 | passed | `treatmentname` | `at_least_one` | `treatmentid` | 10 | 13 / 12 | 1 (1) | 9,283 + 158,876 | 77.6 s |
+| `task_329` | 1 | passed | `max_volume_ml` | `one_per: [day]` | `day` | 4 | 7 / 7 | 0 (0) | 14,789 + 68,505 | 35.0 s |
+| `task_329` | 2 | passed | `max_enteral_formula_volume_bolus_amt_ml (float)` | `one_per: [day]` | `day` | 5 | 8 / 7 | 0 (0) | 6,634 + 87,173 | 43.7 s |
+| `task_329` | 3 | passed | `max_enteral_formula_volume_ml` | `one_per: [day]` | `day` | 6 | 9 / 9 | 0 (0) | 7,399 + 102,866 | 47.3 s |
+
+What the runs did:
+
+- `task_44`: every run imported the workspace, filtered `cost` to the patient,
+  took the unit stay id from it, sorted `treatment` for that stay by time
+  descending to find the latest timestamp, declared, materialized the rows at
+  that timestamp with `treatmentid` and `treatmentname` selected and sorted by
+  `treatmentid`, and exported. Runs 2 and 3 also read `doc/patient.md` through
+  `attach_metadata`; run 2 additionally looked the treatment ids up from `cost`
+  before switching to the stay id.
+- The two refusals are the same call: runs 1 and 3 passed `doc/patient.md` to
+  `import_dataset` and were refused with `INVALID_SCHEMA`, "Unsupported format
+  'md'; supported formats are csv, parquet, json, sqlite", and no advice. Run 3
+  then called `attach_metadata` on the artifact; run 1 went on without the
+  document. Both recovered without help, but under MADR 0010 the refusal should
+  have named the tool that accepts a markdown document. The qwen rounds never
+  exposed this because qwen never sent a document to `import_dataset`. Stated
+  generally: a refusal for an unsupported format should name the tool that
+  accepts that format when one exists.
+- `task_329`: every run filtered `patient` to the patient, took the unit stay of
+  the current encounter, looked at the `intakeoutput` cell labels for that stay
+  (two runs searched for `bolus`, one grouped all labels), then materialized one
+  aggregate step: filter to the exact label, `max(cellvaluenumeric)` grouped by
+  a day expression written inline in `group_by` (`date_trunc('day', …) as day`
+  or `date(…) as day`), sorted by `day`. The contract left `day` out of the file.
+  Two runs exported with `decimals: 1` and `strip_trailing_zeros`, one with
+  `strip_trailing_zeros` alone; all three files read `60`. The qwen rounds
+  derived the day key in a separate step and carried it into the file.
+
+Token accounting differs from the earlier rounds. The gateway reports uncached
+input separately from cache reads for this model, and the qwen rounds recorded
+no cache reads, so the comparable figure is the sum, given above. The first
+step of the first run on each task was 8,199 input tokens; the first step of
+every later run read 8,197 of them from cache, so the runs of a round are not
+independent in cost, though caching does not change what the model sees. The
+first-step count was identical across the two tasks, which the qwen round's
+were not (5,546 against 5,553); how the gateway counts for this model is not
+established here and the counts are recorded as reported. OpenCode's cost
+estimate is 0 for an unpriced custom provider; at Anthropic's list prices the
+six runs come to about a dollar, and the gateway's own price is not recorded.
+
+All six runs ended normally, passed the backend integrity check and had
+official evaluator return code 0. The optional champion scorer reported 0.0 on
+every run for the reason noted in the third round (a relative prediction path
+resolved under its own working directory); it was not re-run.
+
+Raw runs are retained under
+[`task_44/opencode-informed-claude-opus-5-20260909-1752`](runs/task_44/opencode-informed-claude-opus-5-20260909-1752/)
+and
+[`task_329/opencode-informed-claude-opus-5-20260909-1752`](runs/task_329/opencode-informed-claude-opus-5-20260909-1752/),
+each with `agent_summary.json` and three run directories holding the event
+stream, prompt, prediction and evaluator result. Earlier rounds' directories
+are untouched. Commands used:
+
+```sh
+DEFAULT_MODEL_NAME=anthropic/claude-opus-5 PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --out agent_harness/scenarios/dataspace/runs/task_44/opencode-informed-claude-opus-5-20260909-1752
+DEFAULT_MODEL_NAME=anthropic/claude-opus-5 PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task task_329 --runs 3 --out agent_harness/scenarios/dataspace/runs/task_329/opencode-informed-claude-opus-5-20260909-1752
+```
+
+A model change alters the tokenizer, the tool-calling style and the reading of
+the question at once, so six runs cannot say which part of the backend the
+stronger model used better, and two already studied tasks cannot say how it
+would fare on the rest of the benchmark. What this round establishes is
+narrower: the tool surface, prompt and contract that qwen ran against, with no
+change, let a stronger model pass both tasks in a third of the steps, and the
+organizing-key shape MADR 0012 provides was used as designed on every
+`task_329` run. The qwen result stands as the control arm on the same source.
+The with-and-without-backend comparison on one host, named as next in the
+root README, is still the experiment that would attribute the passes to the
+backend rather than to the model.
+
 ## 2026-09-09, third round · after declaration-response review (`eed47b7`)
 
 **The official verdicts stayed at 3/3 for `task_44` and 0/3 for `task_329`;
