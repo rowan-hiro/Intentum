@@ -47,6 +47,95 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+## 2026-09-09, second round · after `declare_output` answered a name given as both carried and organizing (`2ec5175`)
+
+The round below found the model reading `columns` and `order_by`/`one_per` as
+additive: four of five failing runs named the same key in both lists and
+carried it anyway. `2ec5175` answers that declaration with what it means rather
+than judging it — every declared name now reports which organizing field named
+it, and a name given as both carried and organizing is answered with the
+consequence: the file will carry it, and naming it only as organizing would
+order or set the grain of the answer without writing it. Both readings stay
+legal and nothing is refused or reshaped. `framing.py` and the MCP tool
+descriptions were deliberately left alone, so this round moves one variable
+against the round below.
+
+Same host and framing, the runner's defaults, the image rebuilt from the
+current backend. First-step prompt tokens are 5.2k in both rounds, which
+confirms the prompt did not move. Six container runs, all ended by themselves;
+none reached the 900 s timeout and none failed for an infrastructure reason.
+
+| task | round | official | declarations with the gold shape | declaration steps | mean steps | mean prompt tokens | first-step tokens | refusals | unadvised | repair rate | mean elapsed |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | baseline, before 0012 | 2/3 | 2/3 | 33, 16, 19 | 25.7 | 483k | 5.0k | 7 | 4 | 0.57 | 93 s |
+| `task_44` | after 0012 | 1/3 | 1/3 | 13, 21, 37 | 29.0 | 635k | 5.2k | 15 | 11 | 0.60 | 120 s |
+| `task_44` | after the both-lists fact | 3/3 | 3/3 | 17, 13, 13 | 19.7 | 326k | 5.2k | 7 | 2 | 1.0 | 72 s |
+| `task_329` | baseline, before 0012 | 0/3 | 0/3 | 11, 9, 11 | 14.3 | 218k | 5.0k | 4 | 0 | 1.0 | 56 s |
+| `task_329` | after 0012 | 0/3 | 0/3 | 15, 13, 10 | 16.7 | 254k | 5.2k | 6 | 3 | 1.0 | 58 s |
+| `task_329` | after the both-lists fact | 0/3 | 0/3 | 8, 14, 13 | 15.3 | 230k | 5.2k | 5 | 3 | 0.80 | 51 s |
+
+Per run. `key in both lists` is the condition the new fact fires on, and is
+recorded beside the organizing keys because it decides whether this round's
+change had anything to say at all.
+
+| task | run | official | declared columns | `order_by` / `one_per` | key in both lists | declaration step | steps | tool calls | refusals (advised) | advice taken up | prompt tokens | stop |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `task_44` | 1 | **passed** | `treatmentname` | `order_by: treatmentid asc`; `rows: at_least_one`, no `one_per` | no | 17 | 21 | 20 | 5 (3): `subquery_as_semi_join` ×2; `declaration_rows` (`rows` given as `4`); unadvised: a type mismatch, a missing name | 5/5 | 339k | done |
+| `task_44` | 2 | **passed** | `treatmentname` | `order_by: treatmentid`; `rows: at_least_one`, no `one_per` | no | 13 | 18 | 17 | 1 (1): `declaration_rows` (`rows` given as `4`) | 1/1 | 354k | done |
+| `task_44` | 3 | **passed** | `treatmentname` | `order_by: treatmentid asc`; `rows: at_least_one`, no `one_per` | no | 13 | 20 | 19 | 1 (1): `unknown_key` on a transform | 1/1 | 286k | done |
+| `task_329` | 1 | failed (extra column) | `date, max_value` | neither; `rows: at_least_one` | no | 8 | 12 | 13 | 0 | — | 177k | done |
+| `task_329` | 2 | failed (extra column) | `day, max_amount` | neither; `rows: at_least_one` | no | 14 | 17 | 16 | 4 (1): `expression_as_derive`; unadvised: two invalid transforms, an ambiguous reference | 3/4 | 248k | done |
+| `task_329` | 3 | failed (extra column) | `day, max_volume_ml` | `order_by: day asc`; `rows: at_least_one`, no `one_per` | **yes** (`day`) | 13 | 17 | 16 | 1 (0): an invalid transform | 1/1 | 266k | done |
+
+**Whether the both-lists fact changed the declared shape cannot be told from
+this round.** The fact fires only when a name is given in both lists. Across
+these six runs that happened once — `task_329` run 3, where `day` is declared
+as a carried column and as `order_by` — and the raw event stream confirms the
+sentence reached the model. It did not amend the declaration, and the run
+failed the same way as every other `task_329` run on record. One occurrence is
+not a measurement of anything.
+
+`task_44` went 3/3, and all three runs declared `treatmentname` alone with
+`order_by: treatmentid` — the shape 0012 predicted, on the first declaration
+each time. **The new fact is not the cause.** No `task_44` declaration named a
+key twice, so the fact had nothing to say in any of those runs; the
+declarations arrived gold-shaped before anything new could be read. The other
+half of `2ec5175`, the `organizing` field on every name, does fire on these
+runs, but it arrives in the answer to a declaration already made, and no run
+amended one. So the movement on `task_44` is run-to-run variation under an
+unchanged prompt, not this change taking effect.
+
+Read across the rounds, that is what the numbers look like. `task_44`
+gold-shape declarations went 2/3 before 0012, 1/3 after it, 3/3 now, with the
+framing text constant since `79f311f`. Three-run samples spread that way on
+their own. The one honest summary is that `task_44` has produced six passes in
+nine recorded runs and that the per-round order carries no signal.
+
+`task_329` is the steady half and the more interesting one: 0/9 across the
+three rounds, and the day key sits in `columns` in every one of those nine
+declarations. This round it moved backwards on shape. Two of the three runs
+named no organizing field at all — `rows: at_least_one` and both columns
+carried, which is the pre-0012 shape — where the previous round had used
+`one_per` once and `order_by` once. `one_per` was not used at all. Whatever is
+keeping the grain key in the payload on this task, three rounds of backend
+work have not touched it, and the field built for it is going unused.
+
+Cost moved on `task_44` and not on `task_329`. `task_44` is cheaper and
+shorter than the previous round on every count — 635k to 326k prompt tokens,
+29.0 to 19.7 steps, 120 s to 72 s, refusals 15 to 7 — and essentially all of
+that is the absence of the previous round's 41-step run rather than anything
+systematic. The champion column-signature scorer gives 1.0 on all three
+`task_44` runs against 0.95, 0.95, 1.0 before, and 0.95 three times on
+`task_329` as in every round. `task_329` is flat: 254k to 230k, 16.7 to 15.3
+steps, 58 s to 51 s.
+
+Six runs, three per task. That is too few to separate a change from noise on
+the verdict, which is why the declaration shape is tabled apart from it — and
+on shape this round the change had one chance to speak and was not taken up.
+The next round wanting evidence about the both-lists fact has to reach runs
+where a key is named twice, and on the current numbers that condition appears
+about once in six.
+
 ## 2026-09-09 · after the contract separated payload from organizing keys (MADR 0012)
 
 `declare_output` now names two kinds of column (MADR 0012, landed in `79f311f`).
