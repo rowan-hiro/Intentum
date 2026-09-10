@@ -28,6 +28,7 @@ from typing import Any, Callable
 from ..contracts import repair_transform, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
 from ..ir import BinaryExpr, CastExpr, ColumnExpr, FilterStep, InExpr, LiteralExpr, TransformIR
+from ..ir.expression_parser import parse_expression
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract
 from ..naming import normalize, slugify
 
@@ -725,7 +726,7 @@ def _declaration_order(err: BackendError, tool: str, arguments: dict[str, Any]) 
 # ----------------------------------------------------------------------------
 
 _INFIX_FUNCTION_RE = re.compile(
-    r"""(?P<col>"[^"]+"|[\w.]+)\s+(?P<neg>not\s+)?(?P<fn>contains|starts_with|ends_with)\s+(?P<arg>'[^']*'|"[^"]*"|[\w.]+)""",
+    r"""(?P<col>\w+\([^()]*\)|"[^"]+"|[\w.]+)\s+(?P<neg>not\s+)?(?P<fn>contains|starts_with|ends_with)\s+(?P<arg>'[^']*'|"[^"]*"|[\w.]+)""",
     re.IGNORECASE,
 )
 
@@ -1166,6 +1167,36 @@ def _derive_without_expression(err: BackendError, tool: str, arguments: dict[str
     return Advice("derive_without_expression", text)
 
 
+def _stray_characters(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """Characters after a complete expression that belong to no token: drop them when the rest parses."""
+    if err.code != ErrorCode.INVALID_TRANSFORM or "position" not in err.details or "expression" not in err.details:
+        return None
+    if not str(err.message).startswith("Unexpected character"):
+        return None
+    text = str(err.details["expression"])
+    position = int(err.details["position"])
+    head, tail = text[:position], text[position:]
+    if not head.strip() or not tail or re.search(r"[\x21-\x7e]", tail):
+        return None  # the tail holds printable ASCII that could be expression text; not ours to cut
+    try:
+        parse_expression(head)
+    except BackendError:
+        return None
+    explanation = (f"The expression is complete at position {position}; what follows, {tail!r}, is not part of any "
+                   "token and looks like stray output. The same expression without it:")
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        for path, value in _expression_texts(step):
+            if value == text:
+                _set_path(step, path, head.rstrip())
+                changed = True
+    if not changed:
+        return Advice("stray_characters", explanation.rstrip(":") + ".")
+    return Advice("stray_characters", explanation,
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+
+
 def _name_taken(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """A materialization name that another request already produced: what is there, and the two ways on."""
     if err.code != ErrorCode.CONFLICT or err.field != "name" or not isinstance(err.details.get("existing"), dict):
@@ -1241,6 +1272,7 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_file_exists, ("export_result",), False),
     (_name_taken, _TRANSFORM_TOOLS, False),
     (_derive_without_expression, _TRANSFORM_TOOLS, False),
+    (_stray_characters, _TRANSFORM_TOOLS, False),
     (_field_not_in_scope, _TRANSFORM_TOOLS, True),
 ]
 

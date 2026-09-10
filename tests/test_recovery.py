@@ -619,3 +619,24 @@ def test_a_derive_with_a_name_and_no_expression_is_pointed_at_the_aggregate_step
     assert "aggregate step" in told["explanation"] and "semi_join" in told["explanation"]
     assert "reads like such a value" in told["explanation"]
     assert kinds(response) == ["derive_without_expression"]
+
+
+def test_an_infix_function_with_a_call_on_the_left_becomes_a_call(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "lower(customer) contains 'corp'"})
+    assert response["code"] == "INVALID_TRANSFORM"
+    found = advice(response, "function_as_infix")
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == "contains(lower(customer), 'corp')"
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["row_count"] >= 1
+
+
+def test_stray_characters_after_a_complete_expression_are_dropped(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "region = 'West' and amount > 100\u0ac0\u0ab2"})
+    assert response["code"] == "INVALID_TRANSFORM" and response["message"].startswith("Unexpected character")
+    found = advice(response, "stray_characters")
+    assert "not part of any token" in found["explanation"]
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == "region = 'West' and amount > 100"
+    run(backend, found["rewrite"])
+    # a tail that could still be expression text is not cut
+    unfinished = backend.transform_dataset("orders", {"filter": "region = 'West' and amount > 100 \u0ac0 'x'"})
+    assert "stray_characters" not in kinds(unfinished)
