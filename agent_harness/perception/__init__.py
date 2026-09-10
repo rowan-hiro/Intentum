@@ -10,5 +10,7 @@ to trust), so the backend records it as a fresh agent output with provenance.
 
 The opt-in video reader decodes timestamped frames with FFmpeg; the host model
 interprets their images and saves its observations with explicit frame references.
-It does not transcribe audio or load a separate perception model.
+Optional audio tools run a separately configured offline Whisper model in a
+bounded subprocess. Speech segments and agent observations retain source,
+model and timestamp provenance; the backend never loads the recognizer.
 """

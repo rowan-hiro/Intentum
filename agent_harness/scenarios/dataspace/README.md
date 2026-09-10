@@ -68,6 +68,79 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-10 · offline audio integration on the task_312 video
+
+The optional `--asr-model` path now exposes `transcribe_audio` beside the
+frame tools. This check transcribed the video and imported the segments;
+it did **not** solve or rescore the task. The prior frame-only result below
+is unchanged.
+
+The user supplied existing weights under
+`/Users/ruanboyu/OrbStack/dev/home/ruanboyu/dev/kddcup2026_champion/asr_models`.
+Both `medium` and `tiny` were copied to `.cache/asr/champion/`, with all four
+files per model SHA256-verified and the source directories untouched. The
+audio check used the copied `medium`; `tiny` was copied but not measured.
+An earlier independent download had already finished when the user supplied
+this path; that downloaded copy was not used for the measurement. Local
+model manifests retain the actual source path and file hashes, without
+asserting an upstream revision that the supplied files did not identify.
+
+| Measurement | Result |
+|---|---|
+| ASR | faster-whisper 1.2.1, CTranslate2 4.8.2, ONNX Runtime 1.29.0 |
+| Execution | CPU/int8, four threads, beam 5, temperature 0, VAD and word timestamps |
+| Model file SHA256 | `9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae` |
+| Processed interval | 0–77.466667 s, audio track 0 |
+| Detected language | `zh`; language probability about 0.99975, not transcription accuracy |
+| Transcript | 12 segments, spanning 0–76.35 s |
+| ASR tool time / complete host time | 23.75 s / 40.2 s |
+| Host | OpenCode 1.18.26 with configured Qwen; 4 model steps, 3 tool calls |
+| Backend import | `briefing_transcript`, 12 rows and 14 provenance/text columns |
+
+The host prompt asked it to transcribe all speech, import the returned
+segment JSON, and report language, segment count and a short timed excerpt.
+It called `inspect_video`, `transcribe_audio`, then `import_dataset`.
+The model and gateway did not receive audio for recognition: the local
+worker returned text through MCP. No task question, schema, initial prompt
+or gold answer was passed to ASR. Input source SHA256 remained
+`743a6bcb03361ea0720d9c7297fb52e032a2934f7e4761b181b719bb6b01dbcc`.
+
+This exposes recognizer limitations as well as the transport working. Later
+segments include `自斷`/`自断` where the visible UI refers to fields, and
+`對列` where the context concerns a queue. Text was retained as recognized,
+including mixed traditional/simplified characters. The narrator describes
+navigation and configuration steps; this transcript alone does not supply
+the numeric admission threshold shown on screen. There is no measured word
+error rate or claim that speech can replace visual evidence. Segment ids can
+now be cited in `record_observation`, with an explicit reason for revisions,
+without modifying raw ASR.
+
+Validation additionally ran with container networking disabled: a real
+28–40 s clip produced two segments at 28.05–33.21 and 33.63–38.37 s, confirming
+nonzero clip offsets reach the structured MCP result. A synthetic silent
+clip produced no segments and no invented import table. Real FFmpeg tests
+cover selection of the second of two audio tracks, a delayed track, and a
+nonzero video timestamp origin. All 12 perception tests passed in the
+container; the repository suite passed 259 tests, skipping only the two
+FFmpeg tests on the machine. Final checks made MCP responses expose typed
+structured content as well as their JSON text.
+
+Source: `0cc41c3` plus outcome `2026-09-10-0735-sd88`. The first host check
+used image `intentum-opencode:1.18.26-audio-sd88`, id
+`sha256:a5df6fb729dcb7bb64f0fd551881f95afbfc48d072a733d457c44c3655cd198b`.
+Its raw ASR record includes the recognition options, runtime versions,
+model manifest and reader/worker source hashes. Local artifacts:
+
+- `runs/task_312/audio-host-20260910-sd88/host_result.json` and
+  `run/events.jsonl`, with transcript records and imported workspace under `run/`.
+- `runs/task_312/audio-offline-20260910-sd88/checks.json`, raw clip/silence
+  results and their saved WAV evidence.
+
+See `../../perception/README.md` for preparation, tools, limits and the
+`--video --asr-model .cache/asr/champion/medium` invocation. Runtime model
+downloads are disabled, weights stay outside the image and wheel, and the
+backend has no ASR dependency or recognition logic.
+
 ## 2026-09-10 · first video-frame run, task_312
 
 One run passed the official evaluator: **242 rows, 3 columns**, and 1.0 from

@@ -369,7 +369,7 @@ agent_harness/              the agent side, kept apart from the backend (MADR 00
 ├── loop.py                 in-process reference loop over an MCP server (the control arm)
 ├── hosts/                  external agent hosts (MADR 0011): opencode.py runs OpenCode in the container built
 │                           from opencode.Dockerfile, with backend tools and opt-in video perception
-├── perception/             MCP video inspection, timestamped frames and revisable agent observations
+├── perception/             MCP frames, optional offline audio transcription and revisable observations
 └── scenarios/dataspace/    framing, scripted agents, vendored evaluator, scoring, runners, measurements
 tests/                      agent-unreliability, end-to-end and boundary tests
 examples/                   orders.csv, demo.py, mcp_config.json
@@ -398,13 +398,15 @@ or `attach_metadata`, as a fresh agent output with provenance (MADR 0009).
 The first perception reader is available with the DataSpace runner's `--video`
 option (OpenCode only). FFmpeg inspects videos and returns actual PNG frames at
 agent-selected timestamps; OpenCode advertises image input to the configured
-model. The reader loads no model and does not transcribe audio. Its tools are
+model. With `--asr-model /path/to/prepared/weights`, a harness subprocess also
+transcribes selected audio tracks using offline Whisper. Its tools are
 restricted to the mounted task context, and frames retain source hashes and
 timestamps under the run directory. `record_observation` saves the agent's
-reading as JSON for `import_dataset`; a correction cites `supersedes` and a
+reading of cited frames or speech segments as JSON for `import_dataset`; a correction cites `supersedes` and a
 reason while retaining the earlier file. Recording does not validate the
 reading or force the agent to use this path. Setup, the synthetic vision probe,
-and the first measurement are in the DataSpace README.
+and measurements are in the DataSpace README. Offline weight preparation and
+the audio evidence format are in `agent_harness/perception/README.md`.
 
 ## 3. Running the prototype
 
@@ -635,7 +637,9 @@ imports in ~2 s and the task's query runs through the semantic steps.
    (`agent_harness/perception/`, MADR 0009). The first video-frame reader
    passed one `task_312` run on 2026-09-10, but the agent skipped saving its
    observation; the next gap is getting cited observations into the backend
-   before dependent operations. Audio transcription remains unimplemented. The
+   before dependent operations. Offline audio transcription is now available
+   in the harness; its first audio-only check imported 12 speech segments
+   from the same video. The
    2026-09-02 runs showed that refusals never named the accepted shape and that
    silent failures (empty previews, an unexported correct preview) went
    unremarked; `core/recovery` now answers both with structured advice and

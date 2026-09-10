@@ -42,7 +42,7 @@ from agent_backend.mcp.server import INSTRUCTIONS, create_server
 from agent_harness.config import model_config
 from agent_harness.hosts.opencode import DEFAULT_IMAGE, DOCKER_DATA_DIR, DOCKER_RUN_DIR, container_path, run_opencode
 from agent_harness.loop import run_tool_loop
-from agent_harness.perception.server import INSTRUCTIONS as VIDEO_INSTRUCTIONS
+from agent_harness.perception.server import AUDIO_INSTRUCTIONS, INSTRUCTIONS as VIDEO_INSTRUCTIONS
 from agent_harness.scenarios.dataspace import RUNS, benchmark_root, champion_root, task_context, task_question
 from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, FRAMINGS, NUDGE_PROMPT
 from agent_harness.scenarios.dataspace.scoring import official_verdict, run_champion_scorer, run_official_evaluator
@@ -73,7 +73,9 @@ def convergence(tool_events: list[dict[str, Any]], window: int = 2) -> dict[str,
 async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, config: dict[str, str], *,
                    max_turns: int, max_tool_chars: int, max_tokens: int, declaration: str = "fresh",
                    host: str = "opencode", host_timeout: int = 900, image: str = DEFAULT_IMAGE,
-                   video: bool = False) -> dict[str, Any]:
+                   video: bool = False, asr_model: Path | None = None) -> dict[str, Any]:
+    if asr_model is not None and not video:
+        raise ValueError("Audio transcription requires --video.")
     if video and host != "opencode":
         raise ValueError("Video attachments currently require --host opencode.")
     context_dir = task_context(benchmark, task)
@@ -94,8 +96,10 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
             prediction_path=container_path(prediction_path, {run_dir: DOCKER_RUN_DIR}))
         if video:
             system_prompt += "\n" + VIDEO_INSTRUCTIONS
+        if asr_model is not None:
+            system_prompt += "\n" + AUDIO_INSTRUCTIONS
         ran = run_opencode(run_dir, prompt=question, system_prompt=system_prompt, settings=config, mounts=mounts,
-                           image=image, timeout_s=host_timeout, title=task, video_context=video_context)
+                           image=image, timeout_s=host_timeout, title=task, video_context=video_context, asr_model=asr_model)
         tool_events, turns, usage, cost = ran.tool_events, ran.turns, ran.usage, ran.cost_usd
         stop_reason, elapsed, nudges = ran.stop_reason, ran.elapsed_s, 0
         host_version = ran.image
@@ -124,7 +128,7 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
     declared = [e["turn"] for e in tool_events if e["tool"] == "declare_output" and e["status"] == "success"]
     result: dict[str, Any] = {
         "task": task, "model": config["model"], "host": host, "host_version": host_version, "declaration": declaration,
-        "perception": "video_frames" if video else None,
+        "perception": "video_frames_and_audio" if asr_model is not None else "video_frames" if video else None,
         "declaration_turn": declared[0] if declared else None,
         "stop_reason": stop_reason, "turns": turns,
         "tool_calls": len(tool_events), "elapsed_s": elapsed, "usage": usage, "cost_usd": cost,
@@ -204,7 +208,8 @@ def main() -> int:
                         help="who runs the model loop: OpenCode in a container from --image (default), or the in-process reference loop")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image for --host opencode (built from agent_harness/hosts/opencode.Dockerfile)")
     parser.add_argument("--host-timeout", type=int, default=900, help="seconds a container run may take before it is killed")
-    parser.add_argument("--video", action="store_true", help="enable harness video-frame MCP tools and model image inputs (OpenCode only; no audio transcription)")
+    parser.add_argument("--video", action="store_true", help="enable harness video-frame MCP tools and model image inputs (OpenCode only)")
+    parser.add_argument("--asr-model", type=Path, help="also transcribe audio using this prepared offline model directory (requires --video)")
     parser.add_argument("--declaration", choices=sorted(FRAMINGS), default="informed",
                         help="when the framing asks for declare_output: fresh (first call) or informed (once a preview shows the answer)")
     parser.add_argument("--out", default=None, help="output directory (default runs/<task>/agent or agent-informed beside this module)")
@@ -212,6 +217,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.video and args.host != "opencode":
         parser.error("--video requires --host opencode")
+    if args.asr_model is not None and not args.video:
+        parser.error("--asr-model requires --video")
 
     benchmark = benchmark_root(args.benchmark)
     context_dir = task_context(benchmark, args.task)
@@ -241,7 +248,7 @@ def main() -> int:
         result = asyncio.run(run_once(args.task, question, benchmark, run_dir, config, max_turns=args.max_turns,
                                       max_tool_chars=args.max_tool_chars, max_tokens=args.max_tokens,
                                       declaration=args.declaration, host=args.host, host_timeout=args.host_timeout,
-                                      image=args.image, video=args.video))
+                                      image=args.image, video=args.video, asr_model=args.asr_model))
         results.append(result)
         c = result["convergence"]
         print(f"  → passed={result['official']['passed']} turns={result['turns']} tool_calls={result['tool_calls']} "
