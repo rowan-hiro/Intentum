@@ -64,6 +64,154 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-10, fifth round · three models on the source that closed the MADR 0010 gap (`d7a7eb5`)
+
+**Official verdicts: `qwen/qwen3.5-35b-a3b` 2/3 and 0/3, `anthropic/claude-opus-5`
+3/3 and 3/3, `openai/gpt-5.6-luna` 2/3 and 0/3, on `task_44` and `task_329`.**
+For qwen and opus the only change since their rounds on `eed47b7` is the
+backend's refusal advice (the third and fourth rounds below); the prompt,
+framing, tool descriptions and runner are the same. On `task_44` qwen's
+refusals fell from thirteen to five and its unadvised refusals from eight to
+one, with steps down from 26.3 to 19.0 and prompt tokens from 548k to 330k;
+its one lost verdict is a declaration that carried `treatmentid` beside
+`treatmentname`, a reading, not a refusal. On `task_329` qwen's refusals fell
+from four to two and unadvised from four to none, with steps unchanged and the
+verdict unchanged: every run again declared the day key as a carried column.
+Opus is within noise of its fourth round on both tasks; its only refusals are
+the three `import_dataset` calls on `doc/patient.md`, now advised. gpt-5.6-luna,
+a first round, moves like opus and reads like qwen: about eleven and ten
+steps, no language refusals at all, and the same two failure shapes as qwen,
+`treatmentid` carried once on `task_44` and the day key carried on every
+`task_329` run, at a thirtieth of opus's cost per run.
+
+Conditions: source `d7a7eb5`, image `intentum-opencode:1.18.26` rebuilt before
+the round, ID `sha256:ed49111a98657ac43d131acbcedcf00c25d09f6f59cd2bb1c9de794df72d7223`,
+OpenCode 1.18.26, informed declaration framing, three sequential runs per task
+per model with the runner's defaults and a 900 s timeout, all through the same
+configured gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Cost is
+computed from the recorded tokens at the gateway's list prices on this day
+(qwen $0.1625 / $1.30 per million input / output; opus $5 / $25 with cache reads
+at $0.50; gpt-5.6-luna $0.20 / $1.20 with cache reads at $0.02), reasoning
+billed as output; OpenCode's own estimate is 0 for an unpriced provider. The
+third and fourth rounds are re-priced the same way here so the columns compare.
+The whole round comes to about $1.32: qwen $0.29, opus $1.00, gpt-5.6-luna $0.03.
+
+| round | task | official | mean steps | mean calls | mean prompt tokens (incl. cache) | refusals | unadvised | repair rate | mean elapsed | cost per run | cost per pass |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| qwen, third round (`eed47b7`) | `task_44` | 3/3 | 26.3 | 25.3 | 548k | 13 | 8 | 0.46 | 106.7 s | $0.099 | $0.099 |
+| qwen, this round (`d7a7eb5`) | `task_44` | 2/3 | 19.0 | 18.0 | 330k | 5 | 1 | 1.00 | 76.6 s | $0.061 | $0.092 |
+| qwen, third round (`eed47b7`) | `task_329` | 0/3 | 14.3 | 13.7 | 205k | 4 | 4 | 0.75 | 51.1 s | $0.038 | no pass |
+| qwen, this round (`d7a7eb5`) | `task_329` | 0/3 | 14.3 | 13.3 | 204k | 2 | 0 | 0.50 | 49.9 s | $0.037 | no pass |
+| opus, fourth round (`eed47b7`) | `task_44` | 3/3 | 10.0 | 10.0 | 127k | 2 | 2 | 0.00 | 57.6 s | $0.184 | $0.184 |
+| opus, this round (`d7a7eb5`) | `task_44` | 3/3 | 11.0 | 11.0 | 143k | 3 | 0 | 0.00 | 61.8 s | $0.201 | $0.201 |
+| opus, fourth round (`eed47b7`) | `task_329` | 3/3 | 8.0 | 7.7 | 96k | 0 | 0 | n/a | 42.0 s | $0.136 | $0.136 |
+| opus, this round (`d7a7eb5`) | `task_329` | 3/3 | 7.3 | 7.3 | 89k | 0 | 0 | n/a | 39.7 s | $0.132 | $0.132 |
+| gpt-5.6-luna, this round (`d7a7eb5`) | `task_44` | 2/3 | 11.3 | 13.7 | 96k | 0 | 0 | n/a | 45.6 s | $0.006 | $0.008 |
+| gpt-5.6-luna, this round (`d7a7eb5`) | `task_329` | 0/3 | 9.7 | 10.0 | 68k | 1 | 1 | 1.00 | 35.5 s | $0.004 | no pass |
+
+Per run. Every declaration succeeded on its first successful call and stayed
+at revision 1; no run amended.
+
+| model | task | run | official | declared columns | declaration step | steps / calls | refusals (unadvised) | repaired | prompt tokens (uncached + cache read) | output tokens | elapsed | cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| qwen | `task_44` | 1 | passed | `treatmentname` | 13 | 20 / 19 | 2 (1) | 2/2 | 372,870 + 0 | 7,746 | 91.5 s | $0.071 |
+| qwen | `task_44` | 2 | passed | `treatmentname` | 13 | 18 / 17 | 1 (0) | 1/1 | 325,236 + 0 | 5,022 | 73.3 s | $0.059 |
+| qwen | `task_44` | 3 | failed: extra column | `treatmentid, treatmentname` | 16 | 19 / 18 | 2 (0) | 2/2 | 292,425 + 0 | 4,296 | 65.0 s | $0.053 |
+| qwen | `task_329` | 1 | failed: extra column | `day, max_enteral_formula_ml` | 8 | 16 / 15 | 0 (0) | 0/0 | 258,947 + 0 | 3,119 | 51.2 s | $0.046 |
+| qwen | `task_329` | 2 | failed: extra column | `date, daily_maximum_ml` | 7 | 15 / 14 | 2 (0) | 1/2 | 186,106 + 0 | 2,884 | 48.2 s | $0.034 |
+| qwen | `task_329` | 3 | failed: extra column | `date, max_bolus_amt` | 9 | 12 / 11 | 0 (0) | 0/0 | 167,557 + 0 | 2,902 | 50.4 s | $0.031 |
+| opus | `task_44` | 1 | passed | `treatmentname` | 9 | 12 / 11 | 1 (0) | 0/1 | 15,920 + 129,340 | 3,338 | 66.1 s | $0.228 |
+| opus | `task_44` | 2 | passed | `treatmentname` | 7 | 10 / 11 | 1 (0) | 0/1 | 9,535 + 128,838 | 2,961 | 56.6 s | $0.186 |
+| opus | `task_44` | 3 | passed | `treatmentname` | 8 | 11 / 11 | 1 (0) | 0/1 | 8,797 + 135,843 | 3,051 | 62.6 s | $0.188 |
+| opus | `task_329` | 1 | passed | `max_volume_ml` | 4 | 7 / 7 | 0 (0) | 0/0 | 14,783 + 68,673 | 1,903 | 40.0 s | $0.156 |
+| opus | `task_329` | 2 | passed | `max_volume_ml` | 4 | 7 / 7 | 0 (0) | 0/0 | 6,544 + 77,295 | 1,610 | 36.7 s | $0.112 |
+| opus | `task_329` | 3 | passed | `max_volume_ml` | 5 | 8 / 8 | 0 (0) | 0/0 | 7,130 + 91,375 | 1,906 | 42.5 s | $0.129 |
+| gpt-5.6-luna | `task_44` | 1 | failed: extra column | `treatmentid (integer), treatmentname (string)` | 8 | 11 / 12 | 0 (0) | 0/0 | 10,648 + 77,145 | 1,630 | 47.4 s | $0.006 |
+| gpt-5.6-luna | `task_44` | 2 | passed | `treatmentname` | 8 | 12 / 14 | 0 (0) | 0/0 | 7,467 + 93,210 | 1,561 | 45.2 s | $0.005 |
+| gpt-5.6-luna | `task_44` | 3 | passed | `treatmentname` | 8 | 11 / 15 | 0 (0) | 0/0 | 9,184 + 91,240 | 1,653 | 44.2 s | $0.006 |
+| gpt-5.6-luna | `task_329` | 1 | failed: extra column | `date (date), daily_max_amount_ml (float)` | 6 | 10 / 10 | 0 (0) | 0/0 | 8,696 + 57,364 | 1,037 | 35.8 s | $0.004 |
+| gpt-5.6-luna | `task_329` | 2 | failed: extra column | `day (date), daily_max_enteral_formula_volume_bolus_amt_ml (float)` | 6 | 9 / 8 | 0 (0) | 0/0 | 4,510 + 51,948 | 916 | 34.6 s | $0.003 |
+| gpt-5.6-luna | `task_329` | 3 | failed: extra column | `day (date), daily_max_enteral_formula_volume_bolus_amt_ml (float)` | 5 | 10 / 12 | 1 (1) | 1/1 | 6,819 + 73,676 | 984 | 36.1 s | $0.004 |
+
+What the refusals were, and what happened after them:
+
+- qwen `task_44` met five refusals across three runs, all advised but one:
+  `field_not_in_scope` twice and `declaration_rows` twice. The one unadvised
+  refusal is a new shape: `{"derive": "max_time"}`, a derive with a name and
+  no expression, in a list that then filtered `treatmenttime = max_time`. The
+  model wanted a maximum across rows, which is an aggregate, not a derived
+  value; the refusal shows the derive shape but nothing else. Recorded as the
+  residual of this round.
+- qwen `task_329`: two refusals in run 2, `declaration_rows` and then an
+  export onto the existing prediction file, now advised as `file_exists`; the
+  run took the rewrite and exported. All three declarations named the day key
+  in `columns` and `order_by`, received the both-lists sentence, and stayed.
+- opus `task_44`: each run sent `doc/patient.md` to `import_dataset`, was
+  refused with `document_as_dataset` and the `attach_metadata` rewrite, and
+  went on with transforms without calling it: the advice was heard, the
+  document was not needed, and no step was lost to it. The harness's repair
+  rate reads 0.0 here because it counts a later success of the *same* tool;
+  a rewrite that names another tool is not a repair by that measure. That is
+  a limit of the metric, not of the advice.
+- gpt-5.6-luna sent no request the language refused in its six runs. Its one
+  refusal is not a refusal: in `task_329`
+  run 3 a `describe_dataset` returned `INTERNAL`,
+  `InterfaceError('bad parameter or other API misuse')` from SQLite. The
+  model issues several tool calls in one step (up to four; every one of its
+  runs has such steps), the MCP server runs the handlers concurrently, and
+  the backend shares one SQLite connection opened with `check_same_thread`
+  off and no lock around it. This is the first model in the measurements
+  that calls tools in parallel, and it exposes a concurrency defect in the
+  server, not in the language; root README §7 item 7 names multi-writer
+  deployments, and this is the single-process case. The run recovered on
+  its own (the same call succeeded a step later).
+- gpt-5.6-luna on `task_44` filtered `treatment` on a wrong stay id
+  (`2079061`) in every run; the empty preview came back with
+  `value_not_found` naming where that value occurs, and runs 2 and 3 then
+  found the right stay and passed. Its `task_329` declarations carried the
+  day key in every run, exactly as qwen's; the both-lists sentence was
+  returned each time and none amended.
+
+Cost. At the gateway's list prices a pass on `task_44` costs $0.092 with qwen,
+$0.201 with opus and $0.008 with gpt-5.6-luna; on `task_329` only opus passes,
+at $0.132. For qwen, closing the advice gap cut cost per run on `task_44` by
+about 38% (fewer steps, and each step is a prefill); for opus it changed
+nothing measurable, because opus met almost no refusals to begin with. The
+cheap strong-family model is a tenth of qwen's cost per pass on the task it
+can do and takes six tenths of qwen's steps, but it fails the same way qwen does
+on the task it cannot: the organizing key carried into the file. The line
+between the models that pass `task_329` and those that do not runs through
+the reading of the deliverable, not through the transform language or the
+price.
+
+Raw runs are retained under `runs/<task>/opencode-informed-<model>-20260910-1245/`
+for `qwen3.5-35b-a3b`, `claude-opus-5` and `gpt-5.6-luna`, each with
+`agent_summary.json` and three run directories. Earlier rounds' directories
+are untouched. Commands used, after rebuilding the image:
+
+```sh
+docker build -f agent_harness/hosts/opencode.Dockerfile --build-arg OPENCODE_VERSION=1.18.26 -t intentum-opencode:1.18.26 .
+for MODEL in qwen/qwen3.5-35b-a3b anthropic/claude-opus-5 openai/gpt-5.6-luna; do
+  for TASK in task_44 task_329; do
+    DEFAULT_MODEL_NAME=$MODEL PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task $TASK --runs 3 \
+      --out agent_harness/scenarios/dataspace/runs/$TASK/opencode-informed-${MODEL#*/}-20260910-1245
+  done
+done
+```
+
+Three runs per cell are too few to read a 3/3 against a 2/3 as a change, and
+two tasks cannot say how the three models rank elsewhere. What this round
+establishes: with the same prompt, the advice change removed most of qwen's
+refusals and about a third of its steps on the task where it had them, and
+changed nothing for the model that had none; a cheap model of the strong
+family behaves like the strong one on the language and like the weak one on
+the reading; and parallel tool calls, which that model makes, break the
+server's single shared SQLite connection. Two things follow for the backend
+before the next round: serialize tool execution in the MCP server (or give
+each call its own connection), and teach the derive-without-expression
+shape. The reading of the deliverable, the one failure shared by qwen and
+gpt-5.6-luna on `task_329`, remains the harness's question.
+
 ## 2026-09-10 · replay of the 21 unadvised refusals after the MADR 0010 gap was closed
 
 A replay, not a measurement: no model ran. Every tool call of the 2026-09-09
