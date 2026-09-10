@@ -148,6 +148,8 @@ earlier interval is refused, so neither edge is padded. The two edges are
 established differently, and only the policy is symmetric: the endpoint is
 measured from the decoded WAV, while the start comes from the track's declared
 `start_time`. A container that understates that start can still leave
-synthesized silence at the head. The regressions in `tests/test_audio.py` cover
+synthesized silence at the head. A container that overstates it can trim real
+samples at the head, and may refuse a readable interval as entirely before the
+track. The regressions in `tests/test_audio.py` cover
 the clamped start, the requested-window policy, the refusals, and the absence of
 leading padding in real decoded audio.

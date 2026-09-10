@@ -118,7 +118,9 @@ class AudioReader:
             if start_s >= bounds["end_s"]:
                 raise ValueError(f"start_s={start_s:g} is at or beyond audio track {audio_stream}'s {qualifier}"
                                  f"end {bounds['end_s']:g} s on the video clock "
-                                 f"(track start {bounds['start_s']:g} s; {bounds['end_source']}).")
+                                 f"(track start {bounds['start_s']:g} s; {bounds['end_source']}). "
+                                 f"Request an interval inside [{bounds['start_s']:g}, {bounds['end_s']:g}) s; "
+                                 f"its {qualifier}end comes from {bounds['end_source']}.")
             raise ValueError(f"[{start_s:g}, {end_s:g}) s is entirely before audio track {audio_stream} starts at "
                              f"{bounds['start_s']:g} s on the video clock; that interval is unread, not silence. "
                              f"Request an interval inside [{bounds['start_s']:g}, {bounds['end_s']:g}) s; "
@@ -152,7 +154,7 @@ class AudioReader:
             _run(["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-copyts",
                   "-i", info["source_path"], "-map", f"0:a:{request['audio_stream']}", "-vn", "-sn", "-dn",
                   "-af", f"asetpts=PTS-({video_origin})/TB,aresample=16000:async=1:first_pts=0,"
-                  f"atrim=start={start}:end={end},asetpts=PTS-STARTPTS",
+                  f"atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS",
                   "-ac", "1", "-c:a", "pcm_s16le", str(audio)], timeout=30)
             with wave.open(str(audio), "rb") as wav:
                 audio_duration = wav.getnframes() / wav.getframerate()
