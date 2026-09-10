@@ -47,7 +47,13 @@ def _audio_bounds(info: dict, ordinal: int) -> dict:
     # Container duration can include timestamp offsets or other longer tracks.
     # Treat it as an upper estimate, and stop extraction at the actual audio EOF.
     end = (container_start if estimated else track_start) + duration - video_start
-    return {"start_s": track_start - video_start, "end_s": end,
+    start = track_start - video_start
+    if start >= end:
+        # Only a container fallback can land before the track's own start. The
+        # extent is unknown, and no interval could be recommended from it.
+        raise ValueError(f"Audio track {ordinal} starts at {start:g} s on the video clock, at or after the "
+                         f"{end:g} s endpoint estimated from container duration; its extent is unknown.")
+    return {"start_s": float(start), "end_s": float(end),
             "end_source": "format.duration" if estimated else "stream.duration",
             "end_is_estimate": estimated}
 
@@ -101,15 +107,27 @@ class AudioReader:
         if not 0 <= audio_stream < len(info["audio_streams"]):
             raise ValueError(f"audio_stream is a zero-based audio-track ordinal; accepted: 0 to {len(info['audio_streams']) - 1}.")
         bounds = _audio_bounds(info, audio_stream)
-        end_s = min(start_s + duration_s, bounds["end_s"])
-        if start_s >= end_s:
+        # Both endpoints are floats so that request identity, and the cached
+        # transcript it addresses, cannot depend on a caller sending 3 or 3.0.
+        end_s = float(min(start_s + duration_s, bounds["end_s"]))
+        # Begin at the track's own samples. Silence synthesized ahead of its
+        # first packet would otherwise be returned as if it had been heard.
+        clip_start_s = float(max(start_s, bounds["start_s"]))
+        if clip_start_s >= end_s:
             qualifier = "estimated " if bounds["end_is_estimate"] else ""
-            raise ValueError(f"start_s={start_s:g} is at or beyond audio track {audio_stream}'s {qualifier}"
-                             f"end {bounds['end_s']:g} s on the video clock "
-                             f"(track start {bounds['start_s']:g} s; {bounds['end_source']}).")
+            if start_s >= bounds["end_s"]:
+                raise ValueError(f"start_s={start_s:g} is at or beyond audio track {audio_stream}'s {qualifier}"
+                                 f"end {bounds['end_s']:g} s on the video clock "
+                                 f"(track start {bounds['start_s']:g} s; {bounds['end_source']}). "
+                                 f"Request an interval inside [{bounds['start_s']:g}, {bounds['end_s']:g}) s; "
+                                 f"its {qualifier}end comes from {bounds['end_source']}.")
+            raise ValueError(f"[{start_s:g}, {end_s:g}) s is entirely before audio track {audio_stream} starts at "
+                             f"{bounds['start_s']:g} s on the video clock; that interval is unread, not silence. "
+                             f"Request an interval inside [{bounds['start_s']:g}, {bounds['end_s']:g}) s; "
+                             f"its {qualifier}end comes from {bounds['end_source']}.")
         request = {"source_path": info["source_path"], "source_sha256": info["source_sha256"],
-                   "clip_start_s": start_s, "clip_end_s": end_s, "audio_stream": audio_stream,
-                   "video_origin_s": _seconds(info["video_stream"].get("start_time")) or 0,
+                   "clip_start_s": clip_start_s, "clip_end_s": end_s, "audio_stream": audio_stream,
+                   "video_origin_s": float(_seconds(info["video_stream"].get("start_time")) or 0),
                    "audio_bounds": bounds,
                    "model_fingerprint": self.model_fingerprint, "language": language, "options": OPTIONS,
                    "reader_sha256": digest(Path(__file__)), "video_reader_sha256": digest(Path(__file__).with_name("video.py")),
@@ -129,13 +147,14 @@ class AudioReader:
         with tempfile.TemporaryDirectory(dir=self.root) as temporary:
             audio = Path(temporary) / "audio.wav"
             # Preserve the original track timing, move to the video's zero
-            # origin, and pad gaps with silence before cutting the requested
-            # interval. Do not pad beyond EOF: a container duration fallback
-            # can overestimate this track's endpoint. ASR times add clip_start_s.
+            # origin, and pad gaps inside the track with silence before cutting
+            # the requested interval. Neither edge is padded: the cut starts at
+            # the track's own samples, and a container duration fallback can
+            # overestimate its endpoint. ASR times add clip_start_s.
             _run(["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-copyts",
                   "-i", info["source_path"], "-map", f"0:a:{request['audio_stream']}", "-vn", "-sn", "-dn",
                   "-af", f"asetpts=PTS-({video_origin})/TB,aresample=16000:async=1:first_pts=0,"
-                  f"atrim=start={start}:end={end},asetpts=PTS-STARTPTS",
+                  f"atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS",
                   "-ac", "1", "-c:a", "pcm_s16le", str(audio)], timeout=30)
             with wave.open(str(audio), "rb") as wav:
                 audio_duration = wav.getnframes() / wav.getframerate()
@@ -178,7 +197,8 @@ class AudioReader:
                     "raw_transcript_path": str(raw_path), "cache_hit": False,
                     "coverage": "Only the selected track and interval were processed. Segment times are ASR estimates on the video clock. "
                                 "audio_bounds describes that track; end_is_estimate marks a container-duration fallback. "
-                                "clip_end_s is the decoded endpoint; the audio may outlast the video. "
+                                "clip_start_s and clip_end_s are the decoded interval: reading begins at the track's own "
+                                "samples and the audio may outlast the video. "
                                 "No detected speech does not prove silence; unclear words and numbers need review against frames or another reading.",
                     "next_step": ("Import segments_path with backend import_dataset before using the transcript. "
                                   "Cite segment_ids in record_observation for an interpretation or correction; keep raw ASR unchanged."
