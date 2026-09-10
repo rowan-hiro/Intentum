@@ -69,3 +69,18 @@ def test_output_contract_through_mcp(server, tmp_path):
     assert call(server, "export_result", dataset="answer", path=str(tmp_path / "p.csv"))["contract"]["status"] == "satisfied"
     shown = call(server, "get_output_contract")
     assert [e["event"] for e in shown["history"]] == ["output_contract.declared", "output_contract.satisfied"]
+
+
+def test_a_loose_argument_is_refused_by_the_backend_with_advice_not_by_the_sdk(server):
+    """A transform sent as malformed JSON text, or a source sent as a join object, reaches the backend (MADR 0010)."""
+    assert call(server, "import_dataset", path=str(ORDERS_CSV))["status"] == "success"
+    broken = call(server, "transform_dataset", source="orders", transform='[{"filter": "amount > 1"')
+    assert broken["status"] == "error" and broken["code"] == "INVALID_TRANSFORM"
+    assert [a["kind"] for a in broken["advice"]] == ["transform_as_text"]
+    assert "not JSON" in broken["advice"][0]["explanation"]
+    joined = call(server, "transform_dataset", source={"left": "orders", "right": "orders", "on": {"order_id": "order_id"}},
+                  transform={"limit": 1})
+    assert joined["status"] == "error"
+    assert joined["advice"][0]["kind"] == "source_as_dataset" and joined["advice"][0]["rewrite"][0]["arguments"]["source"] == "orders"
+    parsed = call(server, "transform_dataset", source="orders", transform='{"limit": 1}')  # valid JSON text is pre-parsed
+    assert parsed["status"] == "success"

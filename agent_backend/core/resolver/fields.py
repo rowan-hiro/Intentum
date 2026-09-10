@@ -120,10 +120,15 @@ class FieldResolver:
                 field=field,
                 candidates=[self._candidate(h) for h in hits],
             )
+        available = scope.names()
+        shown = ", ".join(available[:12]) + (f" (and {len(available) - 12} more)" if len(available) > 12 else "")
+        near = difflib.get_close_matches(norm, [normalize(f.name) for f in scope.fields], n=3, cutoff=0.6)
         raise NotFoundError(
-            f"No field named {text!r} is available at this step.",
+            f"No field named {text!r} is available at this step; the fields here are {shown}.",
             field=field,
             candidates=[self._candidate(f) for f in scope.fields],
+            details={"reference": text, "available": available,
+                     "close": [f.name for f in scope.fields if normalize(f.name) in near]},
             hint="Use one of the listed field names.",
         )
 

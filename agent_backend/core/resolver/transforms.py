@@ -50,6 +50,8 @@ _AGG_ALIASES = {
     "count_distinct": AggregateFunction.COUNT_DISTINCT, "distinct": AggregateFunction.COUNT_DISTINCT,
     "nunique": AggregateFunction.COUNT_DISTINCT, "distinct_count": AggregateFunction.COUNT_DISTINCT,
 }
+# A text measure that is really an aggregate call: "max(amount) as peak", "sum(x)".
+_MEASURE_EXPRESSION_RE = re.compile(r"\w+\s*\(|\s+as\s+", re.IGNORECASE)
 _STEP_TYPE_ALIASES = {
     "select": "select", "project": "select", "columns": "select", "keep": "select",
     "filter": "filter", "where": "filter",
@@ -358,7 +360,7 @@ class TransformResolver:
                 field, alias = self._field_with_alias(str(item), scope, where, notes)
             fields.append(field)
             aliases.append(str(alias) if alias is not None else None)
-        self._check_unique([f.name for f in fields], where)
+        self._check_unique([f.name for f in fields], where, written=items, notes=notes, available=scope.names())
         selected = scope.with_fields(fields)
         steps: list[Step] = [SelectStep(fields=[f.ref() for f in fields], output_schema=selected.refs())]
         if all(a is None for a in aliases):
@@ -439,7 +441,8 @@ class TransformResolver:
                 hint='Example: "group_by": ["region"], or "measures": [{"function": "sum", "field": "amount", "alias": "revenue"}]',
             )
         measures = [self._measure(m, scope, f"{where}.measures[{i}]", notes) for i, m in enumerate(raw_measures)]
-        self._check_unique([f.name for f in group_fields] + [m.alias for m in measures], where)
+        self._check_unique([f.name for f in group_fields] + [m.alias for m in measures], where,
+                           written=list(group_items) + list(raw_measures), notes=notes, available=scope.names())
 
         out_fields = [ScopeField(name=f.name, logical_type=f.logical_type, column_id=f.column_id, aliases=f.aliases, semantic_role=f.semantic_role) for f in group_fields]
         out_fields += [ScopeField(name=m.alias, logical_type=m.logical_type, semantic_role=SemanticRole.MEASURE) for m in measures]
@@ -457,7 +460,12 @@ class TransformResolver:
         """
         field_where = f"{where}.group_by"
         if isinstance(item, dict):
-            name, expression = self._derive_pair(item, field_where)
+            try:
+                name, expression = self._derive_pair(item, field_where)
+            except InvalidTransformError as err:
+                err.message = (f"Invalid group_by key {item!r}; a key is a field name, an \"expression as name\", "
+                               "or a {\"name\": \"expression\"} object.")
+                raise
         elif isinstance(item, str):
             head, alias = split_alias(item)
             if alias is None:
@@ -482,6 +490,15 @@ class TransformResolver:
             # "revenue" → sum(resolved field) aliased "revenue"; "count" → count(*)
             if loose.strip().lower() in ("count", "rows", "n", "count(*)"):
                 return Measure(function=AggregateFunction.COUNT, field=None, alias="count", logical_type=LogicalType.INTEGER)
+            if _MEASURE_EXPRESSION_RE.search(loose):
+                # An aggregate call written as text where a field name is expected: not a name to disambiguate.
+                raise InvalidTransformError(
+                    f"Measure {loose!r} is an expression; a text measure names a field to sum, and an aggregate call "
+                    'is an object such as {"function": "max", "field": "amount", "alias": "max_amount"}.',
+                    field=where,
+                    details={"received": loose, "allowed_keys": ["function", "field", "alias"],
+                             "allowed_functions": [str(f) for f in AggregateFunction]},
+                )
             field = self.fields.resolve_measure_field(loose, scope, field=where, notes=notes)
             alias = slugify(loose)
             return Measure(function=AggregateFunction.SUM, field=field.ref(), alias=alias,
@@ -508,7 +525,15 @@ class TransformResolver:
         alias = pick(loose, "alias", "as", "name")
         if raw_field in (None, "*", ""):
             if function != AggregateFunction.COUNT:
-                raise InvalidTransformError(f"Measure {function} needs a field.", field=where)
+                numeric = [f.name for f in scope.fields if f.logical_type.is_numeric]
+                shown = ", ".join(numeric) if numeric else "none"
+                raise InvalidTransformError(
+                    f"Measure {function} needs a field; '*' counts rows and works only with count. "
+                    f"Numeric fields here: {shown}.",
+                    field=where,
+                    details={"function": str(function), "received": loose, "numeric_fields": numeric,
+                             "allowed_without_field": ["count"]},
+                )
             return Measure(function=function, field=None, alias=slugify(alias or "count"), logical_type=LogicalType.INTEGER)
         field = self.fields.resolve_measure_field(raw_field, scope, field=where, notes=notes)
         result_type = aggregate_result_type(function, field.logical_type)
@@ -650,7 +675,13 @@ class TransformResolver:
             if len(item) == 1:
                 (pair,) = item.items()
                 return pair
-        raise InvalidTransformError(f"Invalid derive entry {item!r}.", field=where)
+        raise InvalidTransformError(
+            f"Invalid derive entry {item!r}; a derive entry is {{\"name\": \"total\", \"expression\": \"quantity * unit_price\"}} "
+            "or {\"total\": \"quantity * unit_price\"}.",
+            field=where,
+            details={"received": item, "entry_keys": sorted(item) if isinstance(item, dict) else [],
+                     "allowed_keys": ["name", "as", "alias", "expression", "expr", "formula"]},
+        )
 
     def _derive_one(self, name: Any, expression: Any, scope: Scope, where: str, notes: list[ResolutionNote]):
         expr = None
@@ -680,7 +711,7 @@ class TransformResolver:
         new_name = slugify(name)
         if new_name != name:
             notes.append(ResolutionNote(where, name, new_name, "normalized to snake_case"))
-        self._check_unique(scope.names() + [new_name], where)
+        self._check_unique(scope.names() + [new_name], where, written=scope.names() + [name], available=scope.names())
         new_scope = scope.with_fields(
             scope.fields + [ScopeField(name=new_name, logical_type=expr.logical_type,
                                        semantic_role=SemanticRole.MEASURE if expr.logical_type.is_numeric else SemanticRole.UNKNOWN)]
@@ -776,9 +807,25 @@ class TransformResolver:
         return step, scope
 
     @staticmethod
-    def _check_unique(names: list[str], where: str) -> None:
+    def _check_unique(names: list[str], where: str, *, written: list[Any] | None = None,
+                      notes: list[ResolutionNote] | None = None, available: list[str] | None = None) -> None:
+        """Refuse a duplicate output name, naming the entries that produce it and any lenient match behind it."""
         seen: set[str] = set()
         for name in names:
             if name in seen:
-                raise InvalidTransformError(f"Duplicate output field {name!r}.", field=where)
+                entries = [str(w) for w, n in zip(written or [], names) if n == name] if written else []
+                lenient = [n for n in notes or [] if n.resolved_to == name and n.reference != name]
+                message = f"Duplicate output field {name!r}"
+                if lenient and entries:
+                    others = [e for e in entries if e not in {n.reference for n in lenient}]
+                    message += ": " + " and ".join(
+                        [f"{n.reference!r} resolved to {name!r} ({n.reason})" for n in lenient]
+                        + [f"{e!r} names it too" for e in others])
+                elif len(entries) > 1:
+                    message += f": produced by {', '.join(repr(e) for e in entries)}"
+                raise InvalidTransformError(
+                    message + ".", field=where,
+                    details={"name": name, "entries": entries, "resolution": [n.to_dict() for n in lenient],
+                             **({"available": available} if available is not None else {})},
+                )
             seen.add(name)

@@ -339,6 +339,28 @@ def test_a_document_named_as_a_dataset_is_pointed_at_attach_metadata(backend, tm
     assert backend.describe_dataset("orders.csv")["status"] == "success"  # a lenient name match needs no advice
 
 
+def test_every_operation_is_advised_not_only_the_three_that_asked(backend, tmp_path):
+    """Dispatch is the decorator's, so a refusal raised anywhere in an operation is taught."""
+    workspace(backend, tmp_path)
+    for response in (backend.get_provenance("doc/notes.md"), backend.delete_dataset("doc/notes.md"),
+                     backend.update_metadata("doc/notes.md", description="x"), backend.publish_dataset("doc/notes.md")):
+        assert response["code"] == "NOT_FOUND"
+        assert advice(response, "document_as_dataset")["rewrite"] == [
+            {"tool": "attach_metadata", "arguments": {"source": "doc/notes.md"}}]
+
+
+def test_the_recorded_error_carries_the_same_advice_as_the_response(backend, tmp_path):
+    """A refusal inside an operation is advised before the operation record is written."""
+    workspace(backend, tmp_path)
+    response = backend.delete_dataset("doc/notes.md")
+    assert kinds(response) == ["document_as_dataset"]
+    # delete_dataset resolves before it opens an operation; the transform path opens one first.
+    refused = backend.materialize_result("doc/notes.md", {"limit": 1}, "copy")
+    assert kinds(refused) == ["document_as_dataset"]
+    failed = [op for op in backend.store.list_operations() if op.status == "failed"]
+    assert failed and failed[-1].error.get("advice") == refused["advice"]
+
+
 def test_a_document_is_found_with_a_leading_slash_or_by_its_file_name(backend, tmp_path):
     workspace(backend, tmp_path)
     assert backend.attach_metadata("/doc/notes.md")["status"] == "success"
@@ -361,3 +383,226 @@ def test_a_declaration_without_rows_is_refused_with_the_grammar(backend):
     assert "one_per" in found["explanation"] and "rewrite" not in found
     order = backend.declare_output(["treatmentname"], rows="one", order_by=[{"column": "x", "direction": "up-ish"}])
     assert advice(order, "declaration_order")["explanation"].startswith("order_by names")
+
+
+# -- refusal families of the 2026-09-09 runs: facts from the raise site, rewrites from here ----
+
+def payments(backend, tmp_path: Path):
+    path = write_csv(tmp_path / "payments.csv", "order_no,order_note,paid",
+                     ["1001,card,true", "1002,wire,false", "1003,card,true"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_an_infix_function_becomes_a_call(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "customer contains 'Corp' and not product starts_with 'Gad'"})
+    assert response["code"] == "INVALID_TRANSFORM"
+    found = advice(response, "function_as_infix")
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"]["filter"] == "contains(customer, 'Corp') and not starts_with(product, 'Gad')"
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["row_count"] >= 1
+
+
+def test_a_text_measure_that_is_an_aggregate_call_becomes_an_object(backend, orders):
+    response = backend.transform_dataset("orders", {"group_by": ["region"], "metric": "max(amount) as peak"})
+    assert response["code"] == "INVALID_TRANSFORM"
+    found = advice(response, "measure_as_object")
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"]["metric"] == {"function": "max", "field": "amount", "alias": "peak"}
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["region", "peak"]
+
+
+def test_a_measure_without_a_field_is_filled_in_or_named(backend, orders, tmp_path):
+    star = backend.transform_dataset("orders", {"aggregate": {"group_by": ["region"],
+                                                              "measures": [{"function": "max", "field": "*", "alias": "n"}]}})
+    found = advice(star, "measure_needs_field")
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"]["aggregate"]["measures"] == [{"function": "count", "alias": "n"}]
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["region", "n"]
+    several = backend.transform_dataset("orders", {"aggregate": {"group_by": ["region"], "measures": [{"function": "max"}]}})
+    told = advice(several, "measure_needs_field")
+    assert "order_id, quantity, unit_price, amount" in told["explanation"] and "rewrite" not in told
+    write_csv(tmp_path / "scores.csv", "name,score", ["a,1", "b,2"])
+    assert backend.import_dataset(str(tmp_path / "scores.csv"))["status"] == "success"
+    one = backend.transform_dataset("scores", {"aggregate": {"group_by": ["name"], "measures": [{"function": "max"}]}})
+    filled = advice(one, "measure_needs_field")
+    assert filled["rewrite"][0]["arguments"]["transform"]["aggregate"]["measures"] == [{"function": "max", "field": "score"}]
+    run(backend, filled["rewrite"])
+
+
+def test_an_aggregate_body_under_group_by_moves_to_the_aggregate_step(backend, orders):
+    body = {"group_by": ["month"], "measures": [{"function": "max", "field": "amount", "alias": "peak"}]}
+    response = backend.transform_dataset("orders", {"derive": {"month": "month(order_date)"}, "group_by": body})
+    assert response["code"] == "INVALID_TRANSFORM"
+    found = advice(response, "aggregate_body_misplaced")
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"] == {"derive": {"month": "month(order_date)"}, "aggregate": body}
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["month", "peak"]
+
+
+def test_a_literal_of_the_wrong_type_is_retyped_only_when_that_loses_nothing(backend, orders):
+    quoted = backend.transform_dataset("orders", {"filter": "order_id = '1001'"})
+    assert quoted["code"] == "TYPE_MISMATCH"
+    found = advice(quoted, "compare_literal_type")
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == "order_id = 1001"
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["row_count"] == 1
+    bare = backend.transform_dataset("orders", {"filter": "region = 1"})
+    assert advice(bare, "compare_literal_type")["rewrite"][0]["arguments"]["transform"]["filter"] == "region = '1'"
+    run(backend, advice(bare, "compare_literal_type")["rewrite"])
+    lossy = backend.transform_dataset("orders", {"filter": "order_id = '025-44842'"})
+    told = advice(lossy, "compare_literal_type")
+    assert "rewrite" not in told and "does not read as integer" in told["explanation"]
+    assert "region" in told["explanation"]
+
+
+def test_after_a_join_the_right_key_is_selected_from_the_left_one(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    transform = {"join": {"right": "payments", "on": {"order_id": "order_no"}}, "select": ["order_no", "order_note", "paid"]}
+    response = backend.transform_dataset("orders", transform)
+    assert response["code"] == "INVALID_TRANSFORM" and response["message"].startswith("Duplicate output field 'order_note'")
+    found = advice(response, "join_scope_names")
+    assert "fuzzy name match" in found["explanation"] and "equals 'order_id'" in found["explanation"]
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"]["select"] == ["order_id as order_no", "order_note", "paid"]
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["order_no", "order_note", "paid"]
+    assert kinds(response) == ["join_scope_names"]  # the general field advice does not stack on it
+
+
+def test_after_a_join_a_qualified_name_is_unqualified(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    steps = [{"join": {"right": "payments", "on": {"order_id": "order_no"}}},
+             {"select": ["order_id", "payments.paid as paid", "orders.region"]}]
+    response = backend.transform_dataset("orders", steps)
+    assert response["code"] == "NOT_FOUND"
+    found = advice(response, "join_scope_names")
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"][1]["select"] == ["order_id", "paid", "region"]
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["order_id", "paid", "region"]
+
+
+def test_a_field_used_before_the_step_that_creates_it_is_merged_into_one_object(backend, orders):
+    steps = [{"aggregate": {"group_by": ["month"], "measures": [{"function": "max", "field": "amount", "alias": "peak"}]}},
+             {"derive": {"expression": "month(order_date) as month"}},
+             {"filter": "region = 'West'"},
+             {"select": ["month", "peak"]}]
+    response = backend.transform_dataset("orders", steps)
+    assert response["code"] == "NOT_FOUND"
+    found = advice(response, "field_created_later")
+    assert "created in step 2 but used in step 1" in found["explanation"]
+    (rewritten,) = found["rewrite"]
+    assert list(rewritten["arguments"]["transform"]) == ["aggregate", "derive", "filter", "select"]
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["month", "peak"]
+    twice = backend.transform_dataset("orders", [{"filter": "month = 8"}, {"derive": {"month": "month(order_date)"}},
+                                                 {"filter": "region = 'West'"}])
+    told = advice(twice, "field_created_later")
+    assert "rewrite" not in told and "Reorder" in told["explanation"]
+
+
+def test_an_unknown_field_is_explained_with_the_scope_and_never_rewritten(backend, orders):
+    response = backend.transform_dataset("orders", {"select": ["order_id", "amounts_total"]})
+    assert response["code"] == "NOT_FOUND"
+    told = advice(response, "field_not_in_scope")
+    assert "rewrite" not in told
+    assert "the fields there are order_id, order_date, region" in told["explanation"]
+    assert "'amount' look alike but are other fields" in told["explanation"]
+    assert "materialize_result keeps it" in told["explanation"]
+
+
+def test_a_join_written_as_the_source_becomes_a_join_step(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    as_text = backend.transform_dataset('{"left": "orders", "right": "payments", "on": "order_id == order_no"}',
+                                        {"select": ["order_id", "paid"]})
+    assert as_text["status"] == "error" and as_text["code"] == "INVALID_INTENT"
+    found = advice(as_text, "source_as_dataset")
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"] == {"source": "orders", "transform": [
+        {"join": {"right": "payments", "on": {"order_id": "order_no"}}}, {"select": ["order_id", "paid"]}]}
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["order_id", "paid"]
+    as_dict = backend.transform_dataset({"left": "orders", "right": "payments", "on": {"order_id": "order_no"}}, {"limit": 1})
+    assert advice(as_dict, "source_as_dataset")["rewrite"][0]["arguments"]["source"] == "orders"
+    keyed = backend.transform_dataset('{"left": "orders", "right": "payments", "on": "order_id == order_no"}',
+                                      {"select": ["order_no", "paid"]})
+    found = advice(keyed, "source_as_dataset")
+    assert found["rewrite"][0]["arguments"]["transform"][1]["select"] == ["order_id as order_no", "paid"]
+    (result,) = run(backend, found["rewrite"])
+    assert names(result) == ["order_no", "paid"]
+
+
+def test_an_unknown_document_is_pointed_at_the_one_that_exists(backend, tmp_path):
+    root = tmp_path / "ws"
+    (root / "doc").mkdir(parents=True)
+    write_csv(root / "orders.csv", "order_id,amount", ["1,10"])
+    (root / "doc" / "microlab.md").write_text("# orders\n\nShop orders.\n", encoding="utf-8")
+    assert backend.import_workspace(str(root))["status"] == "success"
+    response = backend.attach_metadata("knowledge.md")
+    assert response["code"] == "NOT_FOUND"
+    found = advice(response, "document_not_found")
+    assert found["rewrite"] == [{"tool": "attach_metadata", "arguments": {"source": "doc/microlab.md"}}]
+    run(backend, found["rewrite"])
+    (root / "doc" / "patient.md").write_text("# patient\n", encoding="utf-8")
+    assert backend.import_workspace(str(root))["status"] == "success"
+    two = backend.attach_metadata("knowledge.md")
+    told = advice(two, "document_not_found")
+    assert "rewrite" not in told and "doc/microlab.md, doc/patient.md" in told["explanation"]
+    close = backend.attach_metadata("patients.md")
+    assert advice(close, "document_not_found")["rewrite"][0]["arguments"]["source"] == "doc/patient.md"
+
+
+def test_an_export_onto_an_existing_file_is_offered_with_overwrite_and_its_cost_named(backend, orders, tmp_path):
+    target = tmp_path / "answer.csv"
+    assert backend.export_result("orders", str(target), format_spec={"decimals": 1})["status"] == "success"
+    response = backend.export_result("orders", str(target), format_spec={"decimals": 1})
+    assert response["code"] == "CONFLICT"
+    found = advice(response, "file_exists")
+    assert "keeps no copy of the earlier content" in found["explanation"]
+    assert found["rewrite"] == [{"tool": "export_result", "arguments": {
+        "dataset": "orders", "path": str(target), "format_spec": {"decimals": 1}, "overwrite": True}}]
+    run(backend, found["rewrite"])
+    failed = [op for op in backend.store.list_operations() if op.status == "failed"]
+    assert failed and failed[-1].error.get("advice") == response["advice"]
+
+
+def test_a_transform_sent_as_text_is_parsed_or_its_json_error_named(backend, orders):
+    response = backend.transform_dataset("orders", '{"limit": 1}')
+    assert response["code"] == "INVALID_TRANSFORM"
+    found = advice(response, "transform_as_text")
+    assert found["rewrite"] == [{"tool": "transform_dataset", "arguments": {"source": "orders", "transform": {"limit": 1}}}]
+    run(backend, found["rewrite"])
+    broken = backend.transform_dataset("orders", '[{"filter": "amount > 1"')
+    told = advice(broken, "transform_as_text")
+    assert "rewrite" not in told and "not JSON" in told["explanation"]
+
+
+def test_a_document_or_media_file_given_to_import_dataset_is_explained(backend, tmp_path):
+    doc = tmp_path / "patient.md"
+    doc.write_text("# patient\n\n| id | name |\n|---|---|\n| 1 | a |\n", encoding="utf-8")
+    response = backend.import_dataset(str(doc))
+    assert response["code"] == "INVALID_SCHEMA"
+    found = advice(response, "document_as_dataset")
+    assert "extracted outside the backend" in found["explanation"]
+    assert found["rewrite"] == [{"tool": "attach_metadata", "arguments": {"source": str(doc)}}]
+    run(backend, found["rewrite"])
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+    media = backend.import_dataset(str(clip))
+    told = advice(media, "media_as_dataset")
+    assert "rewrite" not in told and "does not read video" in told["explanation"]
+    unknown = tmp_path / "data.xyz"
+    unknown.write_text("x", encoding="utf-8")
+    assert "rewrite" not in advice(backend.import_dataset(str(unknown)), "unsupported_format")
+
+
+def test_a_taken_materialization_name_is_explained_with_what_is_there(backend, orders):
+    assert backend.materialize_result("orders", {"limit": 1}, "first")["status"] == "success"
+    response = backend.materialize_result("orders", {"limit": 2}, "first")
+    assert response["code"] == "CONFLICT"
+    told = advice(response, "name_taken")
+    assert "rewrite" not in told and "'first' (ds_2, 1 rows)" in told["explanation"]

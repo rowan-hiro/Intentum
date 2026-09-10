@@ -256,10 +256,22 @@ Every failure is a structured response, never an exception string:
 ```json
 {"status": "error", "code": "NOT_FOUND", "recoverable": true,
  "field": "transform.steps[0] (aggregate).group_by",
- "message": "No field named 'colour' is available at this step.",
+ "message": "No field named 'colour' is available at this step; the fields here are order_id, region, amount.",
  "candidates": [{"name": "region", "type": "string", "id": "col_3", "role": "dimension"}, ...],
- "hint": "Use one of the listed field names."}
+ "details": {"reference": "colour", "available": ["order_id", "region", "amount"], "close": []},
+ "hint": "Use one of the listed field names.",
+ "advice": [{"kind": "field_not_in_scope",
+             "explanation": "'colour' is not a field at step 1; the fields there are order_id, region, amount. A name that a preview computed exists only in that preview: materialize_result keeps it, or derive it again in this transform."}]}
 ```
+
+Every refusal carries three things: what was received, what is accepted at
+that point, and a rewrite when the mapping is mechanical. The second comes
+from the raise site, which holds it (the fields in scope, both operands of a
+comparison, the parser's vocabulary, the documents that exist), and travels as
+`details` with the step named in `field`; the third is built from those facts
+by `core/recovery`. Advice is attached for every semantic operation, at the
+operation boundary, so a refusal raised anywhere inside one is taught and the
+failed operation's record carries the same advice as the response.
 
 Codes: `NOT_FOUND`, `AMBIGUOUS_REFERENCE` (rendered as `status: needs_resolution`),
 `INVALID_INTENT`, `INVALID_SCHEMA`, `INVALID_TRANSFORM`, `INVALID_STATE`,
@@ -284,15 +296,31 @@ tool calls to send as-is:
 
 Detectors so far: a subquery in an expression (semi_join), `distinct` as a key
 or prefix (measureless `group_by`), a join `on` written as an equality (key
-mapping), `LIKE` (`contains` / `starts_with` / `ends_with`), an aggregate
-function inside `select` (aggregate step), an expression with an alias inside
-`select` (derive step), a SQL `LIMIT` tail inside a filter (limit step), an
-inline relation as `source` (materialize it first), an unknown key (nearest
-accepted key), a string function on a date or
-timestamp (how dates are computed, and that rendering belongs to export), and a
-contract mismatch at export (the reshape and the export). A detector that
-cannot rewrite still explains. Every rewrite is executed in its test and must
-succeed.
+mapping), `LIKE` (`contains` / `starts_with` / `ends_with`), a function
+written infix (`a contains 'x'` as `contains(a, 'x')`), an aggregate function
+inside `select` (aggregate step) or as a text measure (`{function, field,
+alias}`), an aggregate body under `group_by` or `derive` (the aggregate step),
+a measure without a field (`*` counts; one numeric field is filled in), an
+expression with an alias inside `select` (derive step), a field used before
+the step that creates it (one self-ordering object), a SQL `LIMIT` tail inside
+a filter (limit step), an inline relation or a join written as `source`
+(materialize it first, or the join as the first step), a JSON string where a
+name belongs, an unknown key (nearest accepted key), a predicate that is not
+boolean, a literal of the wrong type in a comparison (re-typed when lossless),
+a qualified or right-key name after a join (unqualified, or the left key under
+that name, naming any fuzzy match that hid it), a string function on a date or
+timestamp (how dates are computed, and that rendering belongs to export), a
+document, media file or unsupported format where a dataset is expected
+(`attach_metadata`, or that the host reads it, MADR 0009), a document name no
+artifact has (the one that exists), an export onto an existing file (the same
+call with `overwrite`, and that the earlier file is not kept), a
+materialization name another request already produced (what is there, and the
+two ways on), a declaration
+without `rows` or with a malformed `order_by` (the grammar), and a contract
+mismatch at export (the reshape and the export). A field that is simply not in
+scope is explained with the scope and never rewritten from a look-alike name.
+A detector that cannot rewrite still explains. Every rewrite is executed in its
+test and must succeed.
 
 Two silent failures get the same treatment on *successful* responses: an empty
 result whose filter literal is absent from the filtered column says where in
@@ -633,9 +661,12 @@ imports in ~2 s and the task's query runs through the semantic steps.
 7. **Concurrency**: the SQLite store uses `BEGIN IMMEDIATE` and DuckDB runs
    single-process; multi-writer deployments need a server-side queue or
    PostgreSQL advisory locks around materialization.
-8. **Protocol-level input errors**: the MCP SDK currently reports wrong-typed
-   arguments (e.g. a string `transform`) as tool errors with pydantic text;
-   mapping those to the same structured error shape would close the last gap.
+8. **Protocol-level input errors**: the loose-shaped arguments of the
+   transform tools (`source`, `transform`) are typed loosely at the MCP layer
+   so that a JSON string or a relation written there reaches the backend and
+   is refused with advice; a wrong-typed scalar argument is still reported by
+   the MCP SDK with pydantic text, and mapping those to the structured error
+   shape is what remains.
 9. **Reversibility as a property of each call**: on the data side regret is
    cheap. A transform creates a new dataset rather than replacing one,
    `delete_dataset` has `restore_dataset`, and a failed operation drops its

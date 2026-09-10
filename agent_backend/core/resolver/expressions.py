@@ -17,12 +17,14 @@ from ..ir import (
     LiteralExpr,
     UnaryExpr,
 )
-from ..ir.expression_parser import parse_expression
+from ..ir.expression_parser import _KEYWORDS, parse_expression
 from ..ir.typing import (
     COMPARISON_OPS,
+    FUNCTIONS,
     TEMPORAL,
     arguments_are_swapped,
     binary_result_type,
+    comparable,
     function_result_type,
     literal_type,
     signature,
@@ -60,7 +62,16 @@ class ExpressionResolver:
         notes: list[ResolutionNote] | None = None,
     ) -> Expr:
         if isinstance(loose, str):
-            return self.resolve(parse_expression(self._quote_special_fields(loose, scope)), scope, field=field, notes=notes)
+            try:
+                parsed = parse_expression(self._quote_special_fields(loose, scope))
+            except InvalidTransformError as err:
+                # The parser knows the text; the resolver knows where it sits and what the language accepts.
+                if err.field == "expression":
+                    err.field = field
+                err.details.update({"allowed_functions": sorted(FUNCTIONS), "keywords": sorted(_KEYWORDS),
+                                    "allowed_operators": sorted(set(_FILTER_OP_ALIASES) | {"+", "-", "*", "/", "%", "and", "or"})})
+                raise
+            return self.resolve(parsed, scope, field=field, notes=notes)
         if isinstance(loose, bool) or loose is None or isinstance(loose, (int, float)):
             return LiteralExpr(value=loose, logical_type=literal_type(loose))
         if isinstance(loose, list):
@@ -180,8 +191,8 @@ class ExpressionResolver:
                 raise InvalidTransformError("Operator 'between' requires [low, high].", field=field)
             low = self._coerce(left, self._right_operand(right_loose[0], right_is_expr, scope, field, notes))
             high = self._coerce(left, self._right_operand(right_loose[1], right_is_expr, scope, field, notes))
-            ge = BinaryExpr(op=">=", left=left, right=low, logical_type=binary_result_type(">=", left.logical_type, low.logical_type))
-            le = BinaryExpr(op="<=", left=left, right=high, logical_type=binary_result_type("<=", left.logical_type, high.logical_type))
+            ge = BinaryExpr(op=">=", left=left, right=low, logical_type=self._result_type(">=", left, low, scope, field))
+            le = BinaryExpr(op="<=", left=left, right=high, logical_type=self._result_type("<=", left, high, scope, field))
             return BinaryExpr(op="and", left=ge, right=le, logical_type=LogicalType.BOOLEAN)
         if op in ("contains", "starts_with", "ends_with"):
             right = self._right_operand(right_loose, right_is_expr, scope, field, notes)
@@ -202,7 +213,33 @@ class ExpressionResolver:
                 )
             right = self._coerce(left, right)
             left = self._coerce(right, left)
-        return BinaryExpr(op=op, left=left, right=right, logical_type=binary_result_type(op, left.logical_type, right.logical_type))
+        return BinaryExpr(op=op, left=left, right=right, logical_type=self._result_type(op, left, right, scope, field))
+
+    @staticmethod
+    def _operand_facts(expr: Expr) -> dict[str, Any]:
+        """One operand as the agent wrote it: its text, its type, and whether it is a literal."""
+        if isinstance(expr, ColumnExpr):
+            text = expr.field.name
+        elif isinstance(expr, LiteralExpr):
+            text = repr(expr.value)
+        elif isinstance(expr, FunctionExpr):
+            text = f"{expr.name}(...)"
+        else:
+            text = "expression"
+        return {"text": text, "type": str(expr.logical_type), "literal": isinstance(expr, LiteralExpr)}
+
+    def _result_type(self, op: str, left: Expr, right: Expr, scope: Scope, field: str) -> LogicalType:
+        """binary_result_type, with a refusal that names the step, both operands and the comparable fields."""
+        try:
+            return binary_result_type(op, left.logical_type, right.logical_type)
+        except TypeMismatchError as err:
+            if err.field == "expression":
+                err.field = field
+            literal = right if isinstance(right, LiteralExpr) else left if isinstance(left, LiteralExpr) else None
+            err.details.update({"operator": op, "left": self._operand_facts(left), "right": self._operand_facts(right)})
+            if literal is not None:
+                err.details["comparable_fields"] = [f.name for f in scope.fields if comparable(f.logical_type, literal.logical_type)]
+            raise
 
     def _right_operand(self, loose: Any, is_expr: bool, scope: Scope, field: str, notes: list[ResolutionNote] | None) -> Expr:
         if loose is None and not is_expr:

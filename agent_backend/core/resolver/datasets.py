@@ -10,6 +10,7 @@ backend renders that as a ``needs_resolution`` response.
 from __future__ import annotations
 
 import difflib
+import json
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -119,7 +120,20 @@ class DatasetResolver:
     @staticmethod
     def _reference_text(reference: Any, field: str) -> str:
         if isinstance(reference, str) and reference.strip():
-            return reference.strip()
+            text = reference.strip()
+            if text[0] in "{[":
+                # The agent's own JSON, sent as text: not a name, and not something to score against names.
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, (dict, list)):
+                    raise InvalidIntentError(
+                        f"The {field} must name one dataset (its name, id, alias or a description); "
+                        "a JSON structure was given as text.",
+                        field=field, details={"received": parsed},
+                    )
+            return text
         if isinstance(reference, dict):
             for key in ("dataset_id", "id", "name", "dataset", "ref", "reference"):
                 value = reference.get(key)
