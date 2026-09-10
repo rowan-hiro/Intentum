@@ -35,10 +35,11 @@ use transcribe_audio to read relevant intervals (up to 180 seconds per call;
 audio_stream selects a zero-based audio-track ordinal). Cover the full audio when
 its relevance is unknown. Audio can extend beyond the video duration. Use the
 returned audio_bounds on the video clock to plan coverage; a container-derived
-endpoint is marked as estimated. clip_start_s and clip_end_s report what was
-decoded: reading begins at the track's own samples and stops at audio EOF, so
-an interval outside those bounds is refused as unread rather than returned as
-silence. Language is detected from audio unless specified.
+endpoint is marked as estimated. clip_start_s and clip_end_s report the interval
+actually read: a request overlapping the track is cut back to it, beginning at
+its own samples and stopping at audio EOF, while a request lying wholly outside
+it is refused as unread rather than answered with silence. Language is detected
+from audio unless specified.
 Import the returned segments_path with backend import_dataset before relying on
 the transcript. Speech recognition and its timestamps are estimates, not verified
 facts. Compare important words, numbers and comparisons with frames at the cited

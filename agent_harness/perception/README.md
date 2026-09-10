@@ -65,14 +65,17 @@ video endpoint. `audio_bounds` returns its start/end on this shared clock
 and the endpoint's source. When stream duration is unavailable or invalid,
 container start plus duration supplies an estimated endpoint
 (`end_source="format.duration"`, `end_is_estimate=true`): that container
-value may include offsets or other longer tracks. Neither edge of the cut is
-padded. A request that begins before the track reads from its first samples
-instead, so `clip_start_s` can be later than the requested `start_s`, and
-extraction stops at audio EOF without trailing silence. `clip_start_s`,
-`clip_end_s` and `decoded_duration_s` report what was actually decoded. An
+value may include offsets or other longer tracks. A track declaring a start at
+or after that estimate has an unknown extent and is refused. Neither edge of
+the cut is padded. A request overlapping the track is cut back to it: it reads
+from the track's first samples, so `clip_start_s` can be later than the
+requested `start_s`, and stops at audio EOF without trailing silence.
+`clip_start_s` is where the cut began; `clip_end_s` and `decoded_duration_s`
+are measured from the decoded result. `duration_s` sizes the requested window,
+not the clip, so reading a late track returns less than `duration_s`. An
 interval wholly outside the track is refused as unread; it is not reported as
-silence. Range refusals identify the selected track and the boundary being
-used, and name the readable interval.
+silence. Range refusals identify the selected track, the boundary being used
+and the readable interval.
 
 ASR runs in a subprocess on
 CPU/int8 with four threads, beam size 5, temperature 0, voice activity
@@ -141,6 +144,10 @@ request beginning before the selected track returned synthesized silence as
 decoded audio, and a request lying wholly before the track returned nothing but
 silence under a success status: the failure the endpoint fix removed, surviving
 at the other edge. Reading now starts at the track's first samples and a wholly
-earlier interval is refused, so both edges are treated alike. The regressions in
-`tests/test_audio.py` cover the clamped start, the refusal, and the absence of
+earlier interval is refused, so neither edge is padded. The two edges are
+established differently, and only the policy is symmetric: the endpoint is
+measured from the decoded WAV, while the start comes from the track's declared
+`start_time`. A container that understates that start can still leave
+synthesized silence at the head. The regressions in `tests/test_audio.py` cover
+the clamped start, the requested-window policy, the refusals, and the absence of
 leading padding in real decoded audio.
