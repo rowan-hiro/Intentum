@@ -94,3 +94,27 @@ def test_the_container_gets_the_run_dir_the_data_read_only_and_an_empty_home(tmp
     assert "HARNESS_MODEL_API_KEY=" not in text  # the key travels in the environment, never on the command line
     assert command[-1] == "the question" and "--format json --auto --pure --title task_44" in text
     assert f"intentum-opencode:1.18.26 run --agent {AGENT} --model {PROVIDER}/qwen/qwen3.5-35b-a3b" in text
+
+
+def test_video_is_opt_in_and_enables_images_and_only_the_scoped_reader(tmp_path):
+    options = dict(model="vision-model", base_url="https://gateway.example", system_prompt="Read the evidence.")
+    default = json.loads(write_config(tmp_path, **options).read_text())
+    assert "perception" not in default["mcp"]
+    assert "modalities" not in default["provider"][PROVIDER]["models"]["vision-model"]
+    config = json.loads(write_config(tmp_path, **options, video_context="/data/context").read_text())
+    assert config["provider"][PROVIDER]["models"]["vision-model"]["modalities"]["input"] == ["text", "image"]
+    assert config["mcp"]["perception"]["command"][-4:] == ["--context-root", "/data/context", "--evidence-root", "/run/perception"]
+    agent = config["agent"][AGENT]
+    assert agent["tools"]["perception_*"] and agent["permission"]["perception_*"] == "allow"
+    assert all(agent["tools"][tool] is False for tool in BUILTIN_TOOLS)
+
+
+def test_video_evidence_is_retained_without_binary_in_normalized_events():
+    body = {"status": "success", "summary": "Decoded a frame", "frames": [{"frame_id": "f1", "timestamp_s": 0.5}]}
+    line = json.dumps({"type": "tool_use", "part": {"tool": "perception_read_video_frames", "state": {
+        "status": "completed", "input": {"path": "/data/context/clip.mp4", "timestamps_s": [0.5]},
+        "output": json.dumps(body), "attachments": [{"url": "data:image/png;base64,AAAA"}]}}})
+    event = parse_events([line])["tool_events"][0]
+    assert event["tool"] == "perception_read_video_frames" and event["status"] == "success"
+    assert event["evidence"]["frames"] == body["frames"]
+    assert "base64" not in json.dumps(event)

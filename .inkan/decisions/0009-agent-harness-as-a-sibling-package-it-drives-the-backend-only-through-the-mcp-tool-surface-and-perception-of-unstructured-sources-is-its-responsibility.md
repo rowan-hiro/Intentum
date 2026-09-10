@@ -54,3 +54,9 @@ The split held under a new module on each side: advice (language and data facts)
 Status: Accepted → Accepted
 
 Partly superseded by 0011: the harness no longer owns the model loop; OpenCode runs it with only the backend's MCP tools. The boundary itself holds (tests/test_boundary.py unchanged: the hosts package imports nothing from the backend), perception now comes from the host, and agent_harness/perception/ is reserved for an MCP-exposed reader only if the tool-restricted arm ever needs one.
+
+### 2026-09-10T07:21:00.637Z, outcome 2026-09-10-0707-x3nb
+
+Status: accepted -> accepted
+
+The restricted host now needs a video reader. Outcome 2026-09-10-0707-x3nb adds deterministic FFmpeg frame tools and separately saved, revisable agent observations under agent_harness/perception; the backend and wheel boundary are unchanged. The first task_312 run passed its scorer but did not save or import an observation, so compliance with that boundary workflow remains a measured gap.
