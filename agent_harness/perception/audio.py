@@ -22,6 +22,36 @@ from .video import VideoReader, _json, _run, digest, save_json
 MAX_CLIP_SECONDS = 180
 
 
+def _seconds(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _audio_bounds(info: dict, ordinal: int) -> dict:
+    """Track endpoints on the video clock; container fallback is only an estimate."""
+    stream, container = info["audio_streams"][ordinal], info.get("format", {})
+    video_start = _seconds(info["video_stream"].get("start_time")) or 0
+    container_start = _seconds(container.get("start_time")) or 0
+    track_start = _seconds(stream.get("start_time"))
+    if track_start is None:
+        track_start = container_start
+    duration = _seconds(stream.get("duration"))
+    estimated = duration is None or duration <= 0
+    if estimated:
+        duration = _seconds(container.get("duration"))
+    if duration is None or duration <= 0:
+        raise ValueError(f"Audio track {ordinal} has no usable stream or container duration; its endpoint is unknown.")
+    # Container duration can include timestamp offsets or other longer tracks.
+    # Treat it as an upper estimate, and stop extraction at the actual audio EOF.
+    end = (container_start if estimated else track_start) + duration - video_start
+    return {"start_s": track_start - video_start, "end_s": end,
+            "end_source": "format.duration" if estimated else "stream.duration",
+            "end_is_estimate": estimated}
+
+
 class AudioReader:
     def __init__(self, video: VideoReader, model_dir: Path, timeout_s: int = 300):
         self.video = video
@@ -50,7 +80,7 @@ class AudioReader:
         if language is not None:
             command += ["--language", language]
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout_s,
+            result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=self.timeout_s,
                                     env={**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
         except subprocess.TimeoutExpired as error:
             raise ValueError("ASR timed out; request a shorter clip. No transcript was committed.") from error
@@ -70,13 +100,20 @@ class AudioReader:
             raise ValueError("This video has no audio track. Use its frames; no speech transcript can be produced.")
         if not 0 <= audio_stream < len(info["audio_streams"]):
             raise ValueError(f"audio_stream is a zero-based audio-track ordinal; accepted: 0 to {len(info['audio_streams']) - 1}.")
-        end_s = min(start_s + duration_s, info["duration_s"])
+        bounds = _audio_bounds(info, audio_stream)
+        end_s = min(start_s + duration_s, bounds["end_s"])
         if start_s >= end_s:
-            raise ValueError("start_s is outside the video's duration.")
+            qualifier = "estimated " if bounds["end_is_estimate"] else ""
+            raise ValueError(f"start_s={start_s:g} is at or beyond audio track {audio_stream}'s {qualifier}"
+                             f"end {bounds['end_s']:g} s on the video clock "
+                             f"(track start {bounds['start_s']:g} s; {bounds['end_source']}).")
         request = {"source_path": info["source_path"], "source_sha256": info["source_sha256"],
                    "clip_start_s": start_s, "clip_end_s": end_s, "audio_stream": audio_stream,
+                   "video_origin_s": _seconds(info["video_stream"].get("start_time")) or 0,
+                   "audio_bounds": bounds,
                    "model_fingerprint": self.model_fingerprint, "language": language, "options": OPTIONS,
-                   "reader_sha256": digest(Path(__file__)), "recognizer_sha256": digest(Path(__file__).with_name("asr.py"))}
+                   "reader_sha256": digest(Path(__file__)), "video_reader_sha256": digest(Path(__file__).with_name("video.py")),
+                   "recognizer_sha256": digest(Path(__file__).with_name("asr.py"))}
         request_id = hashlib.sha256(_json(request).encode()).hexdigest()
         # Serialize ASR calls in one server: avoid multiplying model memory and
         # ensure retries read a fully committed transcript rather than rerun ASR.
@@ -88,21 +125,27 @@ class AudioReader:
 
     def _extract_and_transcribe(self, request: dict, request_id: str, info: dict, cached: Path) -> dict:
         start, end = request["clip_start_s"], request["clip_end_s"]
-        video_origin = float(info["video_stream"].get("start_time") or 0)
+        video_origin = request["video_origin_s"]
         with tempfile.TemporaryDirectory(dir=self.root) as temporary:
             audio = Path(temporary) / "audio.wav"
             # Preserve the original track timing, move to the video's zero
             # origin, and pad gaps with silence before cutting the requested
-            # interval. ASR timestamps then map back by adding clip_start_s.
+            # interval. Do not pad beyond EOF: a container duration fallback
+            # can overestimate this track's endpoint. ASR times add clip_start_s.
             _run(["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-copyts",
                   "-i", info["source_path"], "-map", f"0:a:{request['audio_stream']}", "-vn", "-sn", "-dn",
-                  "-af", f"asetpts=PTS-({video_origin})/TB,aresample=16000:async=1:first_pts=0,apad,"
+                  "-af", f"asetpts=PTS-({video_origin})/TB,aresample=16000:async=1:first_pts=0,"
                   f"atrim=start={start}:end={end},asetpts=PTS-STARTPTS",
                   "-ac", "1", "-c:a", "pcm_s16le", str(audio)], timeout=30)
             with wave.open(str(audio), "rb") as wav:
                 audio_duration = wav.getnframes() / wav.getframerate()
-            if not 0 < audio_duration <= MAX_CLIP_SECONDS + 0.1:
+            if audio_duration == 0:
+                raise ValueError(f"Audio track {request['audio_stream']} yielded no samples in [{start:g}, {end:g}) s "
+                                 "on the video clock. Container timing may overestimate its endpoint; "
+                                 "this is an unread interval, not verified silence.")
+            if not 0 < audio_duration <= end - start + 0.1:
                 raise ValueError("Decoded audio duration is outside the requested bounds.")
+            end = min(end, start + audio_duration)
             raw = self._recognize(audio, Path(temporary) / "raw.json", request["language"])
             audio_hash = digest(audio)
             audio_path = self.root / f"{audio_hash}.wav"
@@ -127,12 +170,15 @@ class AudioReader:
             body = {"status": "success", "summary": f"ASR produced {len(segments)} speech segments; recognition is not verification.",
                     "transcript_id": transcript_id, "source_path": request["source_path"], "source_sha256": request["source_sha256"],
                     "clip_start_s": start, "clip_end_s": end, "video_duration_s": info["duration_s"],
+                    "audio_bounds": request["audio_bounds"], "decoded_duration_s": audio_duration,
                     "audio_stream": request["audio_stream"], "audio_sha256": audio_hash, "audio_path": str(audio_path),
                     "model": self.model, "model_fingerprint": self.model_fingerprint,
                     "language": raw["language"], "language_probability": raw.get("language_probability"),
                     "segments": segments, "segments_path": str(rows_path) if segments else None,
                     "raw_transcript_path": str(raw_path), "cache_hit": False,
                     "coverage": "Only the selected track and interval were processed. Segment times are ASR estimates on the video clock. "
+                                "audio_bounds describes that track; end_is_estimate marks a container-duration fallback. "
+                                "clip_end_s is the decoded endpoint; the audio may outlast the video. "
                                 "No detected speech does not prove silence; unclear words and numbers need review against frames or another reading.",
                     "next_step": ("Import segments_path with backend import_dataset before using the transcript. "
                                   "Cite segment_ids in record_observation for an interpretation or correction; keep raw ASR unchanged."

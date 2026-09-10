@@ -227,7 +227,7 @@ def parse_events(lines: Iterable[str]) -> dict[str, Any]:
                 tool_events[-1]["evidence"] = {key: body[key] for key in (
                     "source_path", "source_sha256", "duration_s", "has_audio", "frames", "coverage",
                     "observation_id", "path", "evidence", "transcript_id", "clip_start_s", "clip_end_s",
-                    "audio_stream", "audio_sha256", "model_fingerprint", "language", "segments",
+                    "audio_stream", "audio_bounds", "decoded_duration_s", "audio_sha256", "model_fingerprint", "language", "segments",
                     "segments_path", "raw_transcript_path", "cache_hit") if key in body}
         elif kind == "text":
             texts.append(str(part.get("text") or ""))

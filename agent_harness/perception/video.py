@@ -40,11 +40,13 @@ def save_json(path: Path, value: Any) -> None:
 
 def _run(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=timeout, check=False)
     except FileNotFoundError as error:
         raise ValueError("Video reading requires ffmpeg and ffprobe on PATH.") from error
     except subprocess.TimeoutExpired as error:
-        raise ValueError("Video decoding timed out; request fewer frames or a shorter local clip.") from error
+        raise ValueError("Media reading exceeded its time budget; this call produced no usable result. "
+                         "Report the requested interval as unread; a timeout is not evidence about its content.") from error
     if result.returncode:
         raise ValueError(f"Video decoding failed: {result.stderr[-1500:]}")
     return result
@@ -77,7 +79,7 @@ class VideoReader:
         source = self.source(path)
         raw = json.loads(_run([
             "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries",
-            "format=duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate,start_time,duration",
+            "format=start_time,duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate,start_time,duration",
             "-of", "json", str(source),
         ]).stdout)
         videos = [s for s in raw.get("streams", []) if s.get("codec_type") == "video"]
@@ -92,6 +94,7 @@ class VideoReader:
             "status": "success", "summary": "Video metadata only; no image or speech has been interpreted.",
             "source_path": str(source), "source_sha256": digest(source), "duration_s": duration,
             "video_stream": stream, "has_audio": bool(audio_streams), "audio_streams": audio_streams,
+            "format": raw.get("format", {}),
             "limits": {"frames_per_call": MAX_FRAMES, "max_dimension": 1920},
             "coverage": "Frames sample visible content only. This call does not transcribe audio. Sampling can miss brief changes.",
         }
@@ -107,15 +110,18 @@ class VideoReader:
         frames: list[dict[str, Any]] = []
         batch_bytes = 0
         for timestamp in timestamps_s:
-            # Decode from the beginning so showinfo's PTS is the original stream
-            # time, including for variable-rate video. Subtract its start offset
-            # to put both the requested position and the evidence on a zero origin.
+            # Seek to a nearby keyframe, retaining original PTS for selection
+            # and evidence. Absolute seek timestamps avoid FFmpeg adding the
+            # container start time (which can differ from the video start).
+            # Our select filter does the exact trim; FFmpeg's accurate-seek
+            # trim can add that start offset again when combined with copyts.
             start = float(info["video_stream"].get("start_time") or 0)
+            seek = ["-seek_timestamp", "1", "-noaccurate_seek", "-ss", str(start + timestamp - 2)] if timestamp > 2 else []
             with tempfile.TemporaryDirectory(dir=self.evidence_root) as temporary:
                 output = Path(temporary) / "frame.png"
                 result = _run([
                     "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", "-protocol_whitelist", "file,pipe",
-                    "-copyts", "-i", info["source_path"], "-map", "0:v:0", "-an", "-sn", "-dn",
+                    "-copyts", *seek, "-i", info["source_path"], "-map", "0:v:0", "-an", "-sn", "-dn",
                     "-vf", f"select=gte(t\\,{timestamp + start}),showinfo,scale={max_dimension}:{max_dimension}:"
                     "force_original_aspect_ratio=decrease:flags=lanczos",
                     "-frames:v", "1", "-fps_mode", "vfr", "-threads", "1", str(output),
