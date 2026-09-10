@@ -64,6 +64,160 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-10, seventh round · the Claude family, fable-5.1, opus-5 and sonnet-5, with gpt-6-astra, and the two families side by side
+
+**Official verdicts on `task_44` and `task_329`: claude-fable-5.1 3/3 and 2/3,
+claude-opus-5 3/3 and 3/3, claude-sonnet-5 0/3 and 2/3, gpt-6-astra 3/3 and
+3/3.** Two models now pass both tasks every time: opus-5, which is at 9/9 and
+9/9 across its three rounds, and gpt-6-astra on its first. Neither is the top
+of its family by price. fable-5.1 carried the day key into the file once on
+`task_329`, the same reading failure as every other miss on that task; sol
+did so twice in the sixth round. sonnet-5 declared `treatmentid` beside
+`treatmentname` in all three `task_44` runs and spent 19 to 26 steps getting
+there, most of them exploring the workspace (search, describe, the artifact
+list, a document described as a dataset, an already imported SQLite table
+imported again), each refusal advised and none of them the cause of the
+verdict.
+
+Conditions: source `c3205af`, the sixth round's image
+(`sha256:1f9414f1b4ca0b218d5eab02a68f021ef8c24db6ad5b230f51a40c998f1bb7c6`, the
+two commits since changed only this README), OpenCode 1.18.26, informed
+declaration framing, three sequential runs per task per model with the
+runner's defaults and a 900 s timeout, through the same gateway with only
+`DEFAULT_MODEL_NAME` changed. Cost is computed from the recorded tokens at
+the vendors' official prices as published on their pricing pages on this day,
+which the gateway lists unchanged: fable-5.1 $10 / $50 per million input /
+output with cache reads at $0.25, opus-5 $5 / $25 with $0.50, sonnet-5 $2 /
+$10 with $0.20, gpt-6-astra $10 / $50 with $1.00; reasoning billed as output.
+The round comes to about $3.87: fable $1.32, opus $0.96, sonnet $0.79, astra
+$0.80.
+
+| model | task | official | mean steps | mean calls | mean prompt tokens (incl. cache) | refusals | unadvised | repair rate | mean elapsed | cost per run | cost per pass |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpt-6-astra | `task_44` | 3/3 | 10.0 | 9.0 | 60k | 5 | 0 | 0.60 | 42.9 s | $0.134 | $0.134 |
+| gpt-6-astra | `task_329` | 3/3 | 9.7 | 8.7 | 59k | 3 | 0 | 1.00 | 36.8 s | $0.134 | $0.134 |
+| claude-sonnet-5 | `task_44` | 0/3 | 23.0 | 28.3 | 438k | 8 | 0 | 0.12 | 160.6 s | $0.211 | no pass |
+| claude-sonnet-5 | `task_329` | 2/3 | 7.7 | 7.7 | 96k | 0 | 0 | n/a | 38.2 s | $0.053 | $0.079 |
+| claude-opus-5 | `task_44` | 3/3 | 10.3 | 10.7 | 134k | 2 | 0 | 0.00 | 56.5 s | $0.186 | $0.186 |
+| claude-opus-5 | `task_329` | 3/3 | 7.7 | 7.7 | 94k | 0 | 0 | n/a | 38.4 s | $0.133 | $0.133 |
+| claude-fable-5.1 | `task_44` | 3/3 | 11.0 | 10.0 | 138k | 1 | 0 | 1.00 | 77.7 s | $0.245 | $0.245 |
+| claude-fable-5.1 | `task_329` | 2/3 | 8.3 | 8.0 | 99k | 0 | 0 | n/a | 67.3 s | $0.195 | $0.292 |
+
+Per run. Every declaration stayed at revision 1; no run amended.
+
+| model | task | run | official | declared columns | declaration step | steps / calls | refusals (unadvised) | repaired | prompt tokens (uncached + cache read) | output tokens | elapsed | cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpt-6-astra | `task_44` | 1 | passed | `treatmentname` | 7 | 10 / 9 | 2 (0) | 1/2 | 8,461 + 53,676 | 478 | 45.0 s | $0.162 |
+| gpt-6-astra | `task_44` | 2 | passed | `treatmentname` | 6 | 9 / 8 | 1 (0) | 1/1 | 3,775 + 49,361 | 445 | 40.1 s | $0.109 |
+| gpt-6-astra | `task_44` | 3 | passed | `treatmentname` | 8 | 11 / 10 | 2 (0) | 1/2 | 4,140 + 61,918 | 555 | 43.7 s | $0.131 |
+| gpt-6-astra | `task_329` | 1 | passed | `daily_maximum_amount_ml` | 7 | 9 / 8 | 1 (0) | 1/1 | 7,694 + 46,150 | 443 | 37.9 s | $0.145 |
+| gpt-6-astra | `task_329` | 2 | passed | `maximum_amount` | 7 | 10 / 9 | 1 (0) | 1/1 | 4,206 + 57,570 | 545 | 35.3 s | $0.127 |
+| gpt-6-astra | `task_329` | 3 | passed | `maximum_enteral_formula_volume_bolus_amt_ml` | 7 | 10 / 9 | 1 (0) | 1/1 | 4,375 + 57,791 | 575 | 37.2 s | $0.130 |
+| claude-sonnet-5 | `task_44` | 1 | failed: extra column | `treatmentid, treatmentname` | 23 | 26 / 36 | 3 (0) | 0/3 | 31,009 + 521,032 | 10,433 | 190.2 s | $0.271 |
+| claude-sonnet-5 | `task_44` | 2 | failed: extra column | `treatmentid, treatmentname` | 21 | 24 / 28 | 2 (0) | 0/2 | 18,421 + 432,029 | 9,143 | 172.0 s | $0.215 |
+| claude-sonnet-5 | `task_44` | 3 | failed: extra column | `treatmentid, treatmentname` | 16 | 19 / 21 | 3 (0) | 1/3 | 14,227 + 298,263 | 5,998 | 119.5 s | $0.148 |
+| claude-sonnet-5 | `task_329` | 1 | passed | `max_amount` | 4 | 7 / 7 | 0 (0) | 0/0 | 15,531 + 72,465 | 1,563 | 37.9 s | $0.061 |
+| claude-sonnet-5 | `task_329` | 2 | failed: extra column | `day, max_amount` | 4 | 7 / 7 | 0 (0) | 0/0 | 7,114 + 80,805 | 1,395 | 33.5 s | $0.044 |
+| claude-sonnet-5 | `task_329` | 3 | passed | `max_amount_ml` | 6 | 9 / 9 | 0 (0) | 0/0 | 7,435 + 104,520 | 1,758 | 43.1 s | $0.053 |
+| claude-opus-5 | `task_44` | 1 | passed | `treatmentname` | 8 | 11 / 11 | 1 (0) | 0/1 | 16,894 + 124,017 | 2,751 | 58.8 s | $0.215 |
+| claude-opus-5 | `task_44` | 2 | passed | `treatmentname` | 8 | 11 / 12 | 1 (0) | 0/1 | 8,114 + 132,344 | 3,107 | 63.0 s | $0.184 |
+| claude-opus-5 | `task_44` | 3 | passed | `treatmentname` | 6 | 9 / 9 | 0 (0) | 0/0 | 8,661 + 111,761 | 2,317 | 47.7 s | $0.157 |
+| claude-opus-5 | `task_329` | 1 | passed | `max_volume_ml` | 6 | 9 / 9 | 0 (0) | 0/0 | 15,777 + 95,384 | 1,965 | 45.7 s | $0.176 |
+| claude-opus-5 | `task_329` | 2 | passed | `max_volume` | 4 | 7 / 7 | 0 (0) | 0/0 | 7,165 + 80,094 | 1,528 | 34.5 s | $0.114 |
+| claude-opus-5 | `task_329` | 3 | passed | `max_volume_ml` | 4 | 7 / 7 | 0 (0) | 0/0 | 6,485 + 77,200 | 1,552 | 34.9 s | $0.110 |
+| claude-fable-5.1 | `task_44` | 1 | passed | `treatmentname` | 7 | 10 / 9 | 1 (0) | 1/1 | 15,508 + 103,866 | 2,059 | 72.1 s | $0.284 |
+| claude-fable-5.1 | `task_44` | 2 | passed | `treatmentname` | 9 | 12 / 11 | 0 (0) | 0/0 | 9,097 + 148,312 | 2,172 | 84.7 s | $0.237 |
+| claude-fable-5.1 | `task_44` | 3 | passed | `treatmentname` | 8 | 11 / 10 | 0 (0) | 0/0 | 7,668 + 128,661 | 2,112 | 76.3 s | $0.214 |
+| claude-fable-5.1 | `task_329` | 1 | passed | `max_volume_ml` | 5 | 8 / 8 | 0 (0) | 0/0 | 14,997 + 80,873 | 1,560 | 61.4 s | $0.248 |
+| claude-fable-5.1 | `task_329` | 2 | failed: extra column | `day, max_enteral_formula_volume_ml` | 5 | 8 / 8 | 0 (0) | 0/0 | 7,058 + 89,604 | 1,522 | 65.6 s | $0.169 |
+| claude-fable-5.1 | `task_329` | 3 | passed | `max_volume_ml` | 6 | 9 / 8 | 0 (0) | 0/0 | 6,393 + 98,643 | 1,581 | 74.9 s | $0.168 |
+
+What the refusals were, and what followed:
+
+- gpt-6-astra opened every run of both tasks by attaching
+  `/data/input/<task>/context/knowledge.md`, a document that does not exist;
+  the refusal named the documents that do (`document_not_found`, with the
+  rewrite to `doc/microlab.md` or `doc/patient.md`), and the next call was
+  that rewrite, six times out of six. On `task_44` it also sent
+  `doc/patient.md` to `import_dataset` twice and moved on. It then declared
+  the value alone with the day under `one_per` and `order_by` on every
+  `task_329` run, in one call, at step 7. Its output tokens are the smallest
+  of any model measured, about 500 per run.
+- sonnet-5 on `task_44` met eight refusals across three runs, all advised:
+  `document_as_dataset` four times (a document described or transformed as
+  a dataset), `file_as_dataset` three times (the workspace's SQLite file
+  imported again as a table), `declaration_rows` once (`rows: 4`, corrected
+  to `one_per`). The verdicts do not turn on them: all three runs reached the
+  right rows at the end and declared two columns.
+- fable-5.1 met one refusal in six runs, `join_scope_names` on `task_44`,
+  and its next call succeeded. opus-5 met its usual two, `doc/patient.md`
+  given to `import_dataset`, and went on without the document.
+- Nothing in this round was refused without advice.
+
+The two families side by side. The rows below gather the sixth and seventh
+rounds (source `c3205af`) with qwen's fifth-round row (`d7a7eb5`, which lacks
+only the operation lock and one detector that never fired for it), all on the
+same prompt and tooling, priced at each vendor's official rates.
+
+| model | list price, input / output per M | `task_44` | `task_329` | mean steps 44 / 329 | cost per run 44 / 329 | cost per pass 44 / 329 |
+|---|---|---|---|---|---|---|
+| qwen3.5-35b-a3b | $0.16 / $1.30 | 2/3 | 0/3 | 19.0 / 14.3 | $0.061 / $0.037 | $0.092 / no pass |
+| gpt-5.6-luna | $0.20 / $1.20 | 2/3 | 3/3 | 9.7 / 9.7 | $0.005 / $0.004 | $0.007 / $0.004 |
+| gpt-5.6-terra | $2 / $12 | 3/3 | 2/3 | 10.3 / 8.7 | $0.044 / $0.038 | $0.044 / $0.057 |
+| gpt-5.6-sol | $4 / $20 | 3/3 | 1/3 | 9.7 / 9.3 | $0.096 / $0.096 | $0.096 / $0.288 |
+| gpt-6-astra | $10 / $50 | 3/3 | 3/3 | 10.0 / 9.7 | $0.134 / $0.134 | $0.134 / $0.134 |
+| claude-sonnet-5 | $2 / $10 | 0/3 | 2/3 | 23.0 / 7.7 | $0.211 / $0.053 | no pass / $0.079 |
+| claude-opus-5 | $5 / $25 | 3/3 | 3/3 | 10.3 / 7.7 | $0.186 / $0.133 | $0.186 / $0.133 |
+| claude-fable-5.1 | $10 / $50 | 3/3 | 2/3 | 11.0 / 8.3 | $0.245 / $0.195 | $0.245 / $0.292 |
+
+Four readings of that table, each within what 48 runs on two tasks allow:
+
+- **The language is not where the families differ.** Every model but qwen
+  and sonnet-on-`task_44` finished in eight to twelve steps with at most a
+  handful of refusals, all advised and mostly taken on the next call. The
+  detectors written from qwen's refusals were taken by sol, fable, astra and
+  luna, models that never produced the shapes they came from.
+- **The reading of the deliverable is where they differ, and it does not
+  follow price.** Carrying the organizing key into the file, on `task_329`,
+  happened to qwen, luna (fifth round), terra, sol, sonnet and fable, and
+  not to opus or astra; on `task_44` the extra `treatmentid` happened to
+  qwen, luna and sonnet. Within each family the top tier did not read it
+  better than the tiers below: sol 1/3 against terra 2/3 and luna 3/3, fable
+  2/3 against opus 3/3.
+- **Steps, not price, set the cost.** The two models that pass everything
+  cost $0.13 and $0.13 to $0.19 per pass; sonnet's `task_44` runs, at a fifth
+  of opus's price per token, cost more per run than opus's because they took
+  twice the steps and three times the tokens. luna, at a fiftieth of astra's
+  price, is the cheapest pass on both tasks when it passes.
+- **Two models are, on this sample, reliable: claude-opus-5 and
+  gpt-6-astra.** opus at 18 of 18 across three rounds, astra at 6 of 6 on
+  one; astra takes fewer tokens per step and, at twice the list price, costs
+  less per run on `task_44` and the same on `task_329`. Everything else passed `task_329` between one
+  and three times in three.
+
+Raw runs are retained under `runs/<task>/opencode-informed-<model>-20260910-1403/`
+for `claude-fable-5.1`, `claude-opus-5`, `claude-sonnet-5` and `gpt-6-astra`,
+each with `agent_summary.json` and three run directories. Earlier rounds'
+directories are untouched. Commands used, on the sixth round's image:
+
+```sh
+for MODEL in anthropic/claude-fable-5.1 anthropic/claude-opus-5 anthropic/claude-sonnet-5 openai/gpt-6-astra; do
+  for TASK in task_44 task_329; do
+    DEFAULT_MODEL_NAME=$MODEL PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task $TASK --runs 3 \
+      --out agent_harness/scenarios/dataspace/runs/$TASK/opencode-informed-${MODEL#*/}-20260910-1403
+  done
+done
+```
+
+Three runs per cell and two tasks cannot rank eight models, and a 2/3
+against a 3/3 is one run. What the sample establishes: on these two tasks
+the backend's language is used equally well by every current model of both
+families, the failures that remain are readings made in one declaration
+step, the same reading fails at every price, and two models did not fail it.
+The next question is still the harness's: what in the framing or the
+declaration exchange turns that reading, measured on the models that fail
+it, with more than three runs per cell.
+
 ## 2026-09-10, sixth round · the gpt-5.6 family, sol, terra and luna, on `c3205af`
 
 **Official verdicts on `task_44` and `task_329`: gpt-5.6-sol 3/3 and 1/3,
