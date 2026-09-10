@@ -11,7 +11,7 @@ to start.
    are the ones that matter.
 3. `agent_harness/scenarios/dataspace/README.md` — the validation
    measurements, newest first. The 2026-09-10 sections carry the model
-   rounds five to seven (three models on the closed advice gap, the gpt-5.6
+   first video-frame run on `task_312`, model rounds five to seven (three models on the closed advice gap, the gpt-5.6
    family, the Claude family with gpt-6-astra, and the two-family table that
    gathers eight models on the same columns) and the replay of the recorded
    refusals; the 2026-09-09 sections the MADR 0012 rounds and the first
@@ -28,6 +28,15 @@ inkan log -n 3
 
 Outcomes under Inkan (`inkan log` carries them), newest first:
 
+- `2026-09-10-0707-x3nb` adds an opt-in harness MCP video reader, FFmpeg in
+  the OpenCode image, explicit image modalities, and a synthetic visual-code
+  probe. Qwen correctly read the probe and passed one `task_312` run (242 rows,
+  3 columns). The agent read six timestamped frames but skipped
+  `record_observation` and the import of its reading. It also revised its
+  output contract only after export failed, dropping an organizing key. The
+  score therefore establishes this answer, not compliance with the observation
+  or declaration-review instructions. No backend or task-specific extraction
+  code changed. See the first measurement section for run paths and limits.
 - The 2026-09-10 outcomes on the branch `refusal-diagnostics` closed the gap
   between MADR 0010 and the code. `2026-09-10-0415-n1n6`: advice is attached
   for every semantic operation at the operation boundary

@@ -32,6 +32,15 @@ RUN uv python install 3.12 \
     && /opt/venv/bin/agent-backend-mcp --help >/dev/null \
     && chmod -R a+rX /opt/venv /opt/python /repo
 
+# Deterministic media decoding for the opt-in harness MCP reader. It uses the
+# same model as the host for interpretation; no OCR/ASR model is installed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+COPY agent_harness/__init__.py ./agent_harness/__init__.py
+COPY agent_harness/perception ./agent_harness/perception
+ENV PYTHONPATH=/repo
+
 # Nothing of the machine reaches the model: an empty HOME and cwd, the Claude
 # Code fallbacks off. The harness runs the container as the calling user so the
 # files it writes under /run belong to that user.

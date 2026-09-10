@@ -368,8 +368,8 @@ agent_harness/              the agent side, kept apart from the backend (MADR 00
 ├── model.py                OpenAI-compatible chat client (stdlib only)
 ├── loop.py                 in-process reference loop over an MCP server (the control arm)
 ├── hosts/                  external agent hosts (MADR 0011): opencode.py runs OpenCode in the container built
-│                           from opencode.Dockerfile, with only the backend tools
-├── perception/             reserved for an MCP-exposed reader if the restricted arm ever needs one
+│                           from opencode.Dockerfile, with backend tools and opt-in video perception
+├── perception/             MCP video inspection, timestamped frames and revisable agent observations
 └── scenarios/dataspace/    framing, scripted agents, vendored evaluator, scoring, runners, measurements
 tests/                      agent-unreliability, end-to-end and boundary tests
 examples/                   orders.csv, demo.py, mcp_config.json
@@ -381,8 +381,8 @@ The harness does not own the model loop any more (MADR 0011): `--host opencode`
 server inside, the run directory mounted at `/run` and the data read-only at
 `/data`, an empty HOME and working directory, so nothing of the machine (global
 config, plugins, an `AGENTS.md` above the run or the config, session state)
-reaches the model. Every builtin tool is disabled and only the backend's tools
-are allowed, and the JSON event stream is normalized into the same tool-event
+reaches the model. Every builtin tool is disabled; the backend's tools and any
+explicitly enabled perception tools are allowed. The JSON event stream is normalized into the same tool-event
 record the in-process loop (`--host loop`) produces, so the convergence metrics
 and the scoring apply to both. Pacing and perception are the host's; the
 harness keeps the scenario, the measurement and the adapters.
@@ -394,6 +394,17 @@ names no scenario; `tests/test_boundary.py` checks both. Reading a PDF, a
 video or an audio track is the harness's job: a reader is a tool beside the
 backend's, and what it extracts enters the backend through `import_dataset`
 or `attach_metadata`, as a fresh agent output with provenance (MADR 0009).
+
+The first perception reader is available with the DataSpace runner's `--video`
+option (OpenCode only). FFmpeg inspects videos and returns actual PNG frames at
+agent-selected timestamps; OpenCode advertises image input to the configured
+model. The reader loads no model and does not transcribe audio. Its tools are
+restricted to the mounted task context, and frames retain source hashes and
+timestamps under the run directory. `record_observation` saves the agent's
+reading as JSON for `import_dataset`; a correction cites `supersedes` and a
+reason while retaining the earlier file. Recording does not validate the
+reading or force the agent to use this path. Setup, the synthetic vision probe,
+and the first measurement are in the DataSpace README.
 
 ## 3. Running the prototype
 
@@ -621,8 +632,10 @@ imports in ~2 s and the task's query runs through the semantic steps.
    so the remaining gap is the model's reading and relationship choice, not
    backend expressiveness. Most DataSpace workspaces also carry PDFs (384 of
    410) or video (189); reading them is the harness's job
-   (`agent_harness/perception/`, MADR 0009), and the first reader, chosen by
-   the first measured task that needs it, is the next step there. The
+   (`agent_harness/perception/`, MADR 0009). The first video-frame reader
+   passed one `task_312` run on 2026-09-10, but the agent skipped saving its
+   observation; the next gap is getting cited observations into the backend
+   before dependent operations. Audio transcription remains unimplemented. The
    2026-09-02 runs showed that refusals never named the accepted shape and that
    silent failures (empty previews, an unexported correct preview) went
    unremarked; `core/recovery` now answers both with structured advice and

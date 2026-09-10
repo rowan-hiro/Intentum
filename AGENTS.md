@@ -48,8 +48,8 @@ perception extracts enters the backend only through `import_dataset` or
 | `tests/conftest.py` | Shared temporary workspace, backend, sample orders, and deterministic clock fixtures. |
 | `examples/` | Sample `orders.csv`, runnable `demo.py`, and MCP client configuration in `mcp_config.json`. |
 | `agent_harness/` | The agent side: `config.py` (`.env` and model gateway settings), `model.py` (OpenAI-compatible chat client), `loop.py` (tool-calling loop over an MCP server). |
-| `agent_harness/hosts/` | External agent hosts (MADR 0011): `opencode.py` writes a per-run `opencode.json`, runs `opencode run --format json` in a container from `opencode.Dockerfile` (OpenCode pinned, the backend's MCP entry point baked in, run directory and data mounted, empty HOME) with only the `backend_*` MCP tools allowed, and normalizes the event stream into the harness's tool-event record. |
-| `agent_harness/perception/` | Reserved for an MCP-exposed reader of unstructured sources if the tool-restricted arm ever needs one; perception otherwise comes from the host. |
+| `agent_harness/hosts/` | External agent hosts (MADR 0011): `opencode.py` runs pinned OpenCode in a container with backend MCP tools and optional video perception tools, an empty HOME, and per-run config. It normalizes events; `vision_probe.py` checks actual image delivery using a synthetic video. |
+| `agent_harness/perception/` | Opt-in MCP video reader: FFmpeg inspects videos and decodes timestamped frames inside the supplied context; the host model reads the images. Agent observations retain frame references and explicit revisions in importable JSON. No separate model, OCR or audio transcription. |
 | `agent_harness/scenarios/dataspace/` | DataSpace validation: task framing, scripted agents, the vendored official evaluator, scoring, the runners `smoke.py` (scripted) and `agent.py` (model-driven), run output under `runs/`, and the measurement README. |
 | `pyproject.toml` | Package metadata, dependencies, CLI entry point, build configuration, and test settings. |
 | `uv.lock` | Locked dependency resolution for uv. |
