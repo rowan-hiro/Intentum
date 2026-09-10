@@ -606,3 +606,16 @@ def test_a_taken_materialization_name_is_explained_with_what_is_there(backend, o
     assert response["code"] == "CONFLICT"
     told = advice(response, "name_taken")
     assert "rewrite" not in told and "'first' (ds_2, 1 rows)" in told["explanation"]
+
+
+def test_a_derive_with_a_name_and_no_expression_is_pointed_at_the_aggregate_step(backend, orders):
+    response = backend.transform_dataset("orders", [{"sort": "-order_date"}, {"derive": "max_date"},
+                                                    {"filter": "order_date = max_date"}])
+    assert response["code"] == "INVALID_TRANSFORM"
+    assert response["details"]["received"] == {"name": "max_date", "expression": None}
+    told = advice(response, "derive_without_expression")
+    assert "rewrite" not in told
+    assert "'max_date' names a result but gives nothing to compute" in told["explanation"]
+    assert "aggregate step" in told["explanation"] and "semi_join" in told["explanation"]
+    assert "reads like such a value" in told["explanation"]
+    assert kinds(response) == ["derive_without_expression"]
