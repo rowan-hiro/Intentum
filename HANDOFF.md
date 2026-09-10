@@ -10,8 +10,9 @@ to start.
    packages and the boundary between them) and 7 ("What to implement next")
    are the ones that matter.
 3. `agent_harness/scenarios/dataspace/README.md` — the validation
-   measurements, newest first. The 2026-09-10 sections carry the model
-   rounds five to seven (three models on the closed advice gap, the gpt-5.6
+   measurements, newest first. The 2026-09-10 sections carry the audio check
+   and first video-frame run on `task_312`, model rounds five to seven
+   (three models on the closed advice gap, the gpt-5.6
    family, the Claude family with gpt-6-astra, and the two-family table that
    gathers eight models on the same columns) and the replay of the recorded
    refusals; the 2026-09-09 sections the MADR 0012 rounds and the first
@@ -28,6 +29,31 @@ inkan log -n 3
 
 Outcomes under Inkan (`inkan log` carries them), newest first:
 
+- `2026-09-10-0911-ppn6` fixes the media review findings: frame reads use
+  input seeking while preserving original PTS; audio bounds follow the
+  selected track, including speech after video EOF. Container-duration
+  fallbacks are marked as estimates and extraction stops at actual audio
+  EOF. Cache identity covers shared reader code and timing, and all media
+  subprocesses close stdin. Synthetic FFmpeg regressions and a 16-minute
+  1080p seek probe are recorded in `agent_harness/perception/README.md`.
+- `2026-09-10-0735-sd88` adds offline audio-track transcription alongside
+  frames, using separately mounted local Whisper weights and a bounded
+  harness subprocess. User-supplied `medium` and `tiny` weights were copied
+  into `.cache/asr/champion/` and SHA256-verified. The OpenCode audio-only
+  check on the same video transcribed 12 segments and imported them through
+  the backend. This was an audio integration check, not another task score.
+  Raw ASR and estimated timestamps remain distinct from revisable agent
+  observations; speech can still contain recognition errors. Setup and tool
+  limits are in `agent_harness/perception/README.md`.
+- `2026-09-10-0707-x3nb` adds an opt-in harness MCP video reader, FFmpeg in
+  the OpenCode image, explicit image modalities, and a synthetic visual-code
+  probe. Qwen correctly read the probe and passed one `task_312` run (242 rows,
+  3 columns). The agent read six timestamped frames but skipped
+  `record_observation` and the import of its reading. It also revised its
+  output contract only after export failed, dropping an organizing key. The
+  score therefore establishes this answer, not compliance with the observation
+  or declaration-review instructions. No backend or task-specific extraction
+  code changed. See the first measurement section for run paths and limits.
 - The 2026-09-10 outcomes on the branch `refusal-diagnostics` closed the gap
   between MADR 0010 and the code. `2026-09-10-0415-n1n6`: advice is attached
   for every semantic operation at the operation boundary

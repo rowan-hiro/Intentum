@@ -1,10 +1,13 @@
-# Build context for agent_harness/hosts/opencode.Dockerfile: only the backend is copied.
+# Only the backend and the opt-in perception reader enter the image.
 .git
 .venv
 .seal
 .claude
 .env
-agent_harness
+.cache
+agent_harness/*
+!agent_harness/__init__.py
+!agent_harness/perception
 examples
 tests
 **/__pycache__

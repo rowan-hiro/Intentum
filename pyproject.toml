@@ -17,6 +17,9 @@ agent-backend-mcp = "agent_backend.mcp.server.main:main"
 dev = [
     "pytest>=8.0",
 ]
+perception = [
+    "faster-whisper==1.2.1",
+]
 
 [build-system]
 requires = ["hatchling"]
