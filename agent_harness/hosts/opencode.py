@@ -6,7 +6,9 @@ the backend's MCP entry point installed from the lockfile. The backend is
 reached only through that MCP server, launched by OpenCode from the per-run
 ``opencode.json`` this module writes. Every builtin tool (bash, edit, read,
 ...) is disabled for the agent and only the ``backend_*`` MCP tools are
-allowed, so the model cannot step around the backend. The run's
+allowed by default, so the model cannot step around the backend. An optional
+``perception_*`` server supplies video frames and saves the host model's
+observations; it performs no structured data queries. The run's
 ``--format json`` event stream is parsed into the harness's tool-event
 records: one per tool call with the backend's own status, code, summary and
 advice kinds, and the step it happened in.
@@ -43,7 +45,7 @@ from typing import Any, Iterable
 
 SERVER = "backend"                 # MCP server name; tools appear to the model as backend_<tool>
 PROVIDER = "harness"               # provider id in opencode.json; the model is referenced as harness/<model>
-AGENT = "backend"                  # the agent whose only tools are the backend's
+AGENT = "backend"                  # backend tools, plus explicitly enabled perception
 KEY_ENV = "HARNESS_MODEL_API_KEY"  # how the API key reaches OpenCode
 BUILTIN_TOOLS = ("bash", "edit", "write", "read", "glob", "grep", "list", "patch", "webfetch", "websearch",
                  "task", "todowrite", "todoread", "question", "skill", "lsp")
@@ -54,6 +56,7 @@ DOCKER_RUN_DIR = "/run"                          # the run directory inside the 
 DOCKER_DATA_DIR = "/data"                        # the benchmark, read-only, inside the container
 DOCKER_HOME = "/work"                            # an empty HOME and cwd inside the container
 DOCKER_BACKEND = "/opt/venv/bin/agent-backend-mcp"  # where the image installs the backend's MCP entry point
+DOCKER_ASR_MODEL = "/opt/asr-model"              # optional, read-only prepared weights
 
 
 @dataclass
@@ -71,8 +74,11 @@ class HostRun:
 
 
 def write_config(run_dir: Path, *, model: str, base_url: str, system_prompt: str,
-                 context_limit: int = 262144, output_limit: int = 16384, mcp_timeout_ms: int = 60000) -> Path:
+                 context_limit: int = 262144, output_limit: int = 16384, mcp_timeout_ms: int = 60000,
+                 video_context: str | None = None, audio: bool = False) -> Path:
     """Write the per-run opencode.json and the agent prompt beside it, with the paths the container sees."""
+    if audio and video_context is None:
+        raise ValueError("Audio transcription requires a scoped video context.")
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "prompt.txt").write_text(system_prompt, encoding="utf-8")
     config = {
@@ -102,6 +108,19 @@ def write_config(run_dir: Path, *, model: str, base_url: str, system_prompt: str
             }
         },
     }
+    if video_context is not None:
+        config["provider"][PROVIDER]["models"][model].update(
+            modalities={"input": ["text", "image"], "output": ["text"]}, attachment=True)
+        config["mcp"]["perception"] = {
+            "type": "local", "enabled": True, "timeout": 120000,
+            "command": ["/opt/venv/bin/python", "-m", "agent_harness.perception.server",
+                        "--context-root", video_context, "--evidence-root", f"{DOCKER_RUN_DIR}/perception"],
+        }
+        config["agent"][AGENT]["tools"]["perception_*"] = True
+        config["agent"][AGENT]["permission"]["perception_*"] = "allow"
+        if audio:
+            config["mcp"]["perception"]["command"] += ["--asr-model", DOCKER_ASR_MODEL]
+            config["mcp"]["perception"]["timeout"] = 360000
     path = run_dir / "opencode.json"
     path.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
@@ -202,6 +221,14 @@ def parse_events(lines: Iterable[str]) -> dict[str, Any]:
                 "advice": [a.get("kind") for a in (body.get("advice") or []) if isinstance(a, dict)],
                 "elapsed_s": elapsed,
             })
+            if name.startswith("perception_"):
+                # Keep provenance in normalized traces; binary attachments remain
+                # in the raw event stream and in the run's evidence directory.
+                tool_events[-1]["evidence"] = {key: body[key] for key in (
+                    "source_path", "source_sha256", "duration_s", "has_audio", "frames", "coverage",
+                    "observation_id", "path", "evidence", "transcript_id", "clip_start_s", "clip_end_s",
+                    "audio_stream", "audio_bounds", "decoded_duration_s", "audio_sha256", "model_fingerprint", "language", "segments",
+                    "segments_path", "raw_transcript_path", "cache_hit") if key in body}
         elif kind == "text":
             texts.append(str(part.get("text") or ""))
     return {"tool_events": tool_events, "turns": steps, "usage": tokens, "cost_usd": round(cost, 6),
@@ -209,14 +236,21 @@ def parse_events(lines: Iterable[str]) -> dict[str, Any]:
 
 
 def run_opencode(run_dir: Path, *, prompt: str, system_prompt: str, settings: dict[str, str], mounts: dict[Path, str],
-                 image: str = DEFAULT_IMAGE, timeout_s: int = 900, title: str | None = None) -> HostRun:
+                 image: str = DEFAULT_IMAGE, timeout_s: int = 900, title: str | None = None,
+                 video_context: str | None = None, asr_model: Path | None = None) -> HostRun:
     """One ``opencode run`` in a fresh container: ``run_dir`` at /run, each of ``mounts`` read-only, an empty HOME.
 
     The caller renders the framing with container paths (see ``container_path``);
     the backend's workspace and exports land in ``run_dir`` on this side.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_config(run_dir, model=settings["model"], base_url=settings["url"], system_prompt=system_prompt)
+    write_config(run_dir, model=settings["model"], base_url=settings["url"], system_prompt=system_prompt,
+                 video_context=video_context, audio=asr_model is not None)
+    if asr_model is not None:
+        model_root = asr_model.resolve(strict=True)
+        if not (model_root / "manifest.json").is_file():
+            raise ValueError("ASR model needs a prepared local directory containing manifest.json.")
+        mounts = {**mounts, model_root: DOCKER_ASR_MODEL}
     home = Path(tempfile.mkdtemp(prefix="intentum-opencode-home-"))  # mounted as the container's empty HOME and cwd
     container = f"intentum-{run_dir.parent.name}-{run_dir.name}-{int(time.time())}"
     command = docker_command(image=image, name=container, run_dir=run_dir, home_dir=home, mounts=mounts,

@@ -20,7 +20,7 @@ measurements below are comparable across the move.
   under `runs/<task>/agent/` and neither layer touches the other's directory.
 - `agent.py` — the same tool surface driven by a real model, through OpenCode in
   a container (`--host opencode`, the default, MADR 0011: the image from
-  `../../hosts/opencode.Dockerfile`, only the `backend_*` MCP tools enabled) or
+  `../../hosts/opencode.Dockerfile`, `backend_*` tools plus opt-in video perception) or
   through the in-process reference loop (`--host loop`); runs land under
   `runs/<task>/<host>-<declaration>/` with the host's event stream: a
   thin OpenAI-compatible agent loop with no SQL and no dialect rules in the
@@ -47,6 +47,10 @@ Four public-reference tasks whose answers come from structured sources alone:
 | `task_127` | maximum respiration for a patient on one day | json sources; a day filter on a timestamp that the source stores as text |
 | `task_329` | daily maximum enteral formula volume for a patient | derive a day key, then aggregate twice through two managed datasets |
 
+The first video-dependent task is `task_312`: read the total-assets admission
+condition from a system briefing, then return the matching records' foreign
+exchange, monetary gold and other foreign assets. Its first run is below.
+
 ## Current prompt conditions · declaration review added 2026-09-09
 
 After the rounds below, the shared MCP instructions, `declare_output` tool
@@ -63,6 +67,181 @@ the first measurement of this addition; earlier rounds used the earlier
 wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
+
+## 2026-09-10 · offline audio integration on the task_312 video
+
+The optional `--asr-model` path now exposes `transcribe_audio` beside the
+frame tools. This check transcribed the video and imported the segments;
+it did **not** solve or rescore the task. The prior frame-only result below
+is unchanged.
+
+The user supplied existing weights under
+`the locally supplied champion ASR weights directory`.
+Both `medium` and `tiny` were copied to `.cache/asr/champion/`, with all four
+files per model SHA256-verified and the source directories untouched. The
+audio check used the copied `medium`; `tiny` was copied but not measured.
+An earlier independent download had already finished when the user supplied
+this path; that downloaded copy was not used for the measurement. Local
+model manifests retain the actual source path and file hashes, without
+asserting an upstream revision that the supplied files did not identify.
+
+| Measurement | Result |
+|---|---|
+| ASR | faster-whisper 1.2.1, CTranslate2 4.8.2, ONNX Runtime 1.29.0 |
+| Execution | CPU/int8, four threads, beam 5, temperature 0, VAD and word timestamps |
+| Model file SHA256 | `9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae` |
+| Processed interval | 0–77.466667 s, audio track 0 |
+| Detected language | `zh`; language probability about 0.99975, not transcription accuracy |
+| Transcript | 12 segments, spanning 0–76.35 s |
+| ASR tool time / complete host time | 23.75 s / 40.2 s |
+| Host | OpenCode 1.18.26 with configured Qwen; 4 model steps, 3 tool calls |
+| Backend import | `briefing_transcript`, 12 rows and 14 provenance/text columns |
+
+The host prompt asked it to transcribe all speech, import the returned
+segment JSON, and report language, segment count and a short timed excerpt.
+It called `inspect_video`, `transcribe_audio`, then `import_dataset`.
+The model and gateway did not receive audio for recognition: the local
+worker returned text through MCP. No task question, schema, initial prompt
+or gold answer was passed to ASR. Input source SHA256 remained
+`743a6bcb03361ea0720d9c7297fb52e032a2934f7e4761b181b719bb6b01dbcc`.
+
+This exposes recognizer limitations as well as the transport working. Later
+segments include `自斷`/`自断` where the visible UI refers to fields, and
+`對列` where the context concerns a queue. Text was retained as recognized,
+including mixed traditional/simplified characters. The narrator describes
+navigation and configuration steps; this transcript alone does not supply
+the numeric admission threshold shown on screen. There is no measured word
+error rate or claim that speech can replace visual evidence. Segment ids can
+now be cited in `record_observation`, with an explicit reason for revisions,
+without modifying raw ASR.
+
+Validation additionally ran with container networking disabled: a real
+28–40 s clip produced two segments at 28.05–33.21 and 33.63–38.37 s, confirming
+nonzero clip offsets reach the structured MCP result. A synthetic silent
+clip produced no segments and no invented import table. Real FFmpeg tests
+cover selection of the second of two audio tracks, a delayed track, and a
+nonzero video timestamp origin. All 12 perception tests passed in the
+container; the repository suite passed 259 tests, skipping only the two
+FFmpeg tests on the machine. Final checks made MCP responses expose typed
+structured content as well as their JSON text.
+
+Source: `0cc41c3` plus outcome `2026-09-10-0735-sd88`. The first host check
+used image `intentum-opencode:1.18.26-audio-sd88`, id
+`sha256:a5df6fb729dcb7bb64f0fd551881f95afbfc48d072a733d457c44c3655cd198b`.
+Its raw ASR record includes the recognition options, runtime versions,
+model manifest and reader/worker source hashes. Local artifacts:
+
+- `runs/task_312/audio-host-20260910-sd88/host_result.json` and
+  `run/events.jsonl`, with transcript records and imported workspace under `run/`.
+- `runs/task_312/audio-offline-20260910-sd88/checks.json`, raw clip/silence
+  results and their saved WAV evidence.
+
+See `../../perception/README.md` for preparation, tools, limits and the
+`--video --asr-model .cache/asr/champion/medium` invocation. Runtime model
+downloads are disabled, weights stay outside the image and wheel, and the
+backend has no ASR dependency or recognition logic.
+
+## 2026-09-10 · first video-frame run, task_312
+
+One run passed the official evaluator: **242 rows, 3 columns**, and 1.0 from
+the champion comparison scorer. The same configured model,
+`qwen/qwen3.5-35b-a3b` through `the configured OpenAI-compatible gateway`, read the
+video images and drove the existing backend. No second model was introduced.
+
+The new `--video` option enables three harness MCP tools:
+`inspect_video`, `read_video_frames` and `record_observation`. FFmpeg decodes
+frames; the host model interprets their pixels. Each frame records the input
+SHA256, requested position, actual presentation timestamp and image SHA256.
+Observations are separate, importable JSON records that cite returned frame
+ids. A revision names `supersedes` and a reason; it does not replace the old
+record. The model is instructed to import an observation through the backend
+before using its condition. These tools contain no benchmark fields, thresholds
+or query rules. The backend is unchanged, and the perception package remains
+outside its wheel.
+
+OpenCode 1.18.26's custom-model config needs explicit image input modalities;
+without them image capability defaults to false ([pinned provider source](https://github.com/anomalyco/opencode/blob/v1.18.26/packages/opencode/src/provider/provider.ts#L1429)).
+The image was rebuilt with FFmpeg 5.1.9 and the harness reader. Builtin shell,
+read and write tools remain disabled. Only this task's context is mounted for
+the video run; reference answers are not available inside the container.
+All 15 context files matched the public release's `checksums.sha256` before
+the run. Reference output was inspected only after the model had stopped.
+
+A separate visual probe first generated a random six-digit code as video
+pixels. The expected answer was absent from the model prompt, tool text and
+mounted filenames. The model called `read_video_frames`, returned the exact
+code, and stopped after 2 model steps in 7.8 s. This exercises MCP image
+content through the actual OpenCode host and configured gateway, rather than
+assuming compatibility from the model's advertised capabilities.
+
+| Measurement | Result |
+|---|---|
+| Model steps / tool calls | 13 / 12 |
+| Elapsed model-host time | 69.8 s |
+| Tokens, input / output / reasoning | 329,829 / 948 / 1,044 |
+| Official / comparison score | passed / 1.0 |
+| Backend integrity | clean |
+| Refusals / unadvised | 2 / 0 |
+| Video | 1280 × 720, about 77.5 s, with an audio track |
+| Frames actually read | 0, 10, 20, 30, 40 and 50 s; requested at 1920 px |
+| Recorded / imported observations | 0 / 0 |
+
+The 30 s frame shows three configurations: archived thresholds `> 50` and
+`> 20`, and `TotalAssets > 10`, unit `亿元`, marked currently effective.
+The agent used `TotalAssets > 10`, selected `Forex`, `MoneyAndGold` and
+`OtherForeignAssets`, and exported all 242 matching rows. The result's correct
+values and shape passed both scorers. OpenCode's cost field is zero because
+this custom provider is unpriced in its config; that is not a free-run claim.
+
+Two gaps remain visible even though the answer passed. First, the model did
+not call `record_observation` or import an observation. The raw images,
+timestamps and subsequent filter survive in the run, but the intended
+explicit, revisable observation has no backend record. Second, it declared
+`one_per: [id]` after a preview that had already dropped `id`; export refused
+the missing organizing column. It then attempted unsupported cardinality
+`242`, received advice, and amended to `at_least_one`. Its reason said the
+question did not request `id`, which does not distinguish carrying a column
+from using it to organize rows. This is an amendment following a dataset
+mismatch, not evidence that the declaration review happened independently.
+
+The model also left the last 27.5 s unsampled. No speech was transcribed;
+audio-only conditions and brief changes between samples are untested. This
+single passing task establishes the visual input path and one answer, not
+general video readiness or adherence to the evidence protocol. No prompt or
+query was tuned to the reference answer, and no second task run was used to
+hide the skipped observation step.
+
+Source: base `cb09bef` plus outcome `2026-09-10-0707-x3nb`. The run directory
+contains `source_manifest.json` (measured Python files and build inputs),
+`input_manifest.json`, and `evidence_review.json`. The exact image id was
+`sha256:36b1be01142d5a27dd2d799a2972d64d4d420eda7a40be45f3160167cc202c26`.
+Local, gitignored artifacts:
+
+- `runs/vision-probe-20260910-x3nb/probe_result.json`, with its own raw host trace.
+- `runs/task_312/opencode-video-20260910-x3nb/agent_summary.json`.
+- `runs/task_312/opencode-video-20260910-x3nb/run_1/`: actual prompt and
+  config, `events.jsonl` including image attachments, `run_result.json`,
+  `perception/frames/`, prediction and official evaluation summary.
+
+Reproduce with a fresh absolute output directory (the task runner replaces
+an existing `run_1`; the probe refuses an existing directory):
+
+```sh
+docker build -f agent_harness/hosts/opencode.Dockerfile -t intentum-opencode:video .
+uv run python -m agent_harness.hosts.vision_probe \
+  --image intentum-opencode:video --out /tmp/intentum-vision-probe-new
+uv run python -m agent_harness.scenarios.dataspace.agent \
+  --task task_312 --runs 1 --host opencode --video \
+  --image intentum-opencode:video --out /tmp/intentum-task-312-new
+```
+
+Preparation: Docker, the benchmark and configured gateway credentials, plus
+a model and gateway that pass the visual probe. FFmpeg is installed inside
+the image; no host video library or downloaded OCR/ASR weights are needed.
+`--video` is rejected for the text-only reference loop. Checks: 252 repository
+tests passed, with the real-FFmpeg test skipped on the machine; all 5 reader
+tests passed inside a disposable container, including actual frame decoding
+and the requested 0.3 s → actual 0.5 s timestamp check on a 4 fps fixture.
 
 ## 2026-09-10, seventh round · the Claude family, fable-5.1, opus-5 and sonnet-5, with gpt-6-astra, and the two families side by side
 

@@ -8,6 +8,9 @@ what it extracts reaches the backend only through ``import_dataset`` (a table
 the agent chose to make) or ``attach_metadata`` (a document the agent chose
 to trust), so the backend records it as a fresh agent output with provenance.
 
-No reader exists yet. The first one is chosen by the next measured scenario
-task that needs it.
+The opt-in video reader decodes timestamped frames with FFmpeg; the host model
+interprets their images and saves its observations with explicit frame references.
+Optional audio tools run a separately configured offline Whisper model in a
+bounded subprocess. Speech segments and agent observations retain source,
+model and timestamp provenance; the backend never loads the recognizer.
 """

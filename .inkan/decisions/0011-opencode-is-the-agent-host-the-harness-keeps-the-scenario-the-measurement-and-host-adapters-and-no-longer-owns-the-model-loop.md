@@ -63,3 +63,15 @@ The container is the only OpenCode host (outcome 2026-09-02-007): the machine-ho
 Status: Accepted → Accepted
 
 Reconciled with outcome 2026-09-02-007: OpenCode is now container-only because it discovers instruction files from working and configuration directory ancestry; the machine-host path was removed while the in-process loop remains the control arm.
+
+### 2026-09-10T07:21:00.696Z, outcome 2026-09-10-0707-x3nb
+
+Status: accepted -> accepted
+
+Outcome 2026-09-10-0707-x3nb activates the reserved MCP perception path with an opt-in --video flag: OpenCode still owns the model loop and interpretation, the harness supplies deterministic timestamped images, and builtin tools remain disabled. A random visual-code probe verified image delivery through the configured model and gateway before one task_312 run; audio transcription remains outside this reader.
+
+### 2026-09-10T07:55:13.247Z, outcome 2026-09-10-0735-sd88
+
+Status: accepted -> accepted
+
+Outcome 2026-09-10-0735-sd88 adds an optional read-only ASR model mount to the existing OpenCode perception server. The host keeps its loop and receives timestamped text through MCP, without requiring audio input on the chat model. A task_312 audio-only integration called inspection, offline transcription and backend import; this is not another task-score measurement.
