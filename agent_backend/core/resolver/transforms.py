@@ -52,6 +52,11 @@ _AGG_ALIASES = {
 }
 # A text measure that is really an aggregate call: "max(amount) as peak", "sum(x)".
 _MEASURE_EXPRESSION_RE = re.compile(r"\w+\s*\(|\s+as\s+", re.IGNORECASE)
+
+
+def _looks_like_expression_text(text: str) -> bool:
+    """Whether a derive text computes something (operators, a call, a literal) rather than naming one thing."""
+    return bool(re.search(r"[()+\-*/%<>=']|\s+as\s+|\bis\b|\band\b|\bor\b|\bnot\b|\bin\b", text, re.IGNORECASE))
 _STEP_TYPE_ALIASES = {
     "select": "select", "project": "select", "columns": "select", "keep": "select",
     "filter": "filter", "where": "filter",
@@ -657,6 +662,8 @@ class TransformResolver:
             raise InvalidTransformError(
                 'derive needs a name and an expression, e.g. {"type": "derive", "name": "total", "expression": "quantity * unit_price"}.',
                 field=where,
+                details={"received": raw, "shape": {"name": "total", "expression": "quantity * unit_price"},
+                         "available": scope.names()},
             )
         steps: list[Step] = []
         for derived_name, derived_expression in pairs:
@@ -702,9 +709,15 @@ class TransformResolver:
                         raise InvalidTransformError(
                             f"derive names the result twice: {name!r} and {alias!r}.", field=where)
         if not isinstance(name, str) or not name.strip() or expression is None:
+            # A bare name reaches here as the expression with no name: what was received is the name alone.
+            received = {"name": name, "expression": expression}
+            if name is None and isinstance(expression, str) and expression.strip() and not _looks_like_expression_text(expression):
+                received = {"name": expression.strip(), "expression": None}
             raise InvalidTransformError(
                 'derive needs a name and an expression, e.g. {"type": "derive", "name": "total", "expression": "quantity * unit_price"}.',
                 field=where,
+                details={"received": received, "shape": {"name": "total", "expression": "quantity * unit_price"},
+                         "available": scope.names()},
             )
         if expr is None:
             expr = self.expressions.resolve(expression, scope, field=where, notes=notes)

@@ -113,3 +113,21 @@ def test_version_drift_is_detected_by_validator(backend, orders):
     ir_dict["source"]["version"] = 2
     with pytest.raises(InvalidStateError):
         backend.validator.validate_transform(TransformIR.model_validate(ir_dict))
+
+
+def test_concurrent_operations_from_threads_never_fail_internally(backend, orders):
+    """One agent may call several tools in one step; the backend shares one SQLite and one DuckDB connection."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def work(i: int) -> dict:
+        if i % 3 == 0:
+            return backend.describe_dataset("orders", sample_rows=5)
+        if i % 3 == 1:
+            return backend.transform_dataset("orders", {"filter": f"order_id > {1000 + i % 7}", "limit": 5})
+        return backend.list_datasets()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(pool.map(work, range(120)))
+    codes = [r.get("code") for r in responses if r["status"] != "success"]
+    assert not codes, codes
+    assert backend.integrity_report()["ok"] is True

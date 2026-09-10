@@ -15,6 +15,7 @@ import json
 import os
 import re
 import stat
+import threading
 from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -137,38 +138,51 @@ def _advise(err: BackendError) -> None:
 
 
 def semantic_operation(action: str):
-    """Wrap a backend method: access check, advice on refusal, structured error rendering."""
+    """Wrap a backend method: one operation at a time, access check, advice on refusal, structured error rendering.
+
+    Operations are serialized on the backend's lock. An agent may send several
+    tool calls in one step and the MCP server runs them on worker threads, while
+    the backend holds one SQLite connection and one DuckDB connection, neither
+    of which tolerates concurrent use. The lock is re-entrant so an operation
+    may call another.
+    """
 
     def decorator(fn):
         signature = inspect.signature(fn)
 
         @functools.wraps(fn)
         def wrapper(self: "Backend", *args: Any, **kwargs: Any) -> dict[str, Any]:
-            principal = kwargs.get("principal")
-            token = _CURRENT_CALL.set((action, _written_arguments(signature, args, kwargs)))
-            try:
-                self.policy.check(principal, action, {"args": _jsonable(kwargs)})
-                return fn(self, *args, **kwargs)
-            except BackendError as err:
-                _advise(err)
-                log_event("operation.error", code=str(err.code), message=err.message, field=err.field, action=action,
-                          advice=[getattr(a, "kind", None) for a in err.advice])
-                return err.to_response()
-            except ValidationError as err:
-                log_event("operation.error", code="INVALID_INTENT", message=str(err), action=action)
-                return InvalidIntentError(
-                    "The request did not match the expected shape.",
-                    details={"errors": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in err.errors()]},
-                ).to_response()
-            except Exception as err:  # pragma: no cover - defensive
-                log_event("operation.error", code="INTERNAL", message=repr(err), action=action)
-                return BackendError(f"Internal error: {err!r}", code=ErrorCode.INTERNAL, recoverable=False).to_response()
-            finally:
-                _CURRENT_CALL.reset(token)
+            with self._lock:
+                return _run_operation(self, fn, signature, action, args, kwargs)
 
         return wrapper
 
     return decorator
+
+
+def _run_operation(self: "Backend", fn, signature: inspect.Signature, action: str, args: tuple[Any, ...],
+                   kwargs: dict[str, Any]) -> dict[str, Any]:
+    principal = kwargs.get("principal")
+    token = _CURRENT_CALL.set((action, _written_arguments(signature, args, kwargs)))
+    try:
+        self.policy.check(principal, action, {"args": _jsonable(kwargs)})
+        return fn(self, *args, **kwargs)
+    except BackendError as err:
+        _advise(err)
+        log_event("operation.error", code=str(err.code), message=err.message, field=err.field, action=action,
+                  advice=[getattr(a, "kind", None) for a in err.advice])
+        return err.to_response()
+    except ValidationError as err:
+        log_event("operation.error", code="INVALID_INTENT", message=str(err), action=action)
+        return InvalidIntentError(
+            "The request did not match the expected shape.",
+            details={"errors": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in err.errors()]},
+        ).to_response()
+    except Exception as err:  # pragma: no cover - defensive
+        log_event("operation.error", code="INTERNAL", message=repr(err), action=action)
+        return BackendError(f"Internal error: {err!r}", code=ErrorCode.INTERNAL, recoverable=False).to_response()
+    finally:
+        _CURRENT_CALL.reset(token)
 
 
 @dataclass
@@ -202,6 +216,7 @@ class Backend:
         engine: AnalyticsEngine | None = None,
         export_root: str | Path | None = None,
     ) -> None:
+        self._lock = threading.RLock()  # one semantic operation at a time; see semantic_operation
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
         # Files may only be exported under this directory; None disables the guard (library use).
         self.export_root = Path(export_root).expanduser().resolve() if export_root is not None else None

@@ -315,7 +315,9 @@ document, media file or unsupported format where a dataset is expected
 artifact has (the one that exists), an export onto an existing file (the same
 call with `overwrite`, and that the earlier file is not kept), a
 materialization name another request already produced (what is there, and the
-two ways on), a declaration
+two ways on), a derive with a name and nothing to compute (what derive is for,
+and that a value across rows is an aggregate step, then a semi_join or a sort
+and limit), a declaration
 without `rows` or with a malformed `order_by` (the grammar), and a contract
 mismatch at export (the reshape and the export). A field that is simply not in
 scope is explained with the scope and never rewritten from a look-alike name.
@@ -658,9 +660,14 @@ imports in ~2 s and the task's query runs through the semantic steps.
    after a `needs_resolution` round-trip so the same reference resolves next time.
 6. **Richer semantic layer**: user-defined metrics (`revenue := sum(amount)`),
    column-level lineage, unit/currency metadata used by the type rules.
-7. **Concurrency**: the SQLite store uses `BEGIN IMMEDIATE` and DuckDB runs
-   single-process; multi-writer deployments need a server-side queue or
-   PostgreSQL advisory locks around materialization.
+7. **Concurrency**: within one process, semantic operations are serialized on
+   the backend's re-entrant lock, because an agent may send several tool
+   calls in one step and the MCP server runs them on worker threads while the
+   backend holds one SQLite connection and one DuckDB connection (the first
+   model that called tools in parallel, `gpt-5.6-luna` on 2026-09-10, hit an
+   `InterfaceError` before this). The SQLite store uses `BEGIN IMMEDIATE` and
+   DuckDB runs single-process; multi-writer deployments need a server-side
+   queue or PostgreSQL advisory locks around materialization.
 8. **Protocol-level input errors**: the loose-shaped arguments of the
    transform tools (`source`, `transform`) are typed loosely at the MCP layer
    so that a JSON string or a relation written there reaches the backend and

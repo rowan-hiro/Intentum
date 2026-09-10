@@ -1142,6 +1142,30 @@ def _file_exists(err: BackendError, tool: str, arguments: dict[str, Any]) -> Adv
     return Advice("file_exists", explanation, rewrite=[call("export_result", **same, overwrite=True)])
 
 
+_ACROSS_ROWS_RE = re.compile(r"^(max|min|latest|last|first|earliest|total|sum|count|avg|mean|average)[_\s]?", re.IGNORECASE)
+
+
+def _derive_without_expression(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A derive with a name and nothing to compute: what derive is for, and where a value across rows lives."""
+    if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(err.details.get("shape"), dict):
+        return None
+    received = err.details.get("received")
+    name = received.get("name") if isinstance(received, dict) else None
+    available = list(err.details.get("available") or [])
+    text = (f"derive computes one value per row from an expression over the fields at this step "
+            f"({', '.join(available) if available else 'none'}), as {{\"name\": \"total\", \"expression\": "
+            f"\"quantity * unit_price\"}}; ")
+    text += f"{name!r} names a result but gives nothing to compute. " if isinstance(name, str) else "nothing to compute was given. "
+    text += ("A value across rows, such as a maximum, a latest time or a count, is not a derive: it is an aggregate step, "
+             "{\"aggregate\": {\"measures\": [{\"function\": \"max\", \"field\": \"time\", \"alias\": \"max_time\"}]}}. "
+             "To keep the rows at that maximum, materialize the aggregate and semi_join the source on it "
+             "({\"semi_join\": {\"right\": \"peak\", \"on\": {\"time\": \"max_time\"}}}), or sort by the field "
+             "descending and limit when one row is enough.")
+    if isinstance(name, str) and _ACROSS_ROWS_RE.match(name):
+        text += f" The name {name!r} reads like such a value."
+    return Advice("derive_without_expression", text)
+
+
 def _name_taken(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """A materialization name that another request already produced: what is there, and the two ways on."""
     if err.code != ErrorCode.CONFLICT or err.field != "name" or not isinstance(err.details.get("existing"), dict):
@@ -1216,6 +1240,7 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_document_not_found, ("attach_metadata",), False),
     (_file_exists, ("export_result",), False),
     (_name_taken, _TRANSFORM_TOOLS, False),
+    (_derive_without_expression, _TRANSFORM_TOOLS, False),
     (_field_not_in_scope, _TRANSFORM_TOOLS, True),
 ]
 

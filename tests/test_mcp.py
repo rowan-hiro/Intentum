@@ -84,3 +84,21 @@ def test_a_loose_argument_is_refused_by_the_backend_with_advice_not_by_the_sdk(s
     assert joined["advice"][0]["kind"] == "source_as_dataset" and joined["advice"][0]["rewrite"][0]["arguments"]["source"] == "orders"
     parsed = call(server, "transform_dataset", source="orders", transform='{"limit": 1}')  # valid JSON text is pre-parsed
     assert parsed["status"] == "success"
+
+
+def test_parallel_tool_calls_through_the_server_never_fail_internally(server):
+    """An agent that calls several tools in one step: the SDK runs the handlers on worker threads."""
+    assert call(server, "import_dataset", path=str(ORDERS_CSV))["status"] == "success"
+
+    async def burst():
+        calls = []
+        for i in range(30):
+            if i % 2:
+                calls.append(server.call_tool("describe_dataset", {"dataset": "orders", "sample_rows": 3}))
+            else:
+                calls.append(server.call_tool("transform_dataset", {"source": "orders", "transform": {"limit": 2}}))
+        return await asyncio.gather(*calls)
+
+    results = asyncio.run(burst())
+    bodies = [r.structured_content for r in results]
+    assert all(b is not None and b["status"] == "success" for b in bodies), [b for b in bodies if not b or b["status"] != "success"]
