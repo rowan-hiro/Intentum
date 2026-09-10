@@ -64,6 +64,151 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-10, sixth round · the gpt-5.6 family, sol, terra and luna, on `c3205af`
+
+**Official verdicts on `task_44` and `task_329`: gpt-5.6-sol 3/3 and 1/3,
+gpt-5.6-terra 3/3 and 2/3, gpt-5.6-luna 2/3 and 3/3.** The three tiers move
+alike through the tool surface: eight to twelve steps, eight to fourteen calls,
+almost no language refusals, and prompt tokens between about 55k and 110k per run.
+What separates them is not the language but the price and, on `task_329`, a
+reading that goes one way or the other on each run: every failed `task_329`
+run at every tier declared the day key as a carried column beside the value,
+and every passing run declared the value alone with the key under `one_per`
+and `order_by`. Three runs per cell cannot rank the tiers on that reading;
+across the family it went right in six runs of nine. On `task_44` the only
+miss is luna's third run, which exported the treatments of another timestamp
+(five rows against the gold's four) after declaring the right column.
+
+Conditions: source `c3205af`, image `intentum-opencode:1.18.26` rebuilt before
+the round, ID `sha256:1f9414f1b4ca0b218d5eab02a68f021ef8c24db6ad5b230f51a40c998f1bb7c6`,
+OpenCode 1.18.26, informed declaration framing, three sequential runs per task
+per tier with the runner's defaults and a 900 s timeout, through the same configured
+gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Since the
+fifth round the backend gained the operation lock and the
+`derive_without_expression` detector (`c3205af`); prompt, framing, tool
+descriptions and runner are unchanged. Cost is computed from the recorded
+tokens at OpenAI's official standard prices as published on its pricing page
+on this day, which the gateway lists unchanged: sol $4 / $20 per million input
+/ output with cached input at $0.40, terra $2 / $12 with $0.20, luna $0.20 /
+$1.20 with $0.02; reasoning billed as output; every run stayed under the
+long-context threshold. The whole round comes to about $0.85: sol $0.58, terra
+$0.25, luna $0.03. The fifth round's rows are repeated for comparison.
+
+| round | task | official | mean steps | mean calls | mean prompt tokens (incl. cache) | refusals | unadvised | repair rate | mean elapsed | cost per run | cost per pass |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpt-5.6-sol, this round | `task_44` | 3/3 | 9.7 | 11.0 | 83k | 5 | 1 | 1.00 | 49.8 s | $0.096 | $0.096 |
+| gpt-5.6-terra, this round | `task_44` | 3/3 | 10.3 | 11.3 | 80k | 0 | 0 | n/a | 40.2 s | $0.044 | $0.044 |
+| gpt-5.6-luna, this round | `task_44` | 2/3 | 9.7 | 12.3 | 82k | 0 | 0 | n/a | 40.3 s | $0.005 | $0.007 |
+| gpt-5.6-sol, this round | `task_329` | 1/3 | 9.3 | 8.7 | 87k | 0 | 0 | n/a | 45.3 s | $0.096 | $0.288 |
+| gpt-5.6-terra, this round | `task_329` | 2/3 | 8.7 | 9.3 | 68k | 1 | 1 | 1.00 | 34.0 s | $0.038 | $0.057 |
+| gpt-5.6-luna, this round | `task_329` | 3/3 | 9.7 | 10.0 | 68k | 1 | 0 | 1.00 | 37.5 s | $0.004 | $0.004 |
+| gpt-5.6-luna, fifth round (`d7a7eb5`) | `task_44` | 2/3 | 11.3 | 13.7 | 96k | 0 | 0 | n/a | 45.6 s | $0.006 | $0.008 |
+| gpt-5.6-luna, fifth round (`d7a7eb5`) | `task_329` | 0/3 | 9.7 | 10.0 | 68k | 1 | 1 | 1.00 | 35.5 s | $0.004 | no pass |
+| claude-opus-5, fifth round (`d7a7eb5`) | `task_44` | 3/3 | 11.0 | 11.0 | 143k | 3 | 0 | 0.00 | 61.8 s | $0.201 | $0.201 |
+| claude-opus-5, fifth round (`d7a7eb5`) | `task_329` | 3/3 | 7.3 | 7.3 | 89k | 0 | 0 | n/a | 39.7 s | $0.132 | $0.132 |
+| qwen3.5-35b-a3b, fifth round (`d7a7eb5`) | `task_44` | 2/3 | 19.0 | 18.0 | 330k | 5 | 1 | 1.00 | 76.6 s | $0.061 | $0.092 |
+| qwen3.5-35b-a3b, fifth round (`d7a7eb5`) | `task_329` | 0/3 | 14.3 | 13.3 | 204k | 2 | 0 | 0.50 | 49.9 s | $0.037 | no pass |
+
+Per run. Every declaration stayed at revision 1; no run amended.
+
+| tier | task | run | official | declared columns | declaration step | steps / calls | refusals (unadvised) | repaired | prompt tokens (uncached + cache read) | output tokens | elapsed | cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| sol | `task_44` | 1 | passed | `treatmentname` | 8 | 11 / 11 | 2 (0) | 2/2 | 11,813 + 76,663 | 1,392 | 54.6 s | $0.106 |
+| sol | `task_44` | 2 | passed | `treatmentname` | 7 | 10 / 12 | 2 (1) | 2/2 | 12,051 + 84,531 | 1,401 | 55.9 s | $0.110 |
+| sol | `task_44` | 3 | passed | `procedure` | 5 | 8 / 10 | 1 (0) | 1/1 | 7,394 + 57,322 | 959 | 38.8 s | $0.072 |
+| sol | `task_329` | 1 | failed: extra column | `date, daily_maximum_enteral_formula_volume_bolus_amt_ml` | 6 | 9 / 8 | 0 (0) | 0/0 | 10,252 + 56,972 | 814 | 41.9 s | $0.080 |
+| sol | `task_329` | 2 | passed | `daily_maximum_amount_ml` | 6 | 9 / 8 | 0 (0) | 0/0 | 10,527 + 72,305 | 1,099 | 47.5 s | $0.093 |
+| sol | `task_329` | 3 | failed: extra column | `date, daily_maximum_amount_of_enteral_formula_volume_bolus_amt_ml` | 5 | 10 / 10 | 0 (0) | 0/0 | 12,704 + 98,833 | 1,229 | 46.4 s | $0.115 |
+| terra | `task_44` | 1 | passed | `treatmentname` | 8 | 11 / 12 | 0 (0) | 0/0 | 10,276 + 72,458 | 1,143 | 41.1 s | $0.049 |
+| terra | `task_44` | 2 | passed | `treatmentname` | 7 | 10 / 11 | 0 (0) | 0/0 | 7,091 + 73,510 | 1,172 | 40.5 s | $0.043 |
+| terra | `task_44` | 3 | passed | `treatmentname` | 7 | 10 / 11 | 0 (0) | 0/0 | 6,352 + 69,320 | 1,194 | 39.0 s | $0.041 |
+| terra | `task_329` | 1 | failed: extra column | `date, maximum_enteral_formula_volume_bolus_amt_ml` | 5 | 8 / 9 | 0 (0) | 0/0 | 9,587 + 49,211 | 865 | 32.1 s | $0.039 |
+| terra | `task_329` | 2 | passed | `maximum_enteral_formula_volume_bolus_amt_ml` | 6 | 10 / 10 | 1 (1) | 1/1 | 6,871 + 74,391 | 1,045 | 39.3 s | $0.041 |
+| terra | `task_329` | 3 | passed | `daily_maximum_enteral_formula_volume_bolus_amt_ml` | 5 | 8 / 9 | 0 (0) | 0/0 | 6,294 + 56,526 | 860 | 30.6 s | $0.034 |
+| luna | `task_44` | 1 | passed | `treatmentname` | 6 | 10 / 11 | 0 (0) | 0/0 | 10,668 + 69,538 | 1,459 | 41.6 s | $0.005 |
+| luna | `task_44` | 2 | passed | `treatmentname` | 6 | 9 / 12 | 0 (0) | 0/0 | 8,280 + 66,466 | 1,516 | 39.8 s | $0.005 |
+| luna | `task_44` | 3 | failed: wrong rows | `treatmentname` | 6 | 10 / 14 | 0 (0) | 0/0 | 8,489 + 83,243 | 1,250 | 39.4 s | $0.005 |
+| luna | `task_329` | 1 | passed | `max_enteral_formula_volume_bolus_amt_ml` | 5 | 8 / 9 | 0 (0) | 0/0 | 9,502 + 49,383 | 1,017 | 33.2 s | $0.004 |
+| luna | `task_329` | 2 | passed | `daily_max_enteral_formula_volume_bolus_amt_ml` | 6 | 9 / 8 | 0 (0) | 0/0 | 4,415 + 51,687 | 834 | 32.5 s | $0.003 |
+| luna | `task_329` | 3 | passed | `daily_max_amount_ml` | 8 | 12 / 13 | 1 (0) | 1/1 | 6,134 + 82,692 | 1,254 | 46.9 s | $0.004 |
+
+What the refusals were, and what followed:
+
+- sol is the one tier that reached for a join on `task_44`, in every run:
+  `cost` filtered to the patient, joined to `treatment` on `eventid` to
+  `treatmentid`, then `treatmentid` selected. Each time the join refused with
+  `join_scope_names` (the right key is not copied after a join) and the very
+  next call used the advised shape and succeeded; run 1 also met
+  `join_on_as_mapping` first and took that. This is the detector written for
+  qwen's four duplicate-field refusals of the third round, taken by a
+  different model on the first try, three times out of three.
+- luna's `task_329` run 3 wrote `uniquepid contains '033-22108'`, was refused
+  with `function_as_infix`, and its next call was the rewrite verbatim,
+  `contains(uniquepid, '033-22108')`.
+- Two refusals carried no advice, both new shapes. terra's `task_329` run 2
+  emitted stray non-Latin characters after a closing quote
+  (`... amt (ml)'ીલ`), a generation glitch; the parser refused with
+  "Unexpected character" and nothing else, and the model corrected itself on
+  the next call. sol's `task_44` run 2 wrote `lower(eventtype) contains
+  'treat'`: the infix detector matches a bare field on the left, not a call,
+  so this one was refused bare; the model went another way and passed. Both
+  are detector work for a follow-up: strip a trailing non-token run when the
+  expression parses without it, and accept a call on the left of an infix
+  function.
+- No run of any tier met `field_not_in_scope`, `measure_needs_field`,
+  `aggregate_body_misplaced`, `compare_literal_type` or `document_as_dataset`:
+  the shapes qwen and opus produced did not occur here.
+
+The `task_329` reading. Every failure at every tier is the same one the
+earlier rounds recorded for qwen and for luna's fifth round: the day key named
+under `columns` as well as under `one_per` and `order_by`, the both-lists
+sentence returned, the declaration kept. The passing runs at every tier named
+the value alone. luna went 0/3 on the fifth round and 3/3 here with the same
+prompt, framing and tool descriptions; the backend changed only by the
+operation lock and a detector that never fired for it. Nothing in the records
+explains the swing, and three runs cannot: at a per-run rate near one half,
+either extreme comes up one time in eight. The honest number for luna on
+`task_329` is three passes in six runs across the two rounds, and for the
+family this round six in nine. Which way a run goes is decided at the
+declaration, in one step, before any refusal; it is the harness's question,
+not the language's.
+
+Cost. At OpenAI's prices a pass on `task_44` costs $0.096 with sol, $0.044
+with terra and $0.007 with luna; on `task_329`, $0.288, $0.057 and $0.004.
+Against the fifth round, opus at $0.201 and $0.132 per pass remains the only
+model that passed `task_329` every time, and qwen at $0.092 per `task_44` pass
+never passed `task_329`. Within the family sol and terra cost twenty and ten
+times luna's price per token and took the same number of steps, so the
+price shows up as a twentyfold and tenfold cost per run with no pass to show
+for it on this sample. What a stronger tier bought here was a wider reach for
+the language (sol's joins), not a better reading of the deliverable.
+
+Raw runs are retained under `runs/<task>/opencode-informed-gpt-5.6-<tier>-20260910-1343/`
+for `sol`, `terra` and `luna`, each with `agent_summary.json` and three run
+directories. Earlier rounds' directories are untouched. Commands used, after
+rebuilding the image:
+
+```sh
+docker build -f agent_harness/hosts/opencode.Dockerfile --build-arg OPENCODE_VERSION=1.18.26 -t intentum-opencode:1.18.26 .
+for TIER in sol terra luna; do
+  for TASK in task_44 task_329; do
+    DEFAULT_MODEL_NAME=openai/gpt-5.6-$TIER PYTHONUNBUFFERED=1 .venv/bin/python -m agent_harness.scenarios.dataspace.agent --task $TASK --runs 3 \
+      --out agent_harness/scenarios/dataspace/runs/$TASK/opencode-informed-gpt-5.6-$TIER-20260910-1343
+  done
+done
+```
+
+Three runs per cell and two tasks cannot rank three tiers of one family, and
+a 1/3 against a 3/3 on `task_329` is within what a coin decides. What the
+round establishes: the three tiers use the backend's language equally well
+and equally cheaply in steps; the price difference between them is not
+returned as passes on these two tasks; the new detectors are taken by models
+that never saw the refusals they were written from; and the one failure that
+matters, carrying the organizing key into the file, occurs at every tier and
+at every price. The next question is the harness's: what in the framing or
+the declaration exchange turns that reading, measured on more than three
+runs per cell.
+
 ## 2026-09-10, fifth round · three models on the source that closed the MADR 0010 gap (`d7a7eb5`)
 
 **Official verdicts: `qwen/qwen3.5-35b-a3b` 2/3 and 0/3, `anthropic/claude-opus-5`
