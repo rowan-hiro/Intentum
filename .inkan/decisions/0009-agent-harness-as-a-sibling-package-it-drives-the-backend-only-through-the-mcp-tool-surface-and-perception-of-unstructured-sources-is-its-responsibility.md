@@ -60,3 +60,9 @@ Partly superseded by 0011: the harness no longer owns the model loop; OpenCode r
 Status: accepted -> accepted
 
 The restricted host now needs a video reader. Outcome 2026-09-10-0707-x3nb adds deterministic FFmpeg frame tools and separately saved, revisable agent observations under agent_harness/perception; the backend and wheel boundary are unchanged. The first task_312 run passed its scorer but did not save or import an observation, so compliance with that boundary workflow remains a measured gap.
+
+### 2026-09-10T07:55:13.157Z, outcome 2026-09-10-0735-sd88
+
+Status: accepted -> accepted
+
+Outcome 2026-09-10-0735-sd88 extends harness perception to offline speech transcription. FFmpeg extracts bounded, timestamp-aligned clips; a separately configured local Whisper worker supplies attributed transcript segments. The host imports the segment JSON through the public MCP surface, and frame or segment evidence can support explicitly revised observations. No backend logic or wheel dependency changed. User-supplied medium and tiny weights were copied and verified; the medium model drove the audio check.

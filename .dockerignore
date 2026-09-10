@@ -4,6 +4,7 @@
 .seal
 .claude
 .env
+.cache
 agent_harness/*
 !agent_harness/__init__.py
 !agent_harness/perception

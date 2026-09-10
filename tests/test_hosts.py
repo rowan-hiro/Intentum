@@ -118,3 +118,15 @@ def test_video_evidence_is_retained_without_binary_in_normalized_events():
     assert event["tool"] == "perception_read_video_frames" and event["status"] == "success"
     assert event["evidence"]["frames"] == body["frames"]
     assert "base64" not in json.dumps(event)
+
+
+def test_audio_config_uses_local_asr_without_requiring_an_audio_capable_chat_model(tmp_path):
+    import pytest
+    options = dict(model="vision-model", base_url="https://gateway.example", system_prompt="Read evidence.")
+    with pytest.raises(ValueError, match="scoped video context"):
+        write_config(tmp_path, **options, audio=True)
+    config = json.loads(write_config(tmp_path, **options, video_context="/data/context", audio=True).read_text())
+    assert config["mcp"]["perception"]["command"][-2:] == ["--asr-model", "/opt/asr-model"]
+    assert config["mcp"]["perception"]["timeout"] == 360000
+    assert config["provider"][PROVIDER]["models"]["vision-model"]["modalities"]["input"] == ["text", "image"]
+    assert config["agent"][AGENT]["permission"]["bash"] == "deny"

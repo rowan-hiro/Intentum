@@ -26,6 +26,18 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
 
 
+def save_json(path: Path, value: Any) -> None:
+    """Publish a complete record even when the host calls tools concurrently."""
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(_json(value))
+            stream.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def _run(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
@@ -47,7 +59,7 @@ class VideoReader:
         if not self.context_root.is_dir():
             raise ValueError("context_root must be a directory")
         self.evidence_root.mkdir(parents=True, exist_ok=True)
-        for name in ("frames", "observations"):
+        for name in ("frames", "observations", "segments"):
             (self.evidence_root / name).mkdir(exist_ok=True)
 
     def source(self, path: str) -> Path:
@@ -75,12 +87,13 @@ class VideoReader:
         duration = float(stream.get("duration") or raw.get("format", {}).get("duration") or 0)
         if not math.isfinite(duration) or not 0 < duration <= 3600:
             raise ValueError("This reader requires a known video duration of at most 3600 seconds.")
+        audio_streams = [s for s in raw.get("streams", []) if s.get("codec_type") == "audio"]
         return {
             "status": "success", "summary": "Video metadata only; no image or speech has been interpreted.",
             "source_path": str(source), "source_sha256": digest(source), "duration_s": duration,
-            "video_stream": stream, "has_audio": any(s.get("codec_type") == "audio" for s in raw.get("streams", [])),
+            "video_stream": stream, "has_audio": bool(audio_streams), "audio_streams": audio_streams,
             "limits": {"frames_per_call": MAX_FRAMES, "max_dimension": 1920},
-            "coverage": "Frames sample visible content only. Audio is not transcribed. Sampling can miss brief changes.",
+            "coverage": "Frames sample visible content only. This call does not transcribe audio. Sampling can miss brief changes.",
         }
 
     def frames(self, path: str, timestamps_s: list[float], max_dimension: int = 1280) -> dict[str, Any]:
@@ -122,7 +135,7 @@ class VideoReader:
                 frame_id = hashlib.sha256(_json(fact).encode()).hexdigest()
                 fact.update(frame_id=frame_id, image_path=str(self.evidence_root / "frames" / f"{frame_id}.png"))
                 output.replace(fact["image_path"])
-                (self.evidence_root / "frames" / f"{frame_id}.json").write_text(_json(fact), encoding="utf-8")
+                save_json(self.evidence_root / "frames" / f"{frame_id}.json", fact)
                 frames.append(fact)
         return {"status": "success", "summary": f"Decoded {len(frames)} frames. Images follow in this order.",
                 "frames": frames, "coverage": info["coverage"]}
@@ -136,22 +149,27 @@ class VideoReader:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def observe(self, frame_ids: list[str], statement: str, supersedes: str | None = None,
-                reason: str | None = None) -> dict[str, Any]:
-        if not 1 <= len(frame_ids) <= 12 or not statement.strip() or len(statement) > 8000:
-            raise ValueError("An observation needs 1 to 12 existing frame ids and a statement of 1 to 8000 characters.")
+                reason: str | None = None, segment_ids: list[str] | None = None) -> dict[str, Any]:
+        segment_ids = segment_ids or []
+        if not 1 <= len(frame_ids) + len(segment_ids) <= 12 or not statement.strip() or len(statement) > 8000:
+            raise ValueError("An observation needs 1 to 12 existing frame/segment ids and a statement of 1 to 8000 characters.")
         if bool(supersedes) != bool(reason and reason.strip()):
             raise ValueError("A revision needs both supersedes (an earlier observation id) and a nonempty reason.")
         if supersedes:
             self._record("observations", supersedes)
-        facts = [self._record("frames", frame_id) for frame_id in dict.fromkeys(frame_ids)]
-        rows = [{**{k: fact[k] for k in ("frame_id", "source_path", "source_sha256", "timestamp_s", "frame_sha256")},
+        facts = [{"evidence_kind": "frame", **self._record("frames", frame_id)} for frame_id in dict.fromkeys(frame_ids)]
+        facts += [{"evidence_kind": "speech_segment", **self._record("segments", segment_id)}
+                  for segment_id in dict.fromkeys(segment_ids)]
+        keys = ("evidence_kind", "frame_id", "source_path", "source_sha256", "timestamp_s", "frame_sha256",
+                "segment_id", "transcript_id", "audio_sha256", "start_s", "end_s", "text", "model_fingerprint")
+        rows = [{**{k: fact[k] for k in keys if k in fact},
                  "statement": statement, "supersedes": supersedes, "revision_reason": reason,
                  "interpretation_by": "agent"} for fact in facts]
         observation_id = hashlib.sha256(_json(rows).encode()).hexdigest()
         rows = [{"observation_id": observation_id, **row} for row in rows]
         path = self.evidence_root / "observations" / f"{observation_id}.json"
-        path.write_text(_json(rows), encoding="utf-8")
-        return {"status": "success", "summary": "Saved the agent's interpretation with cited frames, without validating its meaning.",
+        save_json(path, rows)
+        return {"status": "success", "summary": "Saved the agent's interpretation with cited evidence, without validating its meaning.",
                 "observation_id": observation_id, "path": str(path), "evidence": rows,
                 "next_step": "Use backend import_dataset on this JSON file before relying on the observation. "
-                             "Compare the statement with the frames and request; revise with supersedes and reason if needed."}
+                             "Compare the statement with the evidence and request; revise with supersedes and reason if needed."}

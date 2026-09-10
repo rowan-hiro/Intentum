@@ -28,12 +28,12 @@ WORKDIR /repo
 COPY pyproject.toml uv.lock README.md ./
 COPY agent_backend ./agent_backend
 RUN uv python install 3.12 \
-    && uv sync --frozen --no-dev \
+    && uv sync --frozen --no-dev --group perception \
     && /opt/venv/bin/agent-backend-mcp --help >/dev/null \
     && chmod -R a+rX /opt/venv /opt/python /repo
 
-# Deterministic media decoding for the opt-in harness MCP reader. It uses the
-# same model as the host for interpretation; no OCR/ASR model is installed.
+# Media decoding for the opt-in harness MCP reader. ASR weights are supplied
+# separately as a read-only local mount; tools never download weights.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
