@@ -187,6 +187,49 @@ def test_selected_track_bounds_fallback_and_cache_provenance(reader, monkeypatch
             reader.transcribe("clip.mp4", start_s=12, duration_s=3)
 
 
+def test_reading_begins_at_the_track_and_earlier_intervals_are_refused(reader, monkeypatch):
+    info = fake_media(reader, monkeypatch)
+    info["audio_streams"] = [{"start_time": "3", "duration": "4"}]
+    calls = []
+    monkeypatch.setattr(reader, "_recognize", lambda *args: calls.append(args) or recognition())
+    # The requested window opens three seconds before the track carries samples.
+    clipped = reader.transcribe("clip.mp4", start_s=0, duration_s=7)
+    assert clipped["clip_start_s"] == 3 and clipped["audio_bounds"]["start_s"] == 3
+    assert clipped["segments"][0]["start_s"] == 3.5
+    assert json.loads(Path(clipped["raw_transcript_path"]).read_text())["request"]["clip_start_s"] == 3
+    # The narrowed interval carries the request's identity, so the read is reused.
+    assert reader.transcribe("clip.mp4", start_s=3, duration_s=4)["cache_hit"]
+    with pytest.raises(ValueError, match=r"\[0, 2\) s is entirely before audio track 0 starts at 3 s") as refusal:
+        reader.transcribe("clip.mp4", start_s=0, duration_s=2)
+    assert "unread, not silence" in str(refusal.value)
+    assert "Request an interval inside [3, 7) s" in str(refusal.value)
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="real audio decoding is checked inside the host image")
+def test_real_delayed_track_is_read_without_leading_padding(reader, monkeypatch):
+    import array
+
+    source = reader.video.context_root / "delayed.mp4"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=s=320x240:r=4:d=8",
+                    "-itsoffset", "2", "-f", "lavfi", "-i", "sine=frequency=880:duration=4",
+                    "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "aac", str(source)], check=True)
+    monkeypatch.setattr(reader, "_recognize", lambda *args: {"language": "en", "segments": []})
+    result = reader.transcribe("delayed.mp4", start_s=0, duration_s=6)
+    start = result["audio_bounds"]["start_s"]
+    assert start == pytest.approx(2, abs=0.03)  # AAC encoder delay.
+    assert result["clip_start_s"] == start
+    assert result["clip_end_s"] - start == pytest.approx(result["decoded_duration_s"], abs=0.002)
+    with wave.open(result["audio_path"], "rb") as wav:
+        rate = wav.getframerate()
+        samples = array.array("h", wav.readframes(wav.getnframes()))
+    # The delay is not stood in for by two seconds of synthesized silence.
+    leading = next((index for index, value in enumerate(samples) if value), len(samples))
+    assert leading / rate < 0.1
+    with pytest.raises(ValueError, match="entirely before audio track 0"):
+        reader.transcribe("delayed.mp4", start_s=0, duration_s=1)
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="real audio decoding is checked inside the host image")
 @pytest.mark.parametrize("offset", [0, 5])
 def test_real_audio_outlasts_video_and_clamps_to_selected_track(reader, monkeypatch, offset):
@@ -229,14 +272,16 @@ def test_real_audio_track_selection_and_delayed_stream_alignment(reader, monkeyp
         with wave.open(str(audio), "rb") as wav:
             samples = array.array("h", wav.readframes(wav.getnframes()))
             assert wav.getframerate() == 16000 and wav.getnchannels() == 1
-        # Clip [1,3] on the video clock starts half a second before track 2.
-        assert max(abs(x) for x in samples[:6400]) == 0
-        assert max(abs(x) for x in samples[9600:]) > 1000
+        # The request opens half a second before track 2, so the clip begins at
+        # that track's own samples rather than at synthesized silence.
+        assert max(abs(x) for x in samples[:6400]) > 1000
         return {"language": "en", "segments": [{"start": 0.6, "end": 1, "text": "fixture"}]}
 
     monkeypatch.setattr(reader, "_recognize", recognize)
     result = reader.transcribe("tracks.mkv", start_s=1, duration_s=2, audio_stream=1)
-    assert result["segments"][0]["start_s"] == 1.6 and result["segments"][0]["end_s"] == 2
+    assert result["clip_start_s"] == pytest.approx(1.5, abs=0.002)
+    assert result["segments"][0]["start_s"] == pytest.approx(2.1, abs=0.002)
+    assert result["segments"][0]["end_s"] == pytest.approx(2.5, abs=0.002)
     assert result["audio_bounds"]["end_source"] == "format.duration"
     assert result["audio_bounds"]["end_is_estimate"]
     monkeypatch.setattr(reader, "_recognize", lambda *args: {"language": "en", "segments": []})

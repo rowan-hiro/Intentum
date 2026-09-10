@@ -58,18 +58,21 @@ pathological GOPs or damaged media can still leave an unread interval.
 A timeout reports that coverage gap, with no claim about the content.
 
 Audio extraction produces mono 16 kHz PCM, retains the selected track's
-offset relative to the first video timestamp, and fills timeline gaps with
-silence before cutting the requested interval. A track's endpoint is its
-start plus duration, minus the video start. Audio can extend beyond the
+offset relative to the first video timestamp, and fills gaps inside the
+track with silence before cutting the requested interval. A track's endpoint
+is its start plus duration, minus the video start. Audio can extend beyond the
 video endpoint. `audio_bounds` returns its start/end on this shared clock
 and the endpoint's source. When stream duration is unavailable or invalid,
 container start plus duration supplies an estimated endpoint
 (`end_source="format.duration"`, `end_is_estimate=true`): that container
-value may include offsets or other longer tracks. Extraction stops at audio
-EOF, without trailing silence padding. `clip_end_s` and
-`decoded_duration_s` report what was actually decoded. An interval beyond
-EOF is refused as unread; it is not reported as silence. Range refusals
-identify the selected track and the boundary being used.
+value may include offsets or other longer tracks. Neither edge of the cut is
+padded. A request that begins before the track reads from its first samples
+instead, so `clip_start_s` can be later than the requested `start_s`, and
+extraction stops at audio EOF without trailing silence. `clip_start_s`,
+`clip_end_s` and `decoded_duration_s` report what was actually decoded. An
+interval wholly outside the track is refused as unread; it is not reported as
+silence. Range refusals identify the selected track and the boundary being
+used, and name the readable interval.
 
 ASR runs in a subprocess on
 CPU/int8 with four threads, beam size 5, temperature 0, voice activity
@@ -127,5 +130,17 @@ libx264 medium/CRF 26. A six-frame request spanning 872.83–993.69 s took
 last requested frame took 16.85 s (the measurement allowed 60 s); its PTS
 and PNG hash matched the seeked result. This demonstrates removal of the
 decode-from-zero cost on that fixture, not a latency guarantee for all
-codecs or GOP lengths. Local probe code and timings are retained in
-`.cache/media-review-ppn6/`.
+codecs or GOP lengths. That probe ran outside the repository and its code and
+timings are not carried here; the fixture description above is what reproduces
+it.
+
+## Leading-gap follow-up (2026-09-10)
+
+Reviewing the fixes above found the head of the interval still padded. A
+request beginning before the selected track returned synthesized silence as
+decoded audio, and a request lying wholly before the track returned nothing but
+silence under a success status: the failure the endpoint fix removed, surviving
+at the other edge. Reading now starts at the track's first samples and a wholly
+earlier interval is refused, so both edges are treated alike. The regressions in
+`tests/test_audio.py` cover the clamped start, the refusal, and the absence of
+leading padding in real decoded audio.
