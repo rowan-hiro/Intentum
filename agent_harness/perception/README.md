@@ -45,14 +45,33 @@ stay unchanged.
 
 | Tool | Output |
 |---|---|
-| `inspect_video` | Video duration, video stream and audio stream metadata. `audio_stream` is the ordinal in the audio stream list, not the file-wide stream index. |
+| `inspect_video` | Video duration, video/audio streams and container timing metadata (`format`). `audio_stream` is the ordinal in the audio stream list, not the file-wide stream index. |
 | `read_video_frames` | Up to six PNG attachments, requested/actual timestamps and source/frame hashes. |
-| `transcribe_audio` | Speech from one track and interval, with estimated segment times on the video's zero-origin clock and importable segment JSON. Default interval: first 90 s; maximum per call: 180 s. |
+| `transcribe_audio` | Speech from one track and interval, with estimated segment times on the video's zero-origin clock, track bounds and importable segment JSON. Default interval: first 90 s; maximum per call: 180 s. |
 | `record_observation` | An agent statement citing `frame_ids`, `segment_ids`, or both. For speech alone use `frame_ids=[]`. A correction names `supersedes` and `reason`, retaining earlier observations and raw ASR. |
+
+Frame decoding seeks near each requested position and selects the first
+frame at or after it using original PTS. Explicit absolute seeking and
+disabled automatic seek trimming preserve timestamps when the container
+and video start at different times. Each decode retains its 12 s budget;
+pathological GOPs or damaged media can still leave an unread interval.
+A timeout reports that coverage gap, with no claim about the content.
 
 Audio extraction produces mono 16 kHz PCM, retains the selected track's
 offset relative to the first video timestamp, and fills timeline gaps with
-silence before cutting the requested interval. ASR runs in a subprocess on
+silence before cutting the requested interval. A track's endpoint is its
+start plus duration, minus the video start. Audio can extend beyond the
+video endpoint. `audio_bounds` returns its start/end on this shared clock
+and the endpoint's source. When stream duration is unavailable or invalid,
+container start plus duration supplies an estimated endpoint
+(`end_source="format.duration"`, `end_is_estimate=true`): that container
+value may include offsets or other longer tracks. Extraction stops at audio
+EOF, without trailing silence padding. `clip_end_s` and
+`decoded_duration_s` report what was actually decoded. An interval beyond
+EOF is refused as unread; it is not reported as silence. Range refusals
+identify the selected track and the boundary being used.
+
+ASR runs in a subprocess on
 CPU/int8 with four threads, beam size 5, temperature 0, voice activity
 detection and word timestamps. It does not use the question, a task-derived
 initial prompt, hotwords, translation or spelling normalization. Language
@@ -63,9 +82,11 @@ come from faster-whisper 1.2.1.
 The worker is terminated after 300 s. Clips, paths, track ordinals and
 returned segment times are validated. Requests are serialized in one server
 to bound model memory; successful identical requests reuse their stored
-transcript. Source/model identity, recognition options and reader code
-hashes are part of that request identity. The raw result also records runtime
-library versions. JSON records are published atomically.
+transcript. Source/model identity, recognition options, track bounds, video
+clock origin, and code hashes for `audio.py`, `video.py` and `asr.py` are part
+of that request identity. The raw result also records runtime library
+versions. JSON records are published atomically. FFmpeg, FFprobe and ASR
+subprocesses all receive a closed stdin so they cannot consume MCP requests.
 
 Under each run's `perception/`:
 
@@ -82,3 +103,29 @@ explains this gap; absence of recognized speech is not proof of silence.
 Check important numbers, comparisons and terms against frames or another
 reading. These tools do not enforce that the agent performs the review, and
 they do not resolve disagreements between speech and the display.
+
+## Media review validation (2026-09-10)
+
+The regressions in `tests/test_perception.py` and `tests/test_audio.py` use
+synthetic media, independent of benchmark task content. Real FFmpeg checks
+cover variable frame rate and long GOPs with distinct video/container
+origins, a 5 s video with 20 s audio, a second delayed shorter track, and
+missing stream durations. Seeked frames match full decoding in both PTS and
+PNG hash; audio requests beginning at 6 s and 12 s reach beyond the video.
+The cache and subprocess tests also check shared-reader changes, timing
+changes, track-specific diagnostics and stdin isolation.
+
+All 19 media tests passed inside the FFmpeg 5.1.9 audio image. The host suite
+passed 263 tests; its six real-media tests were skipped locally because
+FFmpeg is supplied by the image. No task score or ASR accuracy measurement
+was repeated for these deterministic reader fixes.
+
+A separate network-disabled container probe used a 994.07 s, 502,198,948-byte
+1080p30 `testsrc2` MP4, made by remuxing a 2 s closed GOP loop encoded with
+libx264 medium/CRF 26. A six-frame request spanning 872.83–993.69 s took
+1.08 s overall, with each decode taking 0.13–0.16 s. Full decoding of the
+last requested frame took 16.85 s (the measurement allowed 60 s); its PTS
+and PNG hash matched the seeked result. This demonstrates removal of the
+decode-from-zero cost on that fixture, not a latency guarantee for all
+codecs or GOP lengths. Local probe code and timings are retained in
+`.cache/media-review-ppn6/`.

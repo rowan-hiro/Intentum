@@ -29,6 +29,13 @@ inkan log -n 3
 
 Outcomes under Inkan (`inkan log` carries them), newest first:
 
+- `2026-09-10-0911-ppn6` fixes the media review findings: frame reads use
+  input seeking while preserving original PTS; audio bounds follow the
+  selected track, including speech after video EOF. Container-duration
+  fallbacks are marked as estimates and extraction stops at actual audio
+  EOF. Cache identity covers shared reader code and timing, and all media
+  subprocesses close stdin. Synthetic FFmpeg regressions and a 16-minute
+  1080p seek probe are recorded in `agent_harness/perception/README.md`.
 - `2026-09-10-0735-sd88` adds offline audio-track transcription alongside
   frames, using separately mounted local Whisper weights and a bounded
   harness subprocess. User-supplied `medium` and `tiny` weights were copied

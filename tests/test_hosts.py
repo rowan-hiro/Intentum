@@ -130,3 +130,12 @@ def test_audio_config_uses_local_asr_without_requiring_an_audio_capable_chat_mod
     assert config["mcp"]["perception"]["timeout"] == 360000
     assert config["provider"][PROVIDER]["models"]["vision-model"]["modalities"]["input"] == ["text", "image"]
     assert config["agent"][AGENT]["permission"]["bash"] == "deny"
+
+
+def test_audio_trace_preserves_estimated_bounds_and_actual_decoded_interval():
+    body = {"status": "success", "clip_start_s": 2, "clip_end_s": 3, "decoded_duration_s": 1,
+            "audio_bounds": {"start_s": 1.5, "end_s": 9, "end_source": "format.duration", "end_is_estimate": True}}
+    line = json.dumps({"type": "tool_use", "part": {"tool": "perception_transcribe_audio", "state": {
+        "status": "completed", "input": {"start_s": 2, "duration_s": 10}, "output": json.dumps(body)}}})
+    event = parse_events([line])["tool_events"][0]
+    assert event["evidence"] == {key: value for key, value in body.items() if key != "status"}

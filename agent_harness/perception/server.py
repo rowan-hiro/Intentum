@@ -33,7 +33,10 @@ AUDIO_INSTRUCTIONS = """\
 Offline speech transcription is also enabled. When inspect_video reports audio,
 use transcribe_audio to read relevant intervals (up to 180 seconds per call;
 audio_stream selects a zero-based audio-track ordinal). Cover the full audio when
-its relevance is unknown. Language is detected from audio unless specified.
+its relevance is unknown. Audio can extend beyond the video duration. Use the
+returned audio_bounds on the video clock to plan coverage; a container-derived
+endpoint is marked as estimated, and clip_end_s stops at decoded audio EOF.
+Language is detected from audio unless specified.
 Import the returned segments_path with backend import_dataset before relying on
 the transcript. Speech recognition and its timestamps are estimates, not verified
 facts. Compare important words, numbers and comparisons with frames at the cited

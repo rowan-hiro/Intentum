@@ -38,7 +38,9 @@ def fake_media(reader, monkeypatch):
     source = reader.video.context_root / "clip.mp4"
     source.write_bytes(b"fixture")
     info = {"source_path": str(source), "source_sha256": digest(source), "duration_s": 10,
-            "has_audio": True, "video_stream": {"start_time": "0"}, "audio_streams": [{"index": 1}]}
+            "has_audio": True, "video_stream": {"start_time": "0"},
+            "audio_streams": [{"index": 1, "start_time": "0", "duration": "10"}],
+            "format": {"start_time": "0", "duration": "10"}}
     monkeypatch.setattr(reader.video, "inspect", lambda path: info)
     monkeypatch.setattr(audio_module, "_run", lambda command, timeout: wav_file(command[-1]))
     return info
@@ -129,6 +131,7 @@ def test_empty_transcript_and_invalid_alignment_are_not_fabricated(reader, monke
 def test_recognizer_is_offline_and_timeout_has_no_committed_transcript(reader, monkeypatch, tmp_path):
     def expire(command, **kwargs):
         assert kwargs["timeout"] == 300
+        assert kwargs["stdin"] == subprocess.DEVNULL
         assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
         assert "--model-dir" in command
         raise subprocess.TimeoutExpired(command, 300)
@@ -146,6 +149,67 @@ def test_audio_mcp_is_opt_in_and_returns_segment_records(reader, monkeypatch):
     server = create_server(reader.video, reader)
     result = asyncio.run(server.call_tool("transcribe_audio", {"path": "clip.mp4", "start_s": 4, "duration_s": 3}))
     assert not result.is_error and result.structured_content["segments"][0]["start_s"] == 4.5
+
+
+def test_selected_track_bounds_fallback_and_cache_provenance(reader, monkeypatch):
+    info = fake_media(reader, monkeypatch)
+    info["duration_s"] = 5
+    info["audio_streams"] = [{"start_time": "0", "duration": "20"},
+                             {"start_time": "2", "duration": "5"}]
+    info["format"]["duration"] = "25"
+    calls = []
+    monkeypatch.setattr(reader, "_recognize", lambda *args: calls.append(args) or recognition())
+    first = reader.transcribe("clip.mp4", start_s=12, duration_s=3)
+    assert first["audio_bounds"] == {"start_s": 0, "end_s": 20,
+                                     "end_source": "stream.duration", "end_is_estimate": False}
+    raw = json.loads(Path(first["raw_transcript_path"]).read_text())["request"]
+    assert raw["video_reader_sha256"] == digest(Path(audio_module.__file__).with_name("video.py"))
+    assert reader.transcribe("clip.mp4", start_s=12, duration_s=3)["cache_hit"]
+    assert len(calls) == 1
+    original_digest = audio_module.digest
+    monkeypatch.setattr(audio_module, "digest", lambda path: "f" * 64 if path.name == "video.py" else original_digest(path))
+    changed_code = reader.transcribe("clip.mp4", start_s=12, duration_s=3)
+    assert not changed_code["cache_hit"] and changed_code["transcript_id"] != first["transcript_id"]
+    # Same clipped interval, changed clock origin: no reuse of a previous WAV.
+    info["video_stream"]["start_time"] = "1"
+    changed_clock = reader.transcribe("clip.mp4", start_s=12, duration_s=3)
+    assert not changed_clock["cache_hit"] and len(calls) == 3
+    assert changed_clock["audio_bounds"]["end_s"] == 19
+    with pytest.raises(ValueError, match=r"track 1's end 6 s.*track start 1 s; stream.duration"):
+        reader.transcribe("clip.mp4", start_s=6, audio_stream=1)
+    info["audio_streams"][0]["duration"] = "N/A"
+    fallback = reader.transcribe("clip.mp4", start_s=12, duration_s=3)
+    assert fallback["audio_bounds"]["end_source"] == "format.duration"
+    assert fallback["audio_bounds"]["end_is_estimate"] and fallback["audio_bounds"]["end_s"] == 24
+    for value in (None, "N/A", "NaN", "inf", "-2", "0"):
+        info["format"]["duration"] = value
+        with pytest.raises(ValueError, match="track 0 has no usable stream or container duration"):
+            reader.transcribe("clip.mp4", start_s=12, duration_s=3)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="real audio decoding is checked inside the host image")
+@pytest.mark.parametrize("offset", [0, 5])
+def test_real_audio_outlasts_video_and_clamps_to_selected_track(reader, monkeypatch, offset):
+    source = reader.video.context_root / "long-audio.mp4"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=s=320x240:r=4:d=5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+                    "-itsoffset", "2", "-f", "lavfi", "-i", "sine=frequency=880:duration=5",
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-c:a", "aac",
+                    "-output_ts_offset", str(offset), str(source)], check=True)
+    info = reader.video.inspect("long-audio.mp4")
+    assert info["duration_s"] == 5
+    monkeypatch.setattr(reader, "_recognize", lambda *args: {"language": "en", "segments": []})
+    for start, duration, expected_end in ((0, 10, 10), (4, 10, 14), (6, 3, 9), (12, 10, 20)):
+        result = reader.transcribe("long-audio.mp4", start_s=start, duration_s=duration)
+        assert result["clip_end_s"] == pytest.approx(expected_end, abs=0.002)
+        with wave.open(result["audio_path"], "rb") as wav:
+            assert wav.getnframes() / wav.getframerate() == pytest.approx(expected_end - start, abs=0.002)
+            assert any(wav.readframes(wav.getnframes()))  # Real samples, not EOF padding.
+    shorter = reader.transcribe("long-audio.mp4", start_s=4, duration_s=10, audio_stream=1)
+    assert shorter["clip_end_s"] == pytest.approx(7, abs=0.002)
+    assert shorter["audio_bounds"]["start_s"] == pytest.approx(2, abs=0.03)  # AAC encoder delay.
+    with pytest.raises(ValueError, match=r"track 1's end .*stream.duration"):
+        reader.transcribe("long-audio.mp4", start_s=8, audio_stream=1)
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="real audio decoding is checked inside the host image")
@@ -173,3 +237,13 @@ def test_real_audio_track_selection_and_delayed_stream_alignment(reader, monkeyp
     monkeypatch.setattr(reader, "_recognize", recognize)
     result = reader.transcribe("tracks.mkv", start_s=1, duration_s=2, audio_stream=1)
     assert result["segments"][0]["start_s"] == 1.6 and result["segments"][0]["end_s"] == 2
+    assert result["audio_bounds"]["end_source"] == "format.duration"
+    assert result["audio_bounds"]["end_is_estimate"]
+    monkeypatch.setattr(reader, "_recognize", lambda *args: {"language": "en", "segments": []})
+    # Missing per-track duration: don't turn the container's longer duration
+    # (including its timestamp offset) into padded, supposedly read audio.
+    tail = reader.transcribe("tracks.mkv", start_s=2, duration_s=10, audio_stream=1)
+    assert tail["clip_end_s"] == pytest.approx(3, abs=0.002)
+    assert tail["decoded_duration_s"] == pytest.approx(1, abs=0.002)
+    with pytest.raises(ValueError, match="track 1 yielded no samples"):
+        reader.transcribe("tracks.mkv", start_s=4, duration_s=2, audio_stream=1)

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_backend import Backend
+from agent_harness.perception import video as video_module
 from agent_harness.perception.server import create_server
 from agent_harness.perception.video import VideoReader, digest
 
@@ -53,6 +54,17 @@ def test_bounds_are_checked_before_decoding(reader, monkeypatch):
             reader.frames("clip.mp4", timestamps)
     with pytest.raises(ValueError, match="max_dimension"):
         reader.frames("clip.mp4", [1], 5000)
+
+
+@pytest.mark.parametrize("program", ["ffprobe", "ffmpeg"])
+def test_media_subprocess_cannot_read_mcp_stdin_and_timeout_marks_coverage_gap(monkeypatch, program):
+    def expire(command, **kwargs):
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+    monkeypatch.setattr(video_module.subprocess, "run", expire)
+    with pytest.raises(ValueError, match="requested interval as unread") as error:
+        video_module._run([program], timeout=12)
+    assert "shorter local clip" not in str(error.value)
 
 
 def test_observations_require_real_frame_refs_and_keep_revisions_importable(reader, tmp_path):
@@ -107,3 +119,39 @@ def test_real_decoder_reports_actual_frame_time_and_source_hash(reader):
     assert frame["source_sha256"] == digest(source)
     assert Path(frame["image_path"]).read_bytes().startswith(b"\x89PNG")
     assert reader.frames("clip.mp4", [0.3])["frames"][0] == frame
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="real seeking is checked inside the host image")
+@pytest.mark.parametrize("offset", [0, 5])
+def test_input_seek_matches_full_decode_with_vfr_gop_and_distinct_clock_origins(reader, monkeypatch, offset):
+    source = reader.context_root / "seek.mp4"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-itsoffset", "2", "-f", "lavfi", "-i",
+                    "testsrc2=s=320x240:r=12:d=16", "-f", "lavfi", "-i", "sine=duration=18",
+                    "-map", "0:v", "-map", "1:a", "-vf", r"select=not(eq(mod(n\,7)\,2))",
+                    "-fps_mode", "vfr", "-c:v", "libx264", "-g", "72", "-c:a", "aac",
+                    "-output_ts_offset", str(offset), str(source)], check=True)
+    info = reader.inspect("seek.mp4")
+    assert float(info["video_stream"]["start_time"]) == 2 + offset
+    assert float(info["format"]["start_time"]) < float(info["video_stream"]["start_time"])
+    timestamps = [0.3, 2, 2.01, 6.37, 12.01, 15.8]
+    seeked = reader.frames("seek.mp4", timestamps, max_dimension=320)["frames"]
+    original_run = video_module._run
+    seeks = []
+
+    def without_seek(command, **kwargs):
+        command = list(command)
+        if "-ss" in command:
+            assert command.index("-ss") < command.index("-i")
+            seeks.append(float(command[command.index("-ss") + 1]))
+            for flag in ("-ss", "-seek_timestamp"):
+                index = command.index(flag)
+                del command[index:index + 2]
+            command.remove("-noaccurate_seek")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(video_module, "_run", without_seek)
+    reference = reader.frames("seek.mp4", timestamps, max_dimension=320)["frames"]
+    # Both the original PTS and PNG hashes (hence evidence ids) must agree.
+    assert seeked == reference
+    assert len(seeks) == 4
+    assert all(frame["timestamp_s"] >= t for t, frame in zip(timestamps, seeked))
