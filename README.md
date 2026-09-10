@@ -297,7 +297,9 @@ tool calls to send as-is:
 Detectors so far: a subquery in an expression (semi_join), `distinct` as a key
 or prefix (measureless `group_by`), a join `on` written as an equality (key
 mapping), `LIKE` (`contains` / `starts_with` / `ends_with`), a function
-written infix (`a contains 'x'` as `contains(a, 'x')`), an aggregate function
+written infix (`a contains 'x'` as `contains(a, 'x')`, a call on the left
+too), stray characters after a complete expression (dropped when the rest
+parses), an aggregate function
 inside `select` (aggregate step) or as a text measure (`{function, field,
 alias}`), an aggregate body under `group_by` or `derive` (the aggregate step),
 a measure without a field (`*` counts; one numeric field is filled in), an
@@ -642,7 +644,11 @@ imports in ~2 s and the task's query runs through the semantic steps.
    in-process loop on the same day, the host changed no verdict on `task_44`
    (2/3 under both) and cost 0/3 against 1/3 on `task_329`, within noise at
    three runs; the with-and-without-backend comparison on one host is the next
-   experiment. A validated read-only `raw_query` fallback step is
+   experiment. Rounds five to seven (2026-09-10) put eight models of two
+   families on the same prompt and tooling after the advice gap was closed;
+   the two-family table and what separates the models (one reading in the
+   declaration step, not the language or the price) are in the DataSpace
+   README. A validated read-only `raw_query` fallback step is
    recorded as MADR 0002 for the long tail; nothing measured so far has
    needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating

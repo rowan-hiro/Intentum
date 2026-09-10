@@ -10,9 +10,14 @@ to start.
    packages and the boundary between them) and 7 ("What to implement next")
    are the ones that matter.
 3. `agent_harness/scenarios/dataspace/README.md` — the validation
-   measurements, newest first. The 2026-09-02 sections say what the model
-   runs looked like before and after the recovery module; the 2026-08-30
-   section carries the champion comparison.
+   measurements, newest first. The 2026-09-10 sections carry the model
+   rounds five to seven (three models on the closed advice gap, the gpt-5.6
+   family, the Claude family with gpt-6-astra, and the two-family table that
+   gathers eight models on the same columns) and the replay of the recorded
+   refusals; the 2026-09-09 sections the MADR 0012 rounds and the first
+   claude-opus-5 round; the 2026-09-02 sections what the runs looked like
+   before and after the recovery module; the 2026-08-30 section the champion
+   comparison.
 
 Then re-anchor:
 
@@ -20,6 +25,40 @@ Then re-anchor:
 inkan status
 inkan log -n 3
 ```
+
+Outcomes under Inkan (`inkan log` carries them), newest first:
+
+- The 2026-09-10 outcomes on the branch `refusal-diagnostics` closed the gap
+  between MADR 0010 and the code. `2026-09-10-0415-n1n6`: advice is attached
+  for every semantic operation at the operation boundary
+  (`semantic_operation`, with the call's arguments as written), raise sites
+  carry what is accepted in `details` with the step path kept in `field`, and
+  fourteen detectors were added for the refusal families of the 2026-09-09
+  runs; a replay of the recorded refusals is the check (every recorded
+  refusal advised, every rewrite succeeding). `2026-09-10-0533-8p1h`:
+  semantic operations are serialized on the backend's re-entrant lock, after
+  a model that calls tools in parallel hit the shared SQLite connection; a
+  derive with a name and nothing to compute is taught. `2026-09-10-0654-fm37`
+  taught the two shapes the sixth round left bare and wrote this section.
+  `2026-09-10-0441-cpj3` raised the Inkan protocol to version 8: a plan
+  states the `inkan begin` text verbatim.
+- The measurement rounds of 2026-09-10 (`-0444-7v8q`, `-0543-08cf`,
+  `-0603-92qs`) put qwen3.5-35b-a3b, the gpt-5.6 tiers, gpt-6-astra and the
+  Claude tiers on the same prompt and tooling. What they established: the
+  backend's language is used equally well by every current model (eight to
+  twelve steps, refusals advised and taken); the failure that remains is one
+  reading made in the declaration step, the organizing key carried into the
+  file, at every price; claude-opus-5 (18/18 across three rounds) and
+  gpt-6-astra (6/6) did not fail it. The advice change alone cut qwen's
+  refusals and steps on `task_44` by more than half. The next question is the
+  harness's: what in the framing or the declaration exchange turns that
+  reading, measured with more than three runs per cell.
+- The 2026-09-09 outcomes measured MADR 0012 (`-0711-905x`, `-0748-cy16`,
+  `-0834-7ms3`, with `-0738-rz35` answering a name given as both carried and
+  organizing and `-0822-br58` letting agents review a declaration),
+  recorded reversibility as README section 7 item 9 (`-0900-srhn`), and ran
+  the first claude-opus-5 round (`-0952-yjvm`: 3/3 and 3/3 where qwen had
+  3/3 and 0/3).
 
 The outcomes named below closed under DriftSeal, before the repository moved
 to Inkan; `inkan log` does not carry them. Read them in `.seal/HISTORY.md`,
@@ -63,7 +102,9 @@ MADRs, in reading order (`.inkan/decisions/`):
 - `0012` — why the contract separates the columns the answer carries from the
   columns it is organized by, and what was rejected on the way there.
 - `0010` — teach on refusal: why refusals carry advice and rewrites instead of
-  the resolver accepting every shape, and what convergence is measured by.
+  the resolver accepting every shape, and what convergence is measured by;
+  its 2026-09-10 history entries add the two implementation rules (dispatch
+  at the operation boundary, the accepted shape from the raise site).
 - `0009` — the harness/backend boundary, and why perception of unstructured
   sources (PDF, video, audio) is the harness's job.
 - `0008` — the trust model: fresh agent output is accepted, anything recalled
