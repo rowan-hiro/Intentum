@@ -47,6 +47,7 @@ def _tokenize(text: str) -> list[_Token]:
             raise InvalidTransformError(
                 f"Unexpected character {text[pos]!r} at position {pos} in expression {text!r}.",
                 field="expression",
+                details={"token": text[pos], "position": pos, "expression": text},
                 hint='Wrap field names that contain spaces or punctuation in double quotes, e.g. "unit price" * 2.',
             )
         kind = match.lastgroup or ""
@@ -91,6 +92,7 @@ class ExpressionParser:
             raise InvalidTransformError(
                 f"Expected {want!r} at position {got.pos} in expression {self.text!r}, got {got.text or 'end of input'!r}.",
                 field="expression",
+                details={"token": got.text, "position": got.pos, "expression": self.text, "expected": want},
             )
         return token
 
@@ -102,6 +104,7 @@ class ExpressionParser:
             raise InvalidTransformError(
                 f"Unexpected token {token.text!r} at position {token.pos} in expression {self.text!r}.",
                 field="expression",
+                details={"token": token.text, "position": token.pos, "expression": self.text},
             )
         return expr
 
@@ -225,6 +228,7 @@ class ExpressionParser:
         raise InvalidTransformError(
             f"Unexpected token {token.text or 'end of input'!r} at position {token.pos} in expression {self.text!r}.",
             field="expression",
+            details={"token": token.text, "position": token.pos, "expression": self.text},
         )
 
 

@@ -116,6 +116,9 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                        description: str | None = None, reason: str | None = None) -> dict[str, Any]:
         return backend.declare_output(columns, rows=rows, order_by=order_by, description=description, reason=reason)
 
+    # ``source`` and ``transform`` are typed loosely on purpose: a JSON string that does not parse, or a relation
+    # written where a name belongs, must reach the backend, which refuses it with advice (MADR 0010). Typed
+    # narrowly, the MCP SDK would refuse first, with pydantic text and no advice.
     @server.tool(name="transform_dataset", annotations=annotations("write"),
                  description="Run a semantic transform on a dataset and preview the result (or persist it when "
                              "`output_name` is given). `source` is a dataset reference (id, name, alias or loose "
@@ -141,8 +144,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
                              "says where a filtered value does occur; a result with the declared output shape says so.")
     def transform_dataset(
-        source: str,
-        transform: dict[str, Any] | list[dict[str, Any]],
+        source: str | dict[str, Any] | list[Any],
+        transform: dict[str, Any] | list[Any] | str,
         output_name: str | None = None,
         description: str | None = None,
         preview_limit: int = 20,
@@ -158,8 +161,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "Retrying the same logical request returns the original result instead of creating a "
                              "duplicate.")
     def materialize_result(
-        source: str,
-        transform: dict[str, Any] | list[dict[str, Any]],
+        source: str | dict[str, Any] | list[Any],
+        transform: dict[str, Any] | list[Any] | str,
         name: str,
         description: str | None = None,
         explain: bool = False,

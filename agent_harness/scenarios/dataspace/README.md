@@ -64,6 +64,63 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-10 · replay of the 21 unadvised refusals after the MADR 0010 gap was closed
+
+A replay, not a measurement: no model ran. Every tool call of the 2026-09-09
+run records (qwen second and third rounds, claude-opus-5 fourth round) was
+re-sent in its recorded order through the MCP server to a fresh backend with
+each task's workspace imported, container paths mapped to the benchmark copy
+and a temporary run directory. For each call the record marked as a refusal,
+the replay reports whether the refusal now carries `advice` and, for every
+rewrite offered, whether the rewrite succeeds when sent back on a copy of the
+workspace at that point.
+
+**All 21 refusals that reached the model without advice now carry it, and
+all 18 rewrites offered on them succeed as sent.** The three refusals that are explained without a
+rewrite are the ones the design names as not mechanical: a text literal that
+does not read as an integer (`patientunitstayid = '025-44842'`), a field that
+the joined side does not have (`patientunitstayid` on `cost`, whose look-alike
+`patienthealthsystemstayid` is a different identifier), and a transform sent
+as malformed JSON.
+
+| round | run | step | tool | refusal as recorded | advice now | rewrite |
+|---|---|---|---|---|---|---|
+| qwen r2 | `task_329` 2 | 7 | transform_dataset | `celllabel contains 'enteral'` (parse error) | `function_as_infix` | success |
+| qwen r2 | `task_329` 2 | 11 | transform_dataset | aggregate body under `group_by` (invalid derive entry) | `aggregate_body_misplaced` | success |
+| qwen r2 | `task_329` 2 | 12 | transform_dataset | `max(cellvaluenumeric) as max_amount` as a metric (needs_resolution) | `measure_as_object` | success |
+| qwen r2 | `task_329` 3 | 5 | transform_dataset | `treatmentname contains 'enteral' or ...` (parse error) | `function_as_infix` | success |
+| qwen r2 | `task_44` 1 | 3 | transform_dataset | integer compared with `'025-44842'` | `compare_literal_type` | explained: the literal does not read as an integer |
+| qwen r2 | `task_44` 1 | 12 | transform_dataset | `patientunitstayid` absent after semi_join from `cost` | `field_not_in_scope` | explained: the scope, and the look-alike named as another field |
+| qwen r3 | `task_329` 1 | 7 | materialize_result | `day` used by an aggregate listed before its derive | `field_created_later` | success (one self-ordering object) |
+| qwen r3 | `task_329` 2 | 11 | transform_dataset | `date` used before its derive | `field_created_later` | success |
+| qwen r3 | `task_329` 3 | 3 | attach_metadata | `knowledge.md` while `doc/microlab.md` existed | `document_not_found` | success |
+| qwen r3 | `task_329` 3 | 16 | export_result | prediction file already exists | `file_exists` | success |
+| qwen r3 | `task_44` 2 | 15 | transform_dataset | `max` of `*` | `measure_needs_field` | success (`count`) |
+| qwen r3 | `task_44` 2 | 16 | transform_dataset | a join object as `source` (needs_resolution) | `source_as_dataset` | success (the join as the first step, the right key selected from the left one) |
+| qwen r3 | `task_44` 2 | 17 | transform_dataset | transform as malformed JSON text (SDK pydantic text) | `transform_as_text` | explained: where the text stops being JSON |
+| qwen r3 | `task_44` 2 | 19, 21, 23, 25 | transform_dataset | duplicate `treatmenttime` ×4 (`treatmentid` fuzzy-matched after the join) | `join_scope_names` | success ×4 (`eventid as treatmentid`) |
+| qwen r3 | `task_44` 2 | 20 | transform_dataset | `treatment.treatmenttime as treatmenttime` | `join_scope_names` | success (unqualified) |
+| qwen r3 | `task_44` 2 | 27 | transform_dataset | `max` of `*` | `measure_needs_field` | success |
+| opus r4 | `task_44` 1, 3 | 2, 3 | import_dataset | `doc/patient.md` given to import_dataset | `document_as_dataset` | success ×2 (`attach_metadata`; the explanation says prose records are extracted outside the backend) |
+
+The ten refusals that already carried advice in the records replayed with the
+same kinds; their rewrites now show what the earlier rounds could not: three
+of them lead to a second advised refusal (`expression_as_derive` then
+`aggregate_body_misplaced`; `join_on_as_mapping` then `join_scope_names`;
+`subquery_as_semi_join` then `field_not_in_scope`), and one materialization
+name collides only because the replay had already materialized it, a
+conflict that now carries `name_taken`. Two
+refusals changed status: an aggregate call in a `metric` slot and a JSON
+object as `source` are refused as `error` with the accepted shape instead of
+`needs_resolution` with candidates, since neither is a name to disambiguate.
+
+What the replay establishes: on the recorded requests, dispatch covers every
+operation, each family has a detector, and the rewrites are executable. What
+it cannot say is whether a model takes the advice, or how often these shapes
+recur on other tasks; that is the next model-driven round's question, on the
+same two tasks first, comparing steps and refusals per pass with the third
+and fourth rounds.
+
 ## 2026-09-09, fourth round · `anthropic/claude-opus-5` through the same host on the same source (`eed47b7`)
 
 **With the model changed from `qwen/qwen3.5-35b-a3b` to `anthropic/claude-opus-5`

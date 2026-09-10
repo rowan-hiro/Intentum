@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import inspect
 import json
 import os
 import re
 import stat
 from collections import Counter
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from decimal import Decimal
 from pathlib import Path
@@ -60,6 +62,7 @@ from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge
 from .lineage import LineageService
 from .logging import log_event
 from .models.entities import (
+    ARTIFACT_KINDS,
     Artifact,
     ArtifactKind,
     Column,
@@ -84,32 +87,6 @@ from .validation import IRValidator
 
 Clock = Callable[[], dt.datetime]
 
-ARTIFACT_KINDS: dict[str, ArtifactKind] = {
-    ".csv": ArtifactKind.CSV,
-    ".json": ArtifactKind.JSON,
-    ".parquet": ArtifactKind.PARQUET,
-    ".db": ArtifactKind.SQLITE,
-    ".sqlite": ArtifactKind.SQLITE,
-    ".sqlite3": ArtifactKind.SQLITE,
-    ".md": ArtifactKind.MARKDOWN,
-    ".markdown": ArtifactKind.MARKDOWN,
-    ".txt": ArtifactKind.TEXT,
-    ".pdf": ArtifactKind.PDF,
-    ".mp4": ArtifactKind.VIDEO,
-    ".mov": ArtifactKind.VIDEO,
-    ".mkv": ArtifactKind.VIDEO,
-    ".avi": ArtifactKind.VIDEO,
-    ".webm": ArtifactKind.VIDEO,
-    ".mp3": ArtifactKind.AUDIO,
-    ".wav": ArtifactKind.AUDIO,
-    ".m4a": ArtifactKind.AUDIO,
-    ".flac": ArtifactKind.AUDIO,
-    ".png": ArtifactKind.IMAGE,
-    ".jpg": ArtifactKind.IMAGE,
-    ".jpeg": ArtifactKind.IMAGE,
-    ".gif": ArtifactKind.IMAGE,
-    ".webp": ArtifactKind.IMAGE,
-}
 FORMAT_BY_KIND = {ArtifactKind.CSV: "csv", ArtifactKind.JSON: "json", ArtifactKind.PARQUET: "parquet", ArtifactKind.SQLITE: "sqlite"}
 
 
@@ -131,18 +108,51 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+# The semantic operation in progress: its tool name and its arguments as the caller wrote them.
+# Read by _advise so that a refusal raised anywhere inside the operation can be taught (MADR 0010).
+_CURRENT_CALL: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar("intentum_current_call", default=None)
+
+
+def _written_arguments(signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The call's arguments as written: what the caller passed, without defaults, self or principal."""
+    try:
+        bound = signature.bind_partial(None, *args, **kwargs)
+    except TypeError:
+        return {}
+    return _jsonable({name: value for name, value in bound.arguments.items() if name not in ("self", "principal")})
+
+
+def _advise(err: BackendError) -> None:
+    """Teach on refusal: attach advice for the current operation when the raise site attached none."""
+    if err.advice:
+        return
+    current = _CURRENT_CALL.get()
+    if current is None:
+        return
+    tool, arguments = current
+    try:
+        err.advice = advise_error(err, tool=tool, arguments=arguments)
+    except Exception:  # advice must never break a response
+        err.advice = []
+
+
 def semantic_operation(action: str):
-    """Wrap a backend method: access check + structured error rendering."""
+    """Wrap a backend method: access check, advice on refusal, structured error rendering."""
 
     def decorator(fn):
+        signature = inspect.signature(fn)
+
         @functools.wraps(fn)
         def wrapper(self: "Backend", *args: Any, **kwargs: Any) -> dict[str, Any]:
             principal = kwargs.get("principal")
+            token = _CURRENT_CALL.set((action, _written_arguments(signature, args, kwargs)))
             try:
                 self.policy.check(principal, action, {"args": _jsonable(kwargs)})
                 return fn(self, *args, **kwargs)
             except BackendError as err:
-                log_event("operation.error", code=str(err.code), message=err.message, field=err.field, action=action)
+                _advise(err)
+                log_event("operation.error", code=str(err.code), message=err.message, field=err.field, action=action,
+                          advice=[getattr(a, "kind", None) for a in err.advice])
                 return err.to_response()
             except ValidationError as err:
                 log_event("operation.error", code="INVALID_INTENT", message=str(err), action=action)
@@ -153,6 +163,8 @@ def semantic_operation(action: str):
             except Exception as err:  # pragma: no cover - defensive
                 log_event("operation.error", code="INTERNAL", message=repr(err), action=action)
                 return BackendError(f"Internal error: {err!r}", code=ErrorCode.INTERNAL, recoverable=False).to_response()
+            finally:
+                _CURRENT_CALL.reset(token)
 
         return wrapper
 
@@ -394,10 +406,13 @@ class Backend:
             raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True)
         kind = self._classify(source, format)
         if not kind.is_tabular:
+            # What was received (the kind), what is accepted (the formats), and who reads the rest (MADR 0009).
             raise InvalidSchemaError(
                 f"Unsupported format {(format or source.suffix.lstrip('.')).lower()!r}; supported formats are "
                 f"{', '.join(SUPPORTED_FORMATS)}.",
                 field="format",
+                details={"kind": str(kind), "allowed_formats": list(SUPPORTED_FORMATS),
+                         "reader": "attach_metadata" if kind.is_document else None},
             )
         fmt = FORMAT_BY_KIND[kind]
         hints = self._normalize_hints(schema_hints)
@@ -1111,9 +1126,14 @@ class Backend:
         if artifact is None:
             path = Path(text).expanduser()
             if not path.is_file():
-                raise NotFoundError(f"No artifact or file matches {text!r}.", field="source",
-                                    candidates=[self._artifact_summary(a) for a in self.store.list_artifacts()
-                                                if a.kind in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT)])
+                documents = [a for a in self.store.list_artifacts() if a.kind.is_document]
+                shown = ", ".join(a.name for a in documents[:12]) if documents else "none"
+                raise NotFoundError(
+                    f"No artifact or file matches {text!r}; the documents registered here are {shown}.",
+                    field="source",
+                    candidates=[self._artifact_summary(a) for a in documents],
+                    details={"reference": text, "documents": [a.name for a in documents]},
+                )
             artifact = self._register_artifact(path, self._classify(path, None))
         if artifact.kind not in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT):
             raise InvalidSchemaError(f"{artifact.name} is a {artifact.kind} artifact; attach_metadata reads markdown or text.", field="source")
@@ -1317,7 +1337,8 @@ class Backend:
                 raise InvalidIntentError(f"{target} is a directory; path must name a file.", field="path",
                                          hint="Give the file to write, for example a path ending in .csv.")
             if target.exists() and not overwrite:
-                raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.")
+                raise ConflictError(f"{target} already exists.", field="path", hint="Pass overwrite=true to replace it.",
+                                    details={"path": str(target), "existing": self._file_facts(target)})
             # The contract the agent declared while the requirement was fresh is the
             # reference; the export attempted now is the thing checked (MADR 0007, 0008).
             contract = self.store.latest_contract()
@@ -1688,6 +1709,16 @@ class Backend:
         return text + "; export_result will refuse anything else."
 
     @staticmethod
+    def _file_facts(path: Path) -> dict[str, Any]:
+        """Size and modification time of a file that is in the way, for a conflict the agent can weigh."""
+        try:
+            st = path.stat()
+        except OSError:
+            return {}
+        return {"size_bytes": st.st_size,
+                "modified_at": dt.datetime.fromtimestamp(st.st_mtime, dt.timezone.utc).replace(microsecond=0).isoformat()}
+
+    @staticmethod
     def _publish_export(staged: Path, target: Path, overwrite: bool) -> None:
         """Move a fully written file into place, keeping failures structured.
 
@@ -1709,6 +1740,7 @@ class Backend:
                 os.link(staged, target)
         except FileExistsError as exc:
             raise ConflictError(f"{target} already exists.", field="path",
+                                details={"path": str(target), "existing": Backend._file_facts(target)},
                                 hint="Pass overwrite=true to replace it.") from exc
         except IsADirectoryError as exc:
             raise InvalidIntentError(f"{target} is a directory; path must name a file.", field="path",
@@ -1785,6 +1817,7 @@ class Backend:
         try:
             yield op
         except BackendError as err:
+            _advise(err)  # so the recorded error carries the same advice as the response
             self._fail(op, err.to_response())
             raise
         except ValidationError as err:

@@ -63,3 +63,15 @@ limit_tail_as_step added (a SQL LIMIT tail inside a filter becomes a limit step,
 Status: Accepted → Accepted
 
 Two detectors extend teach-on-refusal to declare_output, which had none: declaration_rows names the three row cardinalities and says a one_per key need not be carried; declaration_order names the order_by shapes and says a sort column does not belong in columns. Neither carries a rewrite - the backend cannot guess the cardinality. The successful declaration now also carries data facts (what each declared name is in this workspace, and whether it is unique per row), which is the same division of labour on a response rather than a refusal: the backend owns the facts, the agent owns the reading.
+
+### 2026-09-10T04:33:25.388Z, outcome 2026-09-10-0415-n1n6
+
+Status: accepted -> accepted
+
+Two implementation rules added to the decision. Dispatch is the operation boundary's: semantic_operation attaches advice to every BackendError with the call's arguments as written, and the operation record carries the same advice as the response, so no tool returns a bare refusal. The accepted shape comes from the raise site: refusals carry it in details (the fields in scope, both operands of a comparison, the parser's vocabulary, the documents that exist) with the step path kept in field, and detectors read those facts rather than the message. Thirteen detectors were added for the refusal families of the 2026-09-09 runs; replaying the 21 refusals that had reached the model without advice returns advice on all 21 and 17 of 18 rewrites succeed as sent (the eighteenth lands on a second advised refusal). A field that is merely absent is explained with the scope and never rewritten from a look-alike name.
+
+### 2026-09-10T04:34:43.840Z, outcome 2026-09-10-0415-n1n6
+
+Status: accepted -> accepted
+
+Follow-up in the same outcome: the inline-join rewrite now selects a right-side key from the left one, since the joined scope never copies it, so the replay's eighteenth rewrite succeeds as sent: 21 of 21 advised, 18 of 18 rewrites succeed.

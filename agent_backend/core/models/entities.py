@@ -87,6 +87,46 @@ class ArtifactKind(StrEnum):
     def is_tabular(self) -> bool:
         return self in (ArtifactKind.CSV, ArtifactKind.JSON, ArtifactKind.PARQUET, ArtifactKind.SQLITE)
 
+    @property
+    def is_document(self) -> bool:
+        """A kind the backend reads for table and column facts (attach_metadata)."""
+        return self in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT)
+
+    @classmethod
+    def for_suffix(cls, suffix: str) -> "ArtifactKind":
+        """The kind a file suffix (with or without its dot) names; OTHER when the suffix is unknown."""
+        text = str(suffix).lower()
+        return ARTIFACT_KINDS.get(text if text.startswith(".") else f".{text}", cls.OTHER)
+
+
+# File suffix -> artifact kind: what import_workspace registers and import_dataset accepts.
+ARTIFACT_KINDS: dict[str, ArtifactKind] = {
+    ".csv": ArtifactKind.CSV,
+    ".json": ArtifactKind.JSON,
+    ".parquet": ArtifactKind.PARQUET,
+    ".db": ArtifactKind.SQLITE,
+    ".sqlite": ArtifactKind.SQLITE,
+    ".sqlite3": ArtifactKind.SQLITE,
+    ".md": ArtifactKind.MARKDOWN,
+    ".markdown": ArtifactKind.MARKDOWN,
+    ".txt": ArtifactKind.TEXT,
+    ".pdf": ArtifactKind.PDF,
+    ".mp4": ArtifactKind.VIDEO,
+    ".mov": ArtifactKind.VIDEO,
+    ".mkv": ArtifactKind.VIDEO,
+    ".avi": ArtifactKind.VIDEO,
+    ".webm": ArtifactKind.VIDEO,
+    ".mp3": ArtifactKind.AUDIO,
+    ".wav": ArtifactKind.AUDIO,
+    ".m4a": ArtifactKind.AUDIO,
+    ".flac": ArtifactKind.AUDIO,
+    ".png": ArtifactKind.IMAGE,
+    ".jpg": ArtifactKind.IMAGE,
+    ".jpeg": ArtifactKind.IMAGE,
+    ".gif": ArtifactKind.IMAGE,
+    ".webp": ArtifactKind.IMAGE,
+}
+
 
 class _Entity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=False)
