@@ -15,6 +15,7 @@ VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi"}
 MAX_FRAMES = 6
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_BATCH_BYTES = 12 * 1024 * 1024
+DEFAULT_MAX_DIMENSION = 1920
 
 
 def digest(path: Path) -> str:
@@ -99,7 +100,7 @@ class VideoReader:
             "coverage": "Frames sample visible content only. This call does not transcribe audio. Sampling can miss brief changes.",
         }
 
-    def frames(self, path: str, timestamps_s: list[float], max_dimension: int = 1280) -> dict[str, Any]:
+    def frames(self, path: str, timestamps_s: list[float], max_dimension: int = DEFAULT_MAX_DIMENSION) -> dict[str, Any]:
         if not 1 <= len(timestamps_s) <= MAX_FRAMES:
             raise ValueError(f"Request 1 to {MAX_FRAMES} timestamps per call.")
         if not 320 <= max_dimension <= 1920:

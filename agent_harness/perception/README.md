@@ -7,6 +7,34 @@ an estimate to review, not a verified statement about the task.
 
 ## Prepare and run
 
+The DataSpace runner can retain the local media settings in the repository's
+gitignored `.env` (process environment overrides the file, CLI flags override
+both):
+
+```dotenv
+HARNESS_VIDEO=1
+HARNESS_ASR_MODEL=.cache/asr/champion/medium
+HARNESS_OPENCODE_IMAGE=intentum-opencode:1.18.26-media-bnw8
+```
+
+`HARNESS_ASR_MODEL` in the environment or `.env` resolves relative to the
+repository root; an explicit `--asr-model` resolves relative to the current
+directory. With the settings above, a normal DataSpace invocation enables
+both frame reading and offline transcription. `--no-audio` selects frames
+alone; `--no-video` disables both, including for `--host loop` control runs.
+Without saved settings, perception remains opt-in. `--check-config` prints
+the effective gateway, image and media settings without the API key, and
+verifies all four ASR weight hashes before any run directory is replaced.
+It does not contact the gateway or check Docker; the visual probe checks the
+actual model image-input path.
+
+```sh
+docker build -f agent_harness/hosts/opencode.Dockerfile -t intentum-opencode:1.18.26-media-bnw8 .
+uv run python -m agent_harness.scenarios.dataspace.agent --task task_312 --check-config
+uv run python -m agent_harness.scenarios.dataspace.agent \
+  --task task_312 --runs 1 --out /tmp/intentum-media-run-new
+```
+
 Copy an existing CTranslate2 Whisper model into a new directory. The source
 must contain `model.bin`, `config.json`, `tokenizer.json` and `vocabulary.txt`:
 
@@ -35,8 +63,8 @@ uv run --group perception python -m agent_harness.perception.prepare_asr \
 
 This explicit setup step is the only downloader. Runtime recognition uses
 the supplied directory with `local_files_only=True` and offline environment
-settings. `--asr-model` requires `--video` and the OpenCode host; omit it for
-frame-only tools. The chat model needs image input for frames, but no audio
+settings. ASR requires enabled video and the OpenCode host; use `--no-audio`
+for frame-only tools when a model is configured. The chat model needs image input for frames, but no audio
 input capability: it receives transcript text from MCP. The image installs
 the separately locked `perception` dependency group; backend dependencies
 stay unchanged.
@@ -46,7 +74,7 @@ stay unchanged.
 | Tool | Output |
 |---|---|
 | `inspect_video` | Video duration, video/audio streams and container timing metadata (`format`). `audio_stream` is the ordinal in the audio stream list, not the file-wide stream index. |
-| `read_video_frames` | Up to six PNG attachments, requested/actual timestamps and source/frame hashes. |
+| `read_video_frames` | Up to six PNG attachments, requested/actual timestamps and source/frame hashes. Default maximum dimension: 1920 pixels; callers can request 320–1920. |
 | `transcribe_audio` | Speech from one track and interval, with estimated segment times on the video's zero-origin clock, track bounds and importable segment JSON. Default interval: first 90 s; maximum per call: 180 s. |
 | `record_observation` | An agent statement citing `frame_ids`, `segment_ids`, or both. For speech alone use `frame_ids=[]`. A correction names `supersedes` and `reason`, retaining earlier observations and raw ASR. |
 
@@ -78,7 +106,8 @@ silence. Range refusals identify the selected track, the boundary being used
 and the readable interval.
 
 ASR runs in a subprocess on
-CPU/int8 with four threads, beam size 5, temperature 0, voice activity
+CPU/int8 with four threads, beam size 5, the temperature fallback sequence
+`[0, 0.2, 0.4, 0.6, 0.8, 1.0]`, voice activity
 detection and word timestamps. It does not use the question, a task-derived
 initial prompt, hotwords, translation or spelling normalization. Language
 is detected from audio unless the caller supplies a Whisper language code.
@@ -109,6 +138,49 @@ explains this gap; absence of recognized speech is not proof of silence.
 Check important numbers, comparisons and terms against frames or another
 reading. These tools do not enforce that the agent performs the review, and
 they do not resolve disagreements between speech and the display.
+
+## Champion configuration comparison (2026-09-11)
+
+Reference: the clean local `kddcup2026_champion` checkout at
+`bdc874fc4260e3565ae0dce041728fdf5b376709`, principally
+`src/data_agent_baseline/video/audio_transcribe.py`, `build_video_input.py`,
+`asr_init_prompt.py`, `frame_html_tool.py`, and
+`tools_v2/general_tools.py`. This aligns existing capabilities; it does not
+reproduce the champion's preprocessing pipeline.
+
+| Setting | Champion | This harness for the new measurement |
+|---|---|---|
+| Visual model | `qwen3.5-35b-a3b` | `qwen/qwen3.5-35b-a3b`; same named model family, different serving system |
+| Gateway | `http://10.166.163.101:8417/v1` by default | Existing `https://api.kilo.ai/api/gateway`; the reference address timed out during a 10 s `/models` connectivity check |
+| ASR weights | Offline `asr_models/medium`; `tiny` for the separate language probe | SHA256-verified `.cache/asr/champion/medium`; copied `tiny` remains available but unused |
+| ASR runtime | faster-whisper 1.2.1, local CPU/int8 | faster-whisper 1.2.1, local CPU/int8, four threads and one worker |
+| Decoding | Beam 5, VAD, word timestamps, no previous-text conditioning | Same; temperature fallback now explicitly `[0, 0.2, 0.4, 0.6, 0.8, 1.0]`, previously fixed at 0 |
+| Audio format | Mono 16 kHz through PyAV | Mono 16 kHz PCM through FFmpeg, bounded by selected track and interval |
+| Language | Automatic unless supplied; `tiny` detects zh/en before generating a domain prompt | Medium detects language from the selected clip unless the caller supplies it |
+| Images | Native-resolution PNG slides | Timestamp-selected PNG frames; default maximum dimension raised from 1280 to 1920, retaining 1920×1080 detail |
+
+The champion relies on faster-whisper's default temperature fallback list;
+that default was checked in the installed 1.2.1 container runtime. Other
+recognizer defaults are also supplied by that pinned version. Our explicit
+four-thread limit remains a resource bound; the champion leaves
+`cpu_threads` at its library default. Using the same model name through a
+different gateway does not establish identical weights or serving behavior.
+
+The remaining differences are preprocessing or execution policies. Champion
+detects slide transitions, transcribes the whole video, generates a
+question/knowledge-based ASR prompt with UI terminology, converts traditional
+Chinese to simplified Chinese, creates Hiccup layout descriptions with the
+visual model, and interleaves frames and speech by word timestamps. This
+harness retains agent-selected frame/audio calls, raw recognized text, and
+separately cited observations. It has no domain prompt, normalization,
+slide detector or layout-model pass. Its limits remain six frames per call,
+180 s per audio clip, 300 s per ASR subprocess, and 360 s for the audio MCP
+request. Weight mounts remain read-only and separate from the image. The
+host and model still have to request and interpret both evidence streams.
+
+The DataSpace README records the fresh image probe, three task attempts,
+and actual media usage for this configuration; earlier measurements used
+their originally recorded settings.
 
 ## Media review validation (2026-09-10)
 

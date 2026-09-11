@@ -23,6 +23,7 @@ timing experiment (see framing.py).
 Settings (environment or the repository .env):
     DEFAULT_MODEL_API_URL, DEFAULT_MODEL_API_KEY, DEFAULT_MODEL_NAME
     DATASPACE_BENCHMARK, KDDCUP_CHAMPION
+    HARNESS_VIDEO, HARNESS_ASR_MODEL, HARNESS_OPENCODE_IMAGE
 """
 
 from __future__ import annotations
@@ -39,10 +40,11 @@ from typing import Any
 from agent_backend import Backend
 from agent_backend.mcp.server import INSTRUCTIONS, create_server
 
-from agent_harness.config import model_config
+from agent_harness.config import boolean_setting, configured_asr_model, model_config, setting
 from agent_harness.hosts.opencode import DEFAULT_IMAGE, DOCKER_DATA_DIR, DOCKER_RUN_DIR, container_path, run_opencode
 from agent_harness.loop import run_tool_loop
 from agent_harness.perception.server import AUDIO_INSTRUCTIONS, INSTRUCTIONS as VIDEO_INSTRUCTIONS
+from agent_harness.perception.prepare_asr import verify_model
 from agent_harness.scenarios.dataspace import RUNS, benchmark_root, champion_root, task_context, task_question
 from agent_harness.scenarios.dataspace.framing import DELIVERED_PROMPT, FRAMINGS, NUDGE_PROMPT
 from agent_harness.scenarios.dataspace.scoring import official_verdict, run_champion_scorer, run_official_evaluator
@@ -128,6 +130,7 @@ async def run_once(task: str, question: str, benchmark: Path, run_dir: Path, con
     declared = [e["turn"] for e in tool_events if e["tool"] == "declare_output" and e["status"] == "success"]
     result: dict[str, Any] = {
         "task": task, "model": config["model"], "host": host, "host_version": host_version, "declaration": declaration,
+        "model_gateway": config["url"], "asr_model": str(asr_model.resolve()) if asr_model else None,
         "perception": "video_frames_and_audio" if asr_model is not None else "video_frames" if video else None,
         "declaration_turn": declared[0] if declared else None,
         "stop_reason": stop_reason, "turns": turns,
@@ -206,19 +209,38 @@ def main() -> int:
     parser.add_argument("--benchmark", default=None, help="benchmark package root (default: $DATASPACE_BENCHMARK)")
     parser.add_argument("--host", choices=["loop", "opencode"], default="opencode",
                         help="who runs the model loop: OpenCode in a container from --image (default), or the in-process reference loop")
-    parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image for --host opencode (built from agent_harness/hosts/opencode.Dockerfile)")
+    parser.add_argument("--image", default=None, help="Docker image (default: $HARNESS_OPENCODE_IMAGE or the pinned host image)")
     parser.add_argument("--host-timeout", type=int, default=900, help="seconds a container run may take before it is killed")
-    parser.add_argument("--video", action="store_true", help="enable harness video-frame MCP tools and model image inputs (OpenCode only)")
+    parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=None,
+                        help="enable video-frame tools and model image inputs (default: $HARNESS_VIDEO, otherwise off; OpenCode only)")
     parser.add_argument("--asr-model", type=Path, help="also transcribe audio using this prepared offline model directory (requires --video)")
+    parser.add_argument("--no-audio", action="store_true", help="disable configured ASR for a frame-only run")
     parser.add_argument("--declaration", choices=sorted(FRAMINGS), default="informed",
                         help="when the framing asks for declare_output: fresh (first call) or informed (once a preview shows the answer)")
     parser.add_argument("--out", default=None, help="output directory (default runs/<task>/agent or agent-informed beside this module)")
-    parser.add_argument("--check-config", action="store_true", help="only validate model configuration and benchmark paths")
+    parser.add_argument("--check-config", action="store_true", help="validate settings, benchmark paths and ASR weight hashes without starting a model run")
     args = parser.parse_args()
+    try:
+        if args.video is None:
+            args.video = boolean_setting("HARNESS_VIDEO")
+        args.image = args.image or setting("HARNESS_OPENCODE_IMAGE", DEFAULT_IMAGE)
+        if args.no_audio and args.asr_model is not None:
+            parser.error("--no-audio cannot be combined with --asr-model")
+        if args.asr_model is not None:
+            args.asr_model = args.asr_model.expanduser()
+        elif args.video and not args.no_audio:
+            args.asr_model = configured_asr_model()
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
     if args.video and args.host != "opencode":
         parser.error("--video requires --host opencode")
     if args.asr_model is not None and not args.video:
         parser.error("--asr-model requires --video")
+    if args.asr_model is not None:
+        try:
+            verify_model(args.asr_model)
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
 
     benchmark = benchmark_root(args.benchmark)
     context_dir = task_context(benchmark, args.task)
@@ -228,6 +250,7 @@ def main() -> int:
     config = model_config()
     question = task_question(benchmark, args.task)
     print(f"task {args.task} · host {args.host} · model {config['model']} · declaration {args.declaration} · {question}")
+    print(f"gateway {config['url']} · image {args.image} · video {args.video} · ASR {args.asr_model or 'off'}")
     if args.check_config or args.runs <= 0:
         print("configuration ok")
         return 0
