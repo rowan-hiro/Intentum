@@ -223,8 +223,7 @@ class Backend:
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
         # Files may only be exported under this directory; None disables the guard (library use).
         self.export_root = Path(export_root).expanduser().resolve() if export_root is not None else None
-        # Seconds each sandbox step that binds or runs a raw_query statement may take before its process is
-        # ended; None runs without a deadline.
+        # Seconds one raw_query statement may run before it is interrupted; None runs without a deadline.
         if query_timeout is not None and (isinstance(query_timeout, bool) or not isinstance(query_timeout, (int, float))
                                           or query_timeout <= 0):
             raise ValueError(f"query_timeout must be a positive number of seconds or None, got {query_timeout!r}")

@@ -220,21 +220,21 @@ placeholders' schemas, taken before anything runs and mapped to the backend's
 types; a column of another type (a list, a struct, an interval) is refused
 with the cast that fixes it, and a computed column without a name
 (`max(amount)`) is normalized to snake_case (`max_amount`) with a resolution
-note. Every step that binds or runs the statement happens in a process of
-its own, over a separate DuckDB database that holds one table per placeholder,
-copied from the bound versions. That database is opened with external access
-disabled, extension loading off and the configuration locked, so the
-statement can read no file, reach no network and change no setting even if
-validation missed something, and it never sees a storage name. Its result
+note. The statement then runs in a sandbox: a separate DuckDB database
+holding one table per placeholder, copied from the bound versions, opened with
+external access disabled, extension loading off and the configuration
+locked, so it can read no file, reach no network and change no setting even
+if validation missed something, and it never sees a storage name. Its result
 comes back through the normal materialization path, so the step is part of
 the operation record, the idempotency fingerprint (the SQL text and the bound
 versions), `explain`, lineage (every bound input is an upstream) and replay of
 the recorded IR. A server-configured deadline (`--query-timeout SECONDS`; no
-deadline by default) ends any such step that runs longer, while binding as
-well as running (DuckDB evaluates some expressions while binding and does not
-check for interrupts there), and returns a structured, recoverable
-`EXECUTION_FAILED` with advice. Each step costs a process start, about a tenth
-of a second.
+deadline by default) interrupts a long statement and returns a structured,
+recoverable `EXECUTION_FAILED` with advice. It bounds what DuckDB interrupts,
+which is execution: DuckDB evaluates some expressions while binding a
+statement (a `COLUMNS` lambda, for one) without checking for interrupts, so a
+binding can outlast the deadline and is stopped as soon as it returns, before
+anything runs.
 
 ### Exporting an answer
 
@@ -513,10 +513,8 @@ uv run agent-backend-mcp --workspace ./workspace
 ```
 
 `--query-timeout SECONDS` (or `$AGENT_BACKEND_QUERY_TIMEOUT`) sets the
-deadline for each sandbox step that binds or runs a `raw_query` statement: the
-describe during resolution, the re-check during validation and the run. A
-step that exceeds it is stopped. Without the setting there is no deadline.
-The library takes the same as `Backend(..., query_timeout=...)`.
+deadline after which a `raw_query` statement is interrupted; without it there
+is none. The library takes the same as `Backend(..., query_timeout=...)`.
 
 Client configuration (Claude Desktop / Claude Code / Codex style; see
 `examples/mcp_config.json`):

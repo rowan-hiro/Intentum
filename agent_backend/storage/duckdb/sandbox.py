@@ -1,36 +1,35 @@
 """The sandbox a raw_query statement is parsed, described and run in (MADR 0002).
 
-Agent-written SQL never runs on the engine's connection, nor in the server's
-process. Parsing, which evaluates nothing, happens here. Every step that binds
-the statement (the describe during resolution and the re-check during
-validation) or runs it happens in a process of its own, sandbox_worker.py, on
-a DuckDB database that holds exactly one table per placeholder, copied from
-the bound dataset version and named after the placeholder, and nothing else.
-That database is opened with external access disabled, extension loading and
-installation off and the configuration locked, so no statement can read a
+Agent-written SQL never runs on the engine's connection. Each statement gets a
+DuckDB database of its own that holds exactly one table per placeholder,
+copied from the bound dataset version and named after the placeholder, and
+nothing else. It is opened with external access disabled, extension loading
+and installation off and the configuration locked, so no statement can read a
 file, reach the network, attach a database, load code or change a setting,
-whatever the rules in core/ir/raw_query.py missed. Because it holds no storage
-table, the statement cannot name one, and the errors DuckDB raises there speak
-of placeholders only.
-
-The server's deadline, when it sets one, ends the step's process. DuckDB
-evaluates some expressions while binding without checking for interrupts, so
-an interrupt could arrive while a statement binds and be lost before it runs;
-ending the process bounds both phases and keeps the statement's memory out of
-the server's. Each step costs a process start (about a tenth of a second).
+whatever the rules in core/ir/raw_query.py missed. Because the sandbox holds no
+storage table, the statement cannot name one, and the errors DuckDB raises
+there speak of placeholders only.
 
 The statement's result is written into the sandbox database, which the engine
 then attaches read-only so the steps after the query and the materialization
 read it through the normal path. The database lives in a temporary directory
 inside the workspace and is removed with it.
+
+The server's deadline, when it sets one, guards every step that binds or runs
+a statement. DuckDB does not check for interrupts while it binds (it evaluates
+a COLUMNS lambda and folds constants there), so the guard keeps interrupting
+until the work ends and raises as soon as a binding that ignored the interrupt
+returns: nothing runs after the deadline has passed, but a single binding can
+outlast it. Bounding that too would mean running each step in a process of its
+own, which is not worth a process per query for an expression shape no
+ordinary statement has.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
+import threading
 from contextlib import closing, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -42,9 +41,14 @@ from ...core.errors import ExecutionFailedError, InvalidTransformError
 from ...core.ir.raw_query import FunctionReference, QueryShape, TableReference
 from ...core.models.entities import LogicalType
 from .engine import DuckDBEngine, _literal, physical_to_logical, quote_ident
-from .sandbox_worker import SANDBOX_SETTINGS
 
-WORKER = Path(__file__).with_name("sandbox_worker.py")
+SANDBOX_SETTINGS = {
+    "enable_external_access": False,
+    "autoload_known_extensions": False,
+    "autoinstall_known_extensions": False,
+    "allow_community_extensions": False,
+    "lock_configuration": True,
+}
 # Placeholders start with a letter, so neither name can collide with one.
 RESULT_TABLE = "_result"
 ATTACHED_AS = "_raw_query"
@@ -56,15 +60,58 @@ _CREATE_AS_RE = re.compile(
 )
 
 
-def _connect() -> duckdb.DuckDBPyConnection:
-    """An empty locked connection for parsing, which binds and evaluates nothing."""
-    return duckdb.connect(":memory:", config=SANDBOX_SETTINGS)
+def _connect(path: Path | None = None) -> duckdb.DuckDBPyConnection:
+    return duckdb.connect(str(path) if path is not None else ":memory:", config=SANDBOX_SETTINGS)
 
 
 def _message(exc: Exception) -> str:
     """DuckDB's message without the echo of the statement it appends."""
     text = str(exc).split("\n\nLINE ", 1)[0]
     return " ".join(text.split())
+
+
+def _expired(timeout: float) -> ExecutionFailedError:
+    return ExecutionFailedError(
+        f"The query ran longer than the server's {timeout:g}-second deadline for a raw_query and was stopped.",
+        recoverable=True,
+        details={"raw_query": {"refused": "deadline", "timeout_seconds": timeout}},
+    )
+
+
+class _Deadline:
+    """Interrupts a connection once the deadline passes, and keeps interrupting until the work ends.
+
+    ``check`` raises once it has passed, which is how a binding that ignored
+    the interrupts is stopped when it returns, before anything runs.
+    """
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection, timeout: float | None) -> None:
+        self._conn, self._timeout, self._done = conn, timeout, threading.Event()
+        self.passed = False
+        self._thread = threading.Thread(target=self._watch, daemon=True) if timeout else None
+
+    def _watch(self) -> None:
+        assert self._timeout is not None
+        if self._done.wait(self._timeout):
+            return
+        self.passed = True
+        while not self._done.wait(0.05):
+            self._conn.interrupt()
+
+    def check(self) -> None:
+        if self.passed:
+            assert self._timeout is not None
+            raise _expired(self._timeout)
+
+    def __enter__(self) -> "_Deadline":
+        if self._thread is not None:
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
 
 
 class QuerySandbox:
@@ -103,9 +150,18 @@ class QuerySandbox:
 
     def describe_query(self, sql: str, relations: dict[str, list[tuple[str, str]]]) -> list[tuple[str, str, LogicalType]]:
         """The statement's output columns, bound against empty tables with the placeholders' schemas."""
-        job = {"op": "describe", "relations": {p: [list(c) for c in columns] for p, columns in relations.items()},
-               "sql": sql}
-        return _described(_step(job, self.timeout))
+        with closing(_connect()) as conn:
+            for placeholder, columns in relations.items():
+                body = ", ".join(f"{quote_ident(name)} {physical}" for name, physical in columns)
+                try:
+                    conn.execute(f"CREATE TABLE {quote_ident(placeholder)} ({body})")
+                except duckdb.Error as exc:
+                    raise ExecutionFailedError(
+                        f"Could not prepare placeholder {placeholder!r} for the query: {_message(exc)}") from None
+            with _Deadline(conn, self.timeout) as deadline:
+                described = _describe(conn, sql)
+                deadline.check()
+            return described
 
     # -- running ---------------------------------------------------------
     @contextmanager
@@ -142,69 +198,63 @@ class QuerySession:
         self._engine = engine
         self._path = path
         self._timeout = timeout
+        self._conn: duckdb.DuckDBPyConnection | None = _connect(path)
         self._attached = False
 
     def describe(self, sql: str) -> list[tuple[str, str, LogicalType]]:
-        """The statement's output columns over the real inputs, bound in the step's own process."""
-        return _described(_step({"op": "describe", "path": str(self._path), "sql": sql}, self._timeout))
+        assert self._conn is not None
+        with _Deadline(self._conn, self._timeout) as deadline:
+            described = _describe(self._conn, sql)
+            deadline.check()
+        return described
 
-    def run(self, sql: str) -> tuple[str, list[tuple[str, str, LogicalType]]]:
-        """Bind and run the statement into the sandbox, in one process under the deadline.
-
-        Returns the relation the engine reads the result from and the columns the statement returned.
-        """
-        reply = _step({"op": "run", "path": str(self._path), "sql": sql, "result": RESULT_TABLE}, self._timeout)
-        if not reply.get("ok"):
+    def run(self, sql: str) -> str:
+        """Run the statement into the sandbox; return the relation the engine reads its result from."""
+        conn = self._conn
+        assert conn is not None
+        try:
+            with _Deadline(conn, self._timeout) as deadline:
+                relation = conn.sql(sql)
+                # A deadline that passed while the statement bound stops here, before anything runs.
+                deadline.check()
+                if relation is None:
+                    raise ExecutionFailedError("The statement is not a query and returned no rows.",
+                                               details={"raw_query": {"refused": "execution"}})
+                relation.create(RESULT_TABLE)
+        except duckdb.InterruptException:
+            assert self._timeout is not None
+            raise _expired(self._timeout) from None
+        except duckdb.Error as exc:
             raise ExecutionFailedError(
-                f"The query failed while running: {reply.get('message')}",
+                f"The query failed while running: {_message(exc)}",
                 recoverable=True,
-                details={"raw_query": {"refused": "execution", "message": reply.get("message")}},
-            )
-        described = _described(reply)
+                details={"raw_query": {"refused": "execution", "message": _message(exc)}},
+            ) from None
+        conn.close()
+        self._conn = None
         self._engine.conn.execute(f"ATTACH {_literal(str(self._path))} AS {quote_ident(ATTACHED_AS)} (READ_ONLY)")
         self._attached = True
-        return f"{quote_ident(ATTACHED_AS)}.{quote_ident(RESULT_TABLE)}", described
+        return f"{quote_ident(ATTACHED_AS)}.{quote_ident(RESULT_TABLE)}"
 
     def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
         if self._attached:
             self._engine.conn.execute(f"DETACH DATABASE IF EXISTS {quote_ident(ATTACHED_AS)}")
             self._attached = False
 
 
-def _step(job: dict[str, Any], timeout: float | None) -> dict[str, Any]:
-    """Run one sandbox step in its own process; the deadline, when set, ends the process."""
+def _describe(conn: duckdb.DuckDBPyConnection, sql: str) -> list[tuple[str, str, LogicalType]]:
     try:
-        done = subprocess.run([sys.executable, "-I", str(WORKER)], input=json.dumps(job), capture_output=True,
-                              text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        phase = "was being run" if job["op"] == "run" else "was being bound"
-        raise ExecutionFailedError(
-            f"The query {phase} longer than the server's {timeout:g}-second deadline for a raw_query step and "
-            "was stopped.",
-            recoverable=True,
-            details={"raw_query": {"refused": "deadline", "timeout_seconds": timeout}},
-        ) from None
-    try:
-        reply = json.loads(done.stdout)
-    except ValueError:
-        raise ExecutionFailedError(
-            f"The query's sandbox process ended without a result (exit status {done.returncode}); the statement may "
-            "have needed more memory than the host has.",
-            recoverable=True,
-            details={"raw_query": {"refused": "execution", "exit_status": done.returncode}},
-        ) from None
-    if not reply.get("ok") and reply.get("phase") == "prepare":
-        raise ExecutionFailedError(str(reply.get("message")))
-    return reply
-
-
-def _described(reply: dict[str, Any]) -> list[tuple[str, str, LogicalType]]:
-    """The columns a successful step reports, or the binding refusal it reports instead."""
-    if not reply.get("ok"):
-        text = str(reply.get("message"))
-        raise InvalidTransformError(f"The query does not bind: {text}",
-                                    details={"raw_query": {"refused": "binding", "message": text}})
-    return [(str(name), str(kind), physical_to_logical(str(kind))) for name, kind in reply["columns"]]
+        relation = conn.sql(sql)
+    except duckdb.Error as exc:
+        raise InvalidTransformError(f"The query does not bind: {_message(exc)}",
+                                    details={"raw_query": {"refused": "binding", "message": _message(exc)}}) from None
+    if relation is None:
+        raise InvalidTransformError("The statement returns no rows to describe.",
+                                    details={"raw_query": {"refused": "binding"}})
+    return [(str(name), str(kind), physical_to_logical(str(kind))) for name, kind in zip(relation.columns, relation.types)]
 
 
 # -- reading the parser's output ------------------------------------------------

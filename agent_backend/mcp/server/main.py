@@ -57,9 +57,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--export-root", default=os.environ.get("AGENT_BACKEND_EXPORT_ROOT"),
                         help="Directory exports may be written to (default: <workspace>/exports)")
     parser.add_argument("--query-timeout", type=_seconds, default=os.environ.get("AGENT_BACKEND_QUERY_TIMEOUT"),
-                        help="Seconds each sandbox step that binds or runs a raw_query statement may take before it "
-                             "is stopped with a structured error (default: no deadline, or "
-                             "$AGENT_BACKEND_QUERY_TIMEOUT)")
+                        help="Seconds a raw_query statement may run before it is stopped with a structured error "
+                             "(default: no deadline, or $AGENT_BACKEND_QUERY_TIMEOUT)")
     parser.add_argument("--log-level", default=os.environ.get("AGENT_BACKEND_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), stream=sys.stderr,
