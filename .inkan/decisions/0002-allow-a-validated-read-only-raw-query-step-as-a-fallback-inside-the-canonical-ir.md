@@ -4,7 +4,7 @@ Date: 2026-08-28
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -65,3 +65,15 @@ Still not needed after the third measurement. The one SQL shape the model reache
 Status: Proposed → Proposed
 
 raw_query remains unnecessary for the measured contract. The repeated SQL-subquery shape from task_44 is now represented by semi_join with typed keys, versioned references and lineage; measureless grouping covers the distinct-key shape. The follow-up failures came from output-shape reading and identifier semantics rather than an inexpressible query. Revisit only when a measured task needs a remaining long-tail shape such as a window, union or tie-aware extremum.
+
+### 2026-09-11T12:28:26.132Z, outcome 2026-09-11-1124-g80s
+
+Status: proposed -> accepted
+
+Implemented in outcome 2026-09-11-1124-g80s. raw_query is the first step of a transform, one read-only DuckDB SELECT or WITH statement whose placeholders are bare table names: input is the source, other datasets are bound under inputs and resolved like any reference. DuckDB's parser drives validation: DDL, DML, ATTACH, COPY, LOAD, INSTALL, PRAGMA, SET, CALL, multiple statements, file, network and other non-allowlisted table functions, replacement scans, storage and qualified names, and parameters are refused, each with advice naming the accepted shape. The output schema comes from DESCRIBE. The statement runs in a sandbox with no external access, extension loading or setting changes. The step is part of the operation record, idempotency fingerprint, explain, lineage and replay, and responses carry used_raw_query. An optional --query-timeout interrupts a long statement with a structured error. Accepted because windows over groups, tie-aware extrema and unions are common analytical shapes the semantic steps cannot express; the semantic steps remain the primary language.
+
+### 2026-09-11T22:52:41.209Z, outcome 2026-09-11-2249-91ms
+
+Status: accepted -> accepted
+
+Review of the implementation found that the deadline bounded less than it claimed: DuckDB evaluates some expressions while binding a statement, a COLUMNS lambda for example, without checking for interrupts, so an interrupt could arrive while a statement bound and be lost before it ran. The deadline is now what one connection can enforce. The guard keeps interrupting until the work ends and raises as soon as a binding that ignored the interrupts returns, so nothing runs after the deadline has passed, and each step that binds or runs is guarded. A single binding can still outlast the deadline; bounding that too would mean a process per sandbox step, which is not worth its cost for an expression shape no ordinary statement has. The limit is stated in the README, in the CLI help and in the pull request, and is covered by tests.

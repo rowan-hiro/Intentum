@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterator
 from pydantic import ValidationError
 
 from ..storage.duckdb.engine import SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource, physical_to_logical
+from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
@@ -58,7 +59,8 @@ from .errors import (
 )
 from .execution import Executor
 from .export import ExportFormat, ValueRenderer, write_formatted_csv
-from .ir import AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RenameStep, SelectStep, SemiJoinStep, SortStep, TransformIR
+from .ir import (AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RawQueryStep, RenameStep,
+                 SelectStep, SemiJoinStep, SortStep, TransformIR)
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
@@ -215,21 +217,29 @@ class Backend:
         store: MetadataStore | None = None,
         engine: AnalyticsEngine | None = None,
         export_root: str | Path | None = None,
+        query_timeout: float | None = None,
     ) -> None:
         self._lock = threading.RLock()  # one semantic operation at a time; see semantic_operation
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
         # Files may only be exported under this directory; None disables the guard (library use).
         self.export_root = Path(export_root).expanduser().resolve() if export_root is not None else None
+        # Seconds one raw_query statement may run before it is interrupted; None runs without a deadline.
+        if query_timeout is not None and (isinstance(query_timeout, bool) or not isinstance(query_timeout, (int, float))
+                                          or query_timeout <= 0):
+            raise ValueError(f"query_timeout must be a positive number of seconds or None, got {query_timeout!r}")
+        self.query_timeout = float(query_timeout) if query_timeout is not None else None
         self.clock = clock or _utcnow
         self.policy = policy or AllowAllPolicy()
         self.store = store or SqliteMetadataStore(self.workspace.metadata_path)
         self.engine = engine or DuckDBEngine(self.workspace.analytics_path)
+        # raw_query statements are parsed, described and run in a sandbox beside the engine (MADR 0002).
+        self.queries = QuerySandbox(self.engine, timeout=self.query_timeout) if isinstance(self.engine, DuckDBEngine) else None
         self.datasets = DatasetResolver(self.store, self.clock)
         self.fields = FieldResolver()
-        self.transforms = TransformResolver(self.datasets, self.fields)
-        self.validator = IRValidator(self.store)
+        self.transforms = TransformResolver(self.datasets, self.fields, queries=self.queries)
+        self.validator = IRValidator(self.store, queries=self.queries)
         self.planner = Planner()
-        self.executor = Executor(self.engine)
+        self.executor = Executor(self.engine, queries=self.queries)
         self.lineage = LineageService(self.store)
         self.audit = AuditService(self.store)
 
@@ -850,8 +860,13 @@ class Backend:
                     if advice:
                         response["advice"] = [a.to_dict() for a in advice]
                     response["plan"] = plan.to_text()
+                    if ir.uses_raw_query:
+                        # Countable: how often the semantic steps were not enough, and for which shapes (MADR 0002).
+                        response["used_raw_query"] = True
                     if explain:
                         response["explain"] = {"canonical_ir": op.canonical_ir, "execution_plan": plan.to_dict(), "sql": result.sql}
+                        if ir.uses_raw_query:
+                            response["explain"]["used_raw_query"] = True
                     self._complete(op, response, key, ir.logical_fingerprint(), now)
             except Exception:
                 self.executor.rollback_table(table)
@@ -920,8 +935,11 @@ class Backend:
             operation_id=op.id, created_at=now,
         ))
         lineage_ids: list[str] = []
+        # A raw_query's result derives from every dataset it reads, not only from the source.
+        queried = {b.dataset.dataset_id for step in ir.steps if isinstance(step, RawQueryStep) for b in step.inputs}
         for ref in ir.referenced_datasets():
-            relationship = Relationship.DERIVED_FROM if ref.dataset_id == ir.source.dataset_id else Relationship.JOINED_WITH
+            relationship = (Relationship.DERIVED_FROM if ref.dataset_id == ir.source.dataset_id or ref.dataset_id in queried
+                            else Relationship.JOINED_WITH)
             self.lineage.record(source_dataset_id=ref.dataset_id, source_version=ref.version, target_dataset_id=dataset_id,
                                 target_version=1, operation_id=op.id, relationship=relationship, now=now)
             lineage_ids.append(ref.dataset_id)
@@ -1979,7 +1997,7 @@ class Backend:
 
     @staticmethod
     def _operation_summary(op: Operation) -> dict[str, Any]:
-        return {
+        body = {
             "id": op.id,
             "kind": str(op.kind),
             "status": str(op.status),
@@ -1990,6 +2008,10 @@ class Backend:
             "completed_at": op.completed_at.isoformat() if op.completed_at else None,
             "principal": op.principal,
         }
+        steps = (op.canonical_ir or {}).get("steps")
+        if isinstance(steps, list) and any(isinstance(s, dict) and s.get("type") == "raw_query" for s in steps):
+            body["used_raw_query"] = True
+        return body
 
     @staticmethod
     def _semantic_hints(d: Dataset) -> dict[str, Any]:
@@ -2156,6 +2178,9 @@ class Backend:
                 clauses.append(f"{step.how}-joining {step.right.name} on " + ", ".join(f"{c.left.name} = {c.right.name}" for c in step.on))
             elif isinstance(step, SemiJoinStep):
                 clauses.append(f"keeping rows matched by {step.right.name} on " + ", ".join(f"{c.left.name} = {c.right.name}" for c in step.on))
+            elif isinstance(step, RawQueryStep):
+                clauses.append("running a read-only query over " + ", ".join(
+                    f"{b.placeholder} ({b.dataset.name} v{b.dataset.version})" for b in step.inputs))
         body = "; ".join(clauses) if clauses else "copying all rows"
         if name:
             return f"Created {name} from {ir.source.name} by {body}."

@@ -71,7 +71,8 @@ _RIGHT_KEYS = ("right", "with", "dataset")
 _DATASET_KEYS = ("dataset", "source", "name", "from", "table")
 _STEP_KEYS = {"select", "filter", "where", "group_by", "groupby", "measures", "metric", "metrics", "aggregate",
               "sort", "order_by", "sort_by", "limit", "top", "head", "rename", "derive", "compute", "join",
-              "semi_join", "semijoin", "where_exists", "columns"}
+              "semi_join", "semijoin", "where_exists", "columns", "raw_query"}
+_QUERY_KEYS = ("raw_query", "sql")
 _AGG_FUNCTIONS = {
     "sum": "sum", "total": "sum", "avg": "avg", "average": "avg", "mean": "avg", "min": "min", "minimum": "min",
     "max": "max", "maximum": "max", "count": "count", "count_distinct": "count_distinct", "nunique": "count_distinct",
@@ -1235,6 +1236,215 @@ def _transform_as_text(err: BackendError, tool: str, arguments: dict[str, Any]) 
     )
 
 
+_QUERY_SHAPE = ("raw_query takes one read-only SELECT (or WITH ... SELECT) statement in DuckDB SQL that reads only "
+                "its placeholders: input, the transform's source, and each name bound under inputs, as "
+                "{\"raw_query\": {\"sql\": \"SELECT ... FROM input JOIN customers USING (customer_id)\", "
+                "\"inputs\": {\"customers\": \"customers\"}}}. It is the first step and semantic steps may follow it; "
+                "whatever the semantic steps express needs no raw_query.")
+_STATEMENT_ADVICE = {
+    "CREATE": "To keep a query's result, send the SELECT as the raw_query of materialize_result with a name; the "
+              "backend creates the dataset with its version, lineage and audit.",
+    "DDL": "Datasets are removed with delete_dataset and never altered in place; a new shape is a new dataset, "
+           "made with materialize_result.",
+    "DML": "Datasets are never changed in place: select the rows you want and materialize them as a new dataset.",
+    "COPY": "Files are read by import_dataset or import_workspace and written by export_result.",
+    "ATTACH": "Another database is imported with import_dataset or import_workspace; a query sees only its placeholders.",
+    "LOAD": "No extension can be loaded; a query has DuckDB's built-in functions.",
+    "INSTALL": "No extension can be installed; a query has DuckDB's built-in functions.",
+    "PRAGMA": "Settings belong to the server; a query can neither read nor change them.",
+    "SET": "Settings belong to the server; a query can neither read nor change them.",
+    "CALL": "Procedures are not available; write the rows you want as a SELECT.",
+    "DESCRIBE": "describe_dataset shows a dataset's schema, types, sample and lineage.",
+    "EXPLAIN": "explain=true on the transform returns the canonical IR, the plan and the SQL the backend runs.",
+}
+
+
+def _query_step(transform: Any) -> tuple[list[dict[str, Any]], int, dict[str, Any]] | None:
+    """The transform's steps, and the index and body of the one that carries a raw_query."""
+    steps = _steps(transform)
+    for index, step in enumerate(steps):
+        kind = _pick(step, *_TYPE_KEYS)
+        if (isinstance(kind, str) and kind.lower() in _QUERY_KEYS) or any(k in step for k in _QUERY_KEYS):
+            return steps, index, step
+    return None
+
+
+def _query_parts(step: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """The SQL and the named inputs of a raw_query step, in any of the forms it is written in."""
+    body, inputs = step.get("raw_query"), step.get("inputs")
+    if isinstance(body, dict):
+        sql, inputs = body.get("sql"), body.get("inputs", inputs)
+    else:
+        sql = body if isinstance(body, str) else step.get("sql")
+    if isinstance(inputs, list):
+        inputs = {item: item for item in inputs if isinstance(item, str)}
+    return (sql if isinstance(sql, str) else None), (dict(inputs) if isinstance(inputs, dict) else {})
+
+
+def _query_restated(step: dict[str, Any], sql: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    """The step with its raw_query written as {"raw_query": {"sql", "inputs"}}; a compact object's other keys stay."""
+    rest = {k: v for k, v in step.items() if k not in ("raw_query", "sql", "inputs") + _TYPE_KEYS}
+    body: dict[str, Any] = {"sql": sql}
+    if inputs:
+        body["inputs"] = inputs
+    return {"raw_query": body, **rest}
+
+
+def _raw_query(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A refused or failed raw_query: the accepted shape, and the request rewritten when the repair is mechanical."""
+    facts = err.details.get("raw_query") if isinstance(err.details, dict) else None
+    if not isinstance(facts, dict):
+        return None
+    refused = str(facts.get("refused"))
+    kind = f"raw_query_{refused}"
+    placeholders = facts.get("placeholders") if isinstance(facts.get("placeholders"), dict) else {}
+    listed = ", ".join(f"{p} ({d})" for p, d in placeholders.items()) or "input"
+    found = _query_step(arguments.get("transform"))
+    steps, index, step = found if found is not None else ([], -1, {})
+    sql, inputs = _query_parts(step) if found is not None else (None, {})
+
+    def resend(new_sql: str | None = None, new_inputs: dict[str, Any] | None = None, **overrides: Any) -> list[dict[str, Any]]:
+        """The same call with the raw_query step's SQL or inputs replaced."""
+        changed = list(steps)
+        changed[index] = _query_restated(step, new_sql if new_sql is not None else sql or "",
+                                         inputs if new_inputs is None else new_inputs)
+        transform = _rebuild(arguments.get("transform"), changed)
+        return [call(tool, **_call_arguments(tool, arguments, transform=transform, **overrides))]
+
+    if refused == "empty":
+        return Advice(kind, "The raw_query step carries no SQL. " + _QUERY_SHAPE)
+    if refused == "unavailable":
+        return Advice(kind, "This backend's engine cannot run raw_query; express the request with the semantic steps.")
+    if refused == "parse":
+        suggested = facts.get("suggested_sql")
+        text = f"The SQL does not parse ({facts.get('message')}). "
+        if isinstance(suggested, str) and found is not None:
+            return Advice(kind, text + "A placeholder is a bare table name, not a $parameter; the same statement "
+                          "without the $ is below. " + _QUERY_SHAPE, rewrite=resend(new_sql=suggested))
+        return Advice(kind, text + _QUERY_SHAPE)
+    if refused == "statement":
+        category = "CREATE" if facts.get("statement") in ("CREATE", "CREATE_FUNC") else str(facts.get("category"))
+        command = facts.get("command") or facts.get("statement")
+        text = f"{command} is not a query; raw_query only reads. " + _STATEMENT_ADVICE.get(category, "") + " "
+        create_as = facts.get("create_as")
+        if isinstance(create_as, dict) and found is not None and isinstance(arguments.get("source"), str):
+            changed = list(steps)
+            changed[index] = _query_restated(step, str(create_as["sql"]), inputs)
+            rewrite = [call("materialize_result", source=arguments.get("source"),
+                            transform=_rebuild(arguments.get("transform"), changed),
+                            name=slugify(str(create_as["name"])), description=arguments.get("description"))]
+            return Advice(kind, text + "The same SELECT, materialized under that name, is below.", rewrite=rewrite)
+        return Advice(kind, text + _QUERY_SHAPE)
+    if refused == "statements":
+        text = f"The SQL holds {len(facts.get('statements') or [])} statements; raw_query runs exactly one. "
+        if str(facts.get("command")) in ("PIVOT", "UNPIVOT"):
+            text += ("A PIVOT without an IN list first creates a type for its values, which is a second statement; "
+                     "list the values instead: PIVOT input ON region IN ('East', 'West') USING sum(amount). ")
+        else:
+            text += "Combine them into one query with WITH ... SELECT, or send each as its own transform. "
+        return Advice(kind, text + _QUERY_SHAPE)
+    if refused == "parameter":
+        suggested = facts.get("suggested_sql")
+        text = ("raw_query takes no parameters ($name, $1 or ?): write each value into the SQL as a literal, such as "
+                "WHERE region = 'West'. ")
+        if isinstance(suggested, str) and found is not None:
+            return Advice(kind, text + "A placeholder is a bare table name; the same statement without the $ is below.",
+                          rewrite=resend(new_sql=suggested))
+        return Advice(kind, text + _QUERY_SHAPE)
+    if refused in ("file_function", "replacement_scan"):
+        what = f"{facts.get('function')}()" if refused == "file_function" else f"FROM {facts.get('reference')!r}"
+        return Advice(kind, f"{what} reads from outside the backend, and a raw_query reads only the datasets bound to "
+                            f"its placeholders ({listed}). Import the file with import_dataset (a directory with "
+                            "import_workspace), bind the new dataset under inputs and read it by that name. " + _QUERY_SHAPE)
+    if refused == "table_function":
+        return Advice(kind, f"{facts.get('function')}() is not available in a raw_query; the table functions it takes "
+                            f"are {', '.join(facts.get('allowed') or [])}, and everything else it reads is a "
+                            f"placeholder ({listed}).")
+    if refused == "physical_table":
+        return Advice(kind, f"Storage tables are not visible to a query; it reads datasets only through its "
+                            f"placeholders ({listed}). Bind the dataset you mean under inputs, by its name, and read "
+                            "it by that placeholder.")
+    if refused == "qualified_table":
+        return Advice(kind, f"{facts.get('reference')} names a schema or a database; a placeholder is a bare name "
+                            f"({listed}), and any other dataset is bound under inputs to be read by name.")
+    if refused == "cte_shadows_placeholder":
+        return Advice(kind, "A WITH clause that takes a placeholder's name hides the dataset bound to it; give the "
+                            "CTE its own name and read the placeholder inside it.")
+    if refused == "unknown_placeholder":
+        names = [str(n) for n in facts.get("names") or []]
+        datasets = facts.get("datasets") if isinstance(facts.get("datasets"), dict) else {}
+        text = f"The SQL reads {', '.join(names)}, but the placeholders bound here are {listed}."
+        if names and all(n in datasets for n in names) and found is not None:
+            bound = {**inputs, **{n: datasets[n] for n in names}}
+            text += (" " + ", ".join(f"{n} is the dataset {datasets[n]}" for n in names)
+                     + ": bound under inputs, as below, the query reads it by that name.")
+            return Advice(kind, text, rewrite=resend(new_inputs=bound))
+        return Advice(kind, text + " Bind each dataset under inputs by the name the SQL uses "
+                                   "({\"inputs\": {\"customers\": \"customers\"}}), or read a placeholder instead.")
+    if refused == "unused_input":
+        names = [str(n) for n in facts.get("names") or []]
+        text = (f"inputs binds {', '.join(names)}, which the SQL never reads; each bound dataset becomes an upstream "
+                "of the result, so bind only what the query reads.")
+        if found is not None and all(n in inputs for n in names):
+            return Advice(kind, text, rewrite=resend(new_inputs={k: v for k, v in inputs.items() if k not in names}))
+        return Advice(kind, text)
+    if refused == "source_unused":
+        used = [str(n) for n in facts.get("used") or []]
+        text = (f"The SQL never reads input, the placeholder of the transform's source "
+                f"({placeholders.get('input', 'source')}), which would still become an upstream of the result. Read "
+                "it, or make a dataset the query does read the transform's source.")
+        if used and found is not None and used[0] in inputs:
+            return Advice(kind, text + f" The same request with {used[0]}'s dataset as the source is below.",
+                          rewrite=resend(source=inputs[used[0]]))
+        return Advice(kind, text)
+    if refused == "input_not_found":
+        available = [str(d.get("name")) for d in err.details.get("available") or [] if isinstance(d, dict)]
+        text = (f"No dataset matches {facts.get('reference')!r}, the dataset bound to {facts.get('name')}; the datasets "
+                f"here are {', '.join(available) if available else 'none'}. Bind one of them under inputs by its name "
+                "or id, or a description that names it.")
+        if err.details.get("restorable"):
+            text += " The dataset was deleted; restore_dataset brings it back."
+        return Advice(kind, text)
+    if refused == "placeholder_name":
+        return Advice(kind, "A placeholder is a table name in the SQL: it starts with a letter and holds letters, "
+                            "digits and underscores, and input is kept for the transform's source. Name each input: "
+                            "{\"inputs\": {\"customers\": \"<dataset reference>\"}}.")
+    if refused == "not_first":
+        text = ("raw_query must be the first step: input is the transform's source and each placeholder binds a "
+                "dataset, not the result of the steps before it. Materialize the steps before it and run the query "
+                "over that dataset, as below; semantic steps may follow the query.")
+        source = arguments.get("source")
+        if found is not None and index > 0 and isinstance(source, str):
+            prepared = slugify(f"{source}_prepared")
+            before = steps[:index]
+            rewrite = [call("materialize_result", source=source, transform=before if len(before) > 1 else before[0],
+                            name=prepared, description=f"{source}, prepared for a raw_query"),
+                       call(tool, **_call_arguments(tool, arguments, source=prepared, transform=steps[index:]))]
+            return Advice(kind, text, rewrite=rewrite)
+        return Advice(kind, text)
+    if refused == "binding":
+        columns = facts.get("columns") if isinstance(facts.get("columns"), dict) else {}
+        shown = "; ".join(f"{p}: {', '.join(str(c) for c in cols)}" for p, cols in columns.items())
+        return Advice(kind, f"DuckDB could not bind the statement over its placeholders: {facts.get('message')}"
+                            + (f" The columns of each placeholder are {shown}." if shown else ""))
+    if refused == "output_type":
+        return Advice(kind, "The backend holds integer, float, boolean, string, date and timestamp columns; cast each "
+                            "other column in the SQL to one of them, e.g. CAST(tags AS VARCHAR), or leave it out.")
+    if refused == "output_name":
+        return Advice(kind, "Give each output column its own name with AS, e.g. count(*) AS orders; names are "
+                            "compared without regard to case.")
+    if refused == "deadline":
+        seconds = facts.get("timeout_seconds")
+        limit = f"after {seconds:g} seconds" if isinstance(seconds, (int, float)) else "when it runs too long"
+        return Advice(kind, f"This server stops a raw_query {limit}. Make the statement cheaper (filter and aggregate "
+                            "before joining, avoid cross joins) or split it: materialize an intermediate result and "
+                            "query that. The semantic steps have no such deadline.")
+    if refused == "execution":
+        return Advice(kind, f"The statement was accepted and failed on the data ({facts.get('message')}). Fix the "
+                            "expression that fails; try_cast(x AS type) gives NULL for a value that does not convert.")
+    return Advice(kind, _QUERY_SHAPE)
+
+
 Detector = Callable[[BackendError, str, dict[str, Any]], Advice | None]
 
 # Tools whose refusals may name a document or a file where a dataset was expected.
@@ -1245,6 +1455,7 @@ _DATASET_TOOLS = _TRANSFORM_TOOLS + ("describe_dataset", "get_provenance", "publ
 # runs only when no other detector recognised the refusal, so a general explanation never stacks on a
 # specific one. Order is the order advice is listed in.
 _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
+    (_raw_query, _TRANSFORM_TOOLS, False),
     (_subquery, _TRANSFORM_TOOLS, False),
     (_limit_tail, _TRANSFORM_TOOLS, False),
     (_like, _TRANSFORM_TOOLS, False),

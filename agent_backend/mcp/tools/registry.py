@@ -128,7 +128,16 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "aggregate (group_by + optional measures[{function, field, alias}]; group_by alone "
                              "returns distinct groups), sort, limit, rename, derive ({name, expression}), join "
                              "({right, on, how}), semi_join ({right, on}; keeps left rows with a right match without "
-                             "copying right columns; materialize a filtered right input first when needed); a step may also be written "
+                             "copying right columns; materialize a filtered right input first when needed), and "
+                             "raw_query, the fallback for shapes the other steps cannot express, such as the latest "
+                             "row per group (a window), every row tied at a maximum, or a union: {\"raw_query\": "
+                             "{\"sql\": \"SELECT * FROM input UNION ALL SELECT * FROM archive\", \"inputs\": "
+                             "{\"archive\": \"orders_2025\"}}}. Its sql is one read-only DuckDB SELECT or WITH "
+                             "statement that names datasets only by placeholder: input is `source`, and each name "
+                             "under `inputs` is bound to a dataset reference; raw_query must be the first step, "
+                             "semantic steps may follow it, it runs in a sandbox with no file, network or setting "
+                             "access, and the response says used_raw_query: true. Use the other steps whenever they "
+                             "can express the request. A step may also be written "
                              "without `type` when its key names it, e.g. [{\"filter\": \"...\"}, {\"sort\": \"-amount\"}] "
                              "or {\"aggregate\": {\"group_by\": [...], \"measures\": [...]}}; select and derive accept "
                              "\"field as alias\", and group_by accepts a named expression such as "
@@ -158,6 +167,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
     @server.tool(name="materialize_result", annotations=annotations("write"),
                  description="Persist the result of a semantic transform as a new managed dataset named `name`. "
                              "Creates the dataset, its version, lineage, provenance and audit records atomically. "
+                             "`transform` takes the same steps as transform_dataset; when the steps cannot express a "
+                             "shape, a raw_query first step ({\"raw_query\": {\"sql\": \"SELECT ... FROM input\", "
+                             "\"inputs\": {\"name\": \"dataset\"}}}, one read-only SELECT or WITH statement over "
+                             "placeholders) is the fallback, and every dataset it binds is recorded as an input. "
                              "Retrying the same logical request returns the original result instead of creating a "
                              "duplicate.")
     def materialize_result(
