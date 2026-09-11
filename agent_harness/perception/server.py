@@ -11,7 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.utilities.types import Image
 from mcp.types import CallToolResult, TextContent
 
-from .video import VideoReader
+from .video import DEFAULT_MAX_DIMENSION, VideoReader
 from .audio import AudioReader
 
 INSTRUCTIONS = """\
@@ -67,7 +67,7 @@ def create_server(reader: VideoReader, audio: AudioReader | None = None) -> MCPS
         return reader.inspect(path)
 
     @server.tool(structured_output=False)
-    def read_video_frames(path: str, timestamps_s: list[float], max_dimension: int = 1280) -> CallToolResult:
+    def read_video_frames(path: str, timestamps_s: list[float], max_dimension: int = DEFAULT_MAX_DIMENSION) -> CallToolResult:
         """Read 1–6 actual images at chosen seconds from the start. Returns frame ids, actual timestamps and PNG attachments in matching order. max_dimension is 320–1920."""
         body = reader.frames(path, timestamps_s, max_dimension)
         return CallToolResult(

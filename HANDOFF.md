@@ -29,6 +29,14 @@ inkan log -n 3
 
 Outcomes under Inkan (`inkan log` carries them), newest first:
 
+- `2026-09-11-0130-bnw8` aligns existing media configuration with the
+  champion reference and records three fresh DataSpace attempts: `task_312`
+  passes; `task_300` and `task_389` fail after substituting other tables for
+  the requested data held in Markdown documents. All three read frames and
+  transcribed speech. The local `.env` now enables video and champion medium
+  weights with the new image; the configured gateway remains in use because the
+  reference internal endpoint timed out. Read the newest DataSpace section
+  and the perception README comparison for evidence coverage and limits.
 - `2026-09-10-0911-ppn6` fixes the media review findings: frame reads use
   input seeking while preserving original PTS; audio bounds follow the
   selected track, including speech after video EOF. Container-duration
@@ -157,6 +165,16 @@ docker build -f agent_harness/hosts/opencode.Dockerfile --build-arg OPENCODE_VER
 uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3              # OpenCode in the container (default)
 uv run python -m agent_harness.scenarios.dataspace.agent --task task_44 --runs 3 --host loop  # in-process loop, the control arm
 ```
+
+Local media defaults can also be saved as `HARNESS_VIDEO=1`,
+`HARNESS_ASR_MODEL=.cache/asr/champion/medium`, and
+`HARNESS_OPENCODE_IMAGE=<built image tag>`. With those settings, DataSpace
+runs enable both frames and speech. Use `--no-audio` for frames alone or
+`--no-video` for a text-only run (required for `--host loop` when the saved
+video setting is on). `--check-config` checks the effective settings and
+offline weight hashes without running the model. The configuration comparison
+and remaining champion preprocessing differences are in
+`agent_harness/perception/README.md`.
 
 The OpenCode host needs Docker and the image above; rebuild the image after a
 backend change, since the backend's MCP server is baked in. OpenCode is never

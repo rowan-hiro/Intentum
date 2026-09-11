@@ -42,6 +42,27 @@ def setting(name: str, default: str | None = None) -> str | None:
     return value if value else default
 
 
+def boolean_setting(name: str, default: bool = False) -> bool:
+    value = setting(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true/false or 1/0, got {value!r}")
+
+
+def configured_asr_model() -> Path | None:
+    """Resolve repository-relative weights independently of the caller's cwd."""
+    value = setting("HARNESS_ASR_MODEL")
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else ROOT / path
+
+
 def model_config() -> dict[str, str]:
     values = {key: setting(key) for key in MODEL_KEYS}
     missing = [key for key, value in values.items() if not value]

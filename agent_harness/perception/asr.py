@@ -9,7 +9,9 @@ from pathlib import Path
 
 from .video import save_json
 
-OPTIONS = {"beam_size": 5, "temperature": 0.0, "vad_filter": True,
+# Match the champion's faster-whisper defaults, including fallback decoding
+# temperatures for difficult intervals. Keep these explicit in the evidence.
+OPTIONS = {"beam_size": 5, "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], "vad_filter": True,
            "word_timestamps": True, "condition_on_previous_text": False}
 
 

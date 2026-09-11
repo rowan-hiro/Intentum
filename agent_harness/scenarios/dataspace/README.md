@@ -68,6 +68,101 @@ wording. A broader measurement should include cases where the declaration
 should be retained as well as corrected, across different deliverable shapes;
 an increased amendment rate alone would not establish improvement.
 
+## 2026-09-11 · existing media configuration aligned, three task attempts
+
+**One official pass out of three single-run attempts. All three completed
+frame reading and offline speech transcription, exported a prediction, and
+passed backend integrity checks.** These runs test the existing perception
+tools with aligned settings, not the champion's full preprocessing pipeline.
+
+The reference is the clean champion checkout at
+`bdc874fc4260e3565ae0dce041728fdf5b376709`. Local settings now enable both
+video and the SHA256-verified `.cache/asr/champion/medium` weights by default
+for this workspace. Recognition keeps CPU/int8, beam 5, VAD, word timestamps
+and no previous-text conditioning; its temperature fallback list now matches
+the champion's faster-whisper defaults. The default frame maximum dimension
+is 1920 instead of 1280. The full comparison, including the separate language
+probe, ASR prompting, normalization, slide selection and layout extraction
+that remain different, is in `../../perception/README.md`.
+
+The champion's default internal gateway timed out during a 10 s connectivity
+check. These runs used the configured `qwen/qwen3.5-35b-a3b` through
+`the configured OpenAI-compatible gateway`, with explicit user authorization to send
+public DataSpace data there. A fresh synthetic visual-code probe passed
+through this exact image/model path in 8.0 s. OpenCode was 1.18.26, image
+`intentum-opencode:1.18.26-media-bnw8`, id
+`sha256:84adda66a8289270e3f986562d6f34ff4201a58ccf020099b9ceeefbcd7dbeab`.
+The agent container mounted only its task context, not gold or other tasks.
+
+| Task | Official verdict | Prediction rows × columns | Reference rows × columns | Model steps / tool calls | Host time |
+|---|---|---|---|---|---|
+| `task_312` | Pass | 242 × 3 | 242 × 3 | 14 / 13 | 219.5 s |
+| `task_300` | Fail: column count | 10,668 × 2 | 50 × 1 | 19 / 18 | 353.5 s |
+| `task_389` | Fail: row count | 107 × 3 | 50 × 3 | 32 / 31 | 427.8 s |
+
+The champion comparison scorer returned 1.0, 0.0 and 0.0 respectively. All
+three stopped normally. Their runs overlapped, including CPU transcription,
+so these timings do not isolate the latency effect of configuration changes.
+The runtime records faster-whisper 1.2.1, CTranslate2 4.8.2 and ONNX Runtime
+1.29.0. Model steps reported 334,213, 924,559 and 2,133,557 total tokens;
+OpenCode reports zero cost for this unpriced model, not a billing result.
+
+| Task | Frames read (seconds) | Speech interval / language / segments | Imported evidence |
+|---|---|---|---|
+| `task_312` | 35, 40, 45 | 0–77.525 / zh / 12 | Raw transcript segments; no saved visual observation |
+| `task_300` | 0–55 at 5 s intervals | 0–90 / zh / 13 | Neither transcript nor observation |
+| `task_389` | 35, 50, 65, 80, 95, 110 | 0–132 / en / 28 | One frame-cited observation; raw transcript not imported |
+
+All returned frames used maximum dimension 1920. ASR calls took 155.748,
+204.038 and 189.468 s respectively, below their 300 s subprocess limit.
+`task_300` left audio from 90 to 107.883 s unread; `task_389` stopped 0.48 s
+before its audio endpoint. The records establish actual media transport and
+these intervals, not transcription accuracy or complete evidence coverage.
+Only `task_389` saved and imported a visual interpretation. Tool availability
+still does not ensure the model follows the evidence-import instructions.
+
+The two failures also expose a source-access limitation. `task_300` carries
+its benchmark-growth data in `doc/mf_benchmarkgrowthrate.md`, which is absent
+from the imported dataset list. After unsuccessful dataset lookups, the
+agent substituted `mf_netvalueperformancehis.NVDailyGrowthRate > 0` and
+exported both the name and growth-rate columns, although the question asks
+for names. `task_389` carries the requested other-depository-corporation
+data in `doc/ed_otherdepositorycorpbs.md`, also absent from the imported
+datasets. It substituted `ed_moneyauthoritybs`, renamed its government
+claim field and filled the central-bank claim field with null. It repaired
+the export's case mismatch by amending its declaration, but that could not
+repair the source substitution. The traces support prioritizing document
+reading and avoiding unsupported source substitutions; they do not show an
+audio/video decoding failure. No backend or prompt change was made in
+response to these scores.
+
+Local artifacts under `runs/`:
+
+- `media-alignment-20260911-bnw8/configuration.json` records the reference
+  source hashes, effective settings and model manifest; `results.json`
+  summarizes the verdicts and actual evidence usage.
+- `vision-probe-20260911-bnw8/probe_result.json` and its host trace.
+- `<task>/media-aligned-20260911-bnw8/agent_summary.json` and `run_1/` for
+  each of the three tasks: prompt/config, raw events, normalized result,
+  frame/audio/observation evidence, predictions and official evaluation.
+
+Reproduce using the media `.env` settings documented in the perception
+README and a fresh absolute output directory per task:
+
+```sh
+uv run python -m agent_harness.scenarios.dataspace.agent \
+  --task task_312 --runs 1 --out /tmp/intentum-media-312-new
+```
+
+Use `task_300` and `task_389` with their own fresh output directories for the
+other two attempts. Local verification passed 274 tests with eight real-media
+checks skipped because the machine lacks FFmpeg. All 25 media tests passed
+in the newly built container. Seven new configuration checks cover saved
+settings, environment/CLI precedence, frame-only and text-only overrides,
+repository-relative weights, invalid toggles and corrupt weights failing
+before a previous run can be replaced. No backend module or wheel dependency
+changed. Outcome: `2026-09-11-0130-bnw8`.
+
 ## 2026-09-10 · offline audio integration on the task_312 video
 
 The optional `--asr-model` path now exposes `transcribe_audio` beside the

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
@@ -11,6 +12,25 @@ from .video import digest, save_json
 DEFAULT_REPO = "Systran/faster-whisper-medium"
 DEFAULT_REVISION = "08e178d48790749d25932bbc082711ddcfdfbc4f"
 MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+
+
+def verify_model(model_dir: Path) -> dict:
+    """Check the offline model before a run, without loading the recognizer."""
+    model_dir = model_dir.resolve(strict=True)
+    manifest_path = model_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("ASR model needs manifest.json; run agent_harness.perception.prepare_asr first.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("ASR model manifest must be an object naming the required model files.")
+    files = manifest.get("files", {})
+    if not isinstance(files, dict) or set(files) != set(MODEL_FILES):
+        raise ValueError("ASR model manifest must name the required model files.")
+    for name in MODEL_FILES:
+        path = (model_dir / name).resolve(strict=True)
+        if not path.is_relative_to(model_dir) or digest(path) != files[name]:
+            raise ValueError(f"ASR model file does not match its manifest: {name}")
+    return manifest
 
 
 def copy_local(source: Path, out: Path) -> Path:

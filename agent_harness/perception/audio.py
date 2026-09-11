@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .asr import OPTIONS
-from .prepare_asr import MODEL_FILES
+from .prepare_asr import verify_model
 from .video import VideoReader, _json, _run, digest, save_json
 
 MAX_CLIP_SECONDS = 180
@@ -64,17 +64,7 @@ class AudioReader:
         self.model_dir = model_dir.resolve(strict=True)
         self.timeout_s = timeout_s
         self._lock = threading.Lock()
-        manifest_path = self.model_dir / "manifest.json"
-        if not manifest_path.is_file():
-            raise ValueError("ASR model needs manifest.json; run agent_harness.perception.prepare_asr first.")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        files = manifest.get("files", {})
-        if set(files) != set(MODEL_FILES):
-            raise ValueError("ASR model manifest must name the required model files.")
-        for name in MODEL_FILES:
-            path = (self.model_dir / name).resolve(strict=True)
-            if not path.is_relative_to(self.model_dir) or digest(path) != files[name]:
-                raise ValueError(f"ASR model file does not match its manifest: {name}")
+        manifest = verify_model(self.model_dir)
         self.model = manifest
         self.model_fingerprint = hashlib.sha256(_json(manifest).encode()).hexdigest()
         self.root = video.evidence_root / "audio"
