@@ -20,6 +20,8 @@ from .canonical import (
     Measure,
     OutputMode,
     OutputSpec,
+    QueryInput,
+    RawQueryStep,
     RenameMapping,
     RenameStep,
     SemiJoinStep,

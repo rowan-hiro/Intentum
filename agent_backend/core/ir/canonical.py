@@ -209,8 +209,31 @@ class SemiJoinStep(_StepBase):
     on: list[JoinCondition] = Field(min_length=1)
 
 
+class QueryInput(IRModel):
+    """A placeholder of a raw_query and the dataset version bound to it, with the fields it exposes."""
+
+    placeholder: str = Field(min_length=1)
+    dataset: DatasetRef
+    fields: list[FieldRef] = Field(min_length=1)
+
+
+class RawQueryStep(_StepBase):
+    """Read-only SQL over placeholder-bound inputs: the fallback for shapes the steps cannot express (MADR 0002).
+
+    Always the first step; ``inputs[0]`` binds ``input`` to the transform's
+    source. ``columns`` are the names the statement returns, in order, and
+    ``output_schema`` the fields they become.
+    """
+
+    type: Literal["raw_query"] = "raw_query"
+    sql: str = Field(min_length=1)
+    inputs: list[QueryInput] = Field(min_length=1)
+    columns: list[str] = Field(min_length=1)
+
+
 Step = Annotated[
-    Union[SelectStep, FilterStep, AggregateStep, SortStep, LimitStep, RenameStep, DeriveStep, JoinStep, SemiJoinStep],
+    Union[SelectStep, FilterStep, AggregateStep, SortStep, LimitStep, RenameStep, DeriveStep, JoinStep, SemiJoinStep,
+          RawQueryStep],
     Field(discriminator="type"),
 ]
 
@@ -250,7 +273,16 @@ class TransformIR(IRModel):
         for step in self.steps:
             if isinstance(step, (JoinStep, SemiJoinStep)):
                 refs.append(step.right)
+            elif isinstance(step, RawQueryStep):
+                # Every bound input is an upstream; the source is bound as ``input`` and listed once.
+                for binding in step.inputs:
+                    if binding.dataset not in refs:
+                        refs.append(binding.dataset)
         return refs
+
+    @property
+    def uses_raw_query(self) -> bool:
+        return any(isinstance(step, RawQueryStep) for step in self.steps)
 
 
 class ImportIR(IRModel):

@@ -56,6 +56,7 @@ Key properties, all enforced in software rather than in prompts:
 | Schema and type correctness | shared type rules in `core/ir/typing.py`, applied twice (resolver inference, validator re-check) |
 | Semantic types at import | text columns whose non-null values are all ISO dates/timestamps become `date`/`timestamp` (a source driver reports what it can store, not what the data means); an explicit `type` hint wins, and the refinement is a resolution note and part of the recorded IR |
 | Value rendering | a property of the exported file, not of the data: `export_result` takes a validated `format_spec`; transforms compute, they do not format |
+| Long-tail query shapes | a `raw_query` step (MADR 0002): one read-only SELECT over placeholder-bound inputs, checked with DuckDB's parser, `DESCRIBE`d before it runs, executed in a sandbox with no external access, and recorded like any other step |
 | Ambiguity | `AmbiguousReferenceError` → `status: needs_resolution` with candidates |
 | Write-ahead operation record | operation row is inserted `pending` before any work, updated with IR and plan before execution, and finalized in the commit transaction |
 | Atomicity | DuckDB `CREATE TABLE AS` is atomic; metadata commit is one SQLite transaction; failure between the two drops the table |
@@ -136,7 +137,8 @@ explicit list of steps always keeps the written order:
 ```
 
 Step types: `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`,
-`derive`, `join`, `semi_join`. A step may also be written without `type` when its key names
+`derive`, `join`, `semi_join`, and `raw_query`, the fallback described below.
+A step may also be written without `type` when its key names
 it, so `[{"filter": "amount > 100"}, {"sort": "-amount"}, {"limit": 3}]` is a
 pipeline and `{"aggregate": {"group_by": [...], "measures": [...]}}` is an
 aggregate step with its body nested under its own key; `select` and `derive`
@@ -168,7 +170,67 @@ right concat coalesce year month day date date_trunc strftime is_null contains
 starts_with ends_with`; `||` is read as `concat`). A two-argument call written
 the other way round (`strftime('%Y-%m-%d', ts)`) is reordered to its signature
 and reported as a resolution note; a type error names the signature it
-expected. There is no SQL passthrough.
+expected. There is no SQL passthrough in expressions; SQL enters only as a
+`raw_query` step.
+
+`raw_query` is the fallback for shapes the other steps cannot express: a
+window over groups (the latest order per customer), every row tied at an
+extremum, a union of same-shaped datasets (MADR 0002). The semantic steps stay
+the primary language. Every response that used a `raw_query` carries
+`used_raw_query: true` (so do `explain`, `get_operation` and the producing
+operation in `get_provenance`), so how often the vocabulary fell short, and on
+which shapes, can be counted and the recurring shapes promoted to steps:
+
+```json
+[{"raw_query": {"sql": "SELECT o.customer, o.order_id, c.segment FROM input o JOIN customers c ON o.customer = c.name QUALIFY row_number() OVER (PARTITION BY o.customer ORDER BY o.order_date DESC, o.order_id DESC) = 1",
+                "inputs": {"customers": "customers"}}},
+ {"sort": "customer"}]
+```
+
+`sql` is one read-only DuckDB `SELECT` or `WITH` statement (set operations,
+CTEs, window functions, `QUALIFY`, subqueries, `CASE`, `LIKE` and regular
+expressions included) that reads datasets only by placeholder. `input` is the
+transform's `source`; every other name is declared under `inputs` with a
+dataset reference, resolved like any other (loose descriptions,
+`needs_resolution` on ambiguity) and bound to that dataset's current version.
+A placeholder is a plain table name in a namespace the backend controls, not
+text it substitutes: DuckDB's parser finds the table references and the
+statement is never rewritten, so a placeholder cannot collide with DuckDB's
+`$name` or `?` parameters (both refused) and a name inside a string literal
+or a comment is never read as a table. The step comes first in its transform
+(in a compact object it runs first) and semantic steps may follow it.
+
+Validation reads the statement with DuckDB's parser, not with patterns, and
+accepts exactly one SELECT. It refuses DDL, DML, `ATTACH`, `COPY`, `LOAD`,
+`INSTALL`, `PRAGMA`, `SET`, `CALL` and `DESCRIBE`, several statements, table
+functions that read files or the network (`read_csv`, `read_parquet`,
+`read_json`, `read_text`, `read_blob`, `glob`, `sqlite_scan`, ...; of table
+functions only `range`, `generate_series` and `unnest` are accepted), a file
+or URL named in `FROM`, storage table names, qualified names, and any table
+name that is neither a placeholder nor a CTE; an input the SQL never reads is
+refused too, because every bound dataset becomes an upstream. Each refusal
+names the accepted shape (MADR 0010) and, when the repair is mechanical,
+rewrites the request: an unbound name that is a dataset gets bound, an unused
+input is dropped, `FROM $input` loses its `$`, `CREATE TABLE x AS SELECT ...`
+becomes `materialize_result` of that SELECT named `x`, and semantic steps
+written before the query are materialized first.
+
+The output schema is DuckDB's `DESCRIBE` of the statement over the
+placeholders' schemas, taken before anything runs and mapped to the backend's
+types; a column of another type (a list, a struct, an interval) is refused
+with the cast that fixes it, and a computed column without a name
+(`max(amount)`) is normalized to snake_case (`max_amount`) with a resolution
+note. The statement then runs in a sandbox: a separate DuckDB database
+holding one table per placeholder, copied from the bound versions, opened with
+external access disabled, extension loading off and the configuration
+locked, so it can read no file, reach no network and change no setting even
+if validation missed something, and it never sees a storage name. Its result
+comes back through the normal materialization path, so the step is part of
+the operation record, the idempotency fingerprint (the SQL text and the bound
+versions), `explain`, lineage (every bound input is an upstream) and replay of
+the recorded IR. A server-configured deadline (`--query-timeout SECONDS`; no
+deadline by default) interrupts a long statement and returns a structured,
+recoverable `EXECUTION_FAILED` with advice.
 
 ### Exporting an answer
 
@@ -320,8 +382,11 @@ materialization name another request already produced (what is there, and the
 two ways on), a derive with a name and nothing to compute (what derive is for,
 and that a value across rows is an aggregate step, then a semi_join or a sort
 and limit), a declaration
-without `rows` or with a malformed `order_by` (the grammar), and a contract
-mismatch at export (the reshape and the export). A field that is simply not in
+without `rows` or with a malformed `order_by` (the grammar), a contract
+mismatch at export (the reshape and the export), and every refused or failed
+`raw_query` (the shape it accepts; an unbound dataset, an unused input,
+`$input`, `CREATE TABLE ... AS` and steps written before the query are
+rewritten). A field that is simply not in
 scope is explained with the scope and never rewritten from a look-alike name.
 A detector that cannot rewrite still explains. Every rewrite is executed in its
 test and must succeed.
@@ -345,7 +410,7 @@ agent_backend/
 │   ├── logging.py          structured stage events
 │   ├── naming.py           Unicode-aware identifier rules (normalize, slugify, tokens)
 │   ├── models/             Dataset, Column, Artifact, DatasetVersion, LineageEdge, Operation, AuditEvent
-│   ├── ir/                 canonical IR (pydantic), expression parser, shared type rules
+│   ├── ir/                 canonical IR (pydantic), expression parser, shared type and raw_query rules
 │   ├── knowledge/          heuristic parser for knowledge.md-style semantic-layer documents
 │   ├── resolver/           dataset / field / expression / transform resolvers
 │   ├── validation/         IR validator (independent re-check)
@@ -358,7 +423,7 @@ agent_backend/
 │   └── audit/              audit trail
 ├── storage/
 │   ├── metadata/           MetadataStore protocol + SQLite implementation
-│   ├── duckdb/             AnalyticsEngine protocol + DuckDB implementation
+│   ├── duckdb/             AnalyticsEngine protocol + DuckDB implementation; the raw_query sandbox
 │   └── files/              managed workspace (metadata.sqlite, analytics.duckdb, files/)
 ├── mcp/
 │   ├── server/             MCPServer entry point (`agent-backend-mcp`)
@@ -443,6 +508,10 @@ Start the server over stdio:
 uv run agent-backend-mcp --workspace ./workspace
 ```
 
+`--query-timeout SECONDS` (or `$AGENT_BACKEND_QUERY_TIMEOUT`) sets the
+deadline after which a `raw_query` statement is interrupted; without it there
+is none. The library takes the same as `Backend(..., query_timeout=...)`.
+
 Client configuration (Claude Desktop / Claude Code / Codex style; see
 `examples/mcp_config.json`):
 
@@ -460,7 +529,8 @@ Client configuration (Claude Desktop / Claude Code / Codex style; see
 
 Claude Code: `claude mcp add agent-backend -- uv run --directory /abs/path/to/Intentum agent-backend-mcp --workspace /abs/path/to/workspace`.
 
-Tools exposed (all semantic; no SQL, no file or table primitives):
+Tools exposed (all semantic; no SQL tool, since read-only SQL enters only as the
+`raw_query` step of a transform, and no file or table primitives):
 `list_datasets`, `list_artifacts`, `describe_dataset`, `search_datasets`,
 `import_dataset`, `import_workspace`, `attach_metadata`, `transform_dataset`,
 `declare_output`, `materialize_result`, `export_result`, `publish_dataset`,
@@ -596,6 +666,14 @@ the canonical IR, the full execution plan and the generated SQL.
 - `test_import.py` also covers temporal refinement: text dates promoted to
   `date`/`timestamp`, `type` hints winning over it, and values that only look
   like dates (`2002-02-31`) staying text.
+- `test_raw_query.py`: the `raw_query` step (MADR 0002) on shop data — the
+  latest order per customer (a window), every row tied at a maximum, a union
+  of two order batches, a CTE, a join of several inputs followed by semantic
+  steps; every refusal class with its advice, and each rewrite sent back;
+  the `DESCRIBE`d output schema, the preview limit, idempotent replay and
+  replay of the recorded IR, `explain`, lineage and the operation record;
+  the sandbox refusing file, network and setting access on its own, the
+  deadline, the `--query-timeout` flag and the MCP surface.
 
 Each state-changing test finishes by checking `Backend.integrity_report()`,
 which cross-checks metadata versions, DuckDB tables, row counts, orphan tables
@@ -665,17 +743,21 @@ imports in ~2 s and the task's query runs through the semantic steps.
    families on the same prompt and tooling after the advice gap was closed;
    the two-family table and what separates the models (one reading in the
    declaration step, not the language or the price) are in the DataSpace
-   README. A validated read-only `raw_query` fallback step is
-   recorded as MADR 0002 for the long tail; nothing measured so far has
-   needed it. DataSpace is a validation scenario, not the goal (MADR 0004).
+   README. The validated read-only `raw_query` fallback step of MADR 0002 is
+   implemented for the long tail; nothing measured so far has needed it, and
+   responses flag `used_raw_query` so the next measurements count when the
+   semantic steps fall short. DataSpace is a validation scenario, not the goal
+   (MADR 0004).
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in
    place, only the operation is missing.
 2. **Time-travel and lineage-aware reads**: `describe_dataset(version=…)`,
    downstream impact reports before delete/replace.
-3. **Restricted read-only query capability** built on the same expression
-   language, with the same validator, for ad-hoc analysis that does not fit
-   the step vocabulary.
+3. **Promote recurring raw_query shapes to steps**: ad-hoc analysis that does
+   not fit the step vocabulary now runs as a `raw_query` (MADR 0002); a shape
+   that recurs under `used_raw_query` (latest row per group, a tie-aware
+   extremum, a union) is the candidate for a semantic step with the
+   expression language's own validation.
 4. **Storage backends**: PostgreSQL `MetadataStore`, Parquet-on-object-storage
    for versions; the protocols are in place, the SQLite/DuckDB code is the only
    implementation.

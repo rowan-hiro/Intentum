@@ -116,6 +116,12 @@ class DatasetResolver:
             hint="Repeat the request with the dataset id or exact name.",
         )
 
+    def find_exact(self, text: str) -> Dataset | None:
+        """The one active dataset whose id, name, alias or normalized name is ``text``; None otherwise."""
+        active = [d for d in self.store.list_datasets() if d.status != DatasetStatus.DELETED]
+        hits = self._exact_matches(text, active)
+        return hits[0] if len(hits) == 1 else None
+
     # -- internals -------------------------------------------------------
     @staticmethod
     def _reference_text(reference: Any, field: str) -> str:
