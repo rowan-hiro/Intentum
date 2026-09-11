@@ -20,9 +20,11 @@ from pathlib import Path
 import pytest
 
 from agent_backend import Backend
-from agent_backend.core.errors import BackendError
+from agent_backend.core.errors import BackendError, ExecutionFailedError
 from agent_backend.core.ir import OutputMode, OutputSpec, TransformIR
+from agent_backend.core.models.entities import LogicalType
 from agent_backend.mcp.server import INSTRUCTIONS, create_server
+from agent_backend.storage.duckdb import QuerySandbox
 from tests.conftest import ORDERS_CSV, write_csv
 
 server_main = importlib.import_module("agent_backend.mcp.server.main")
@@ -559,6 +561,77 @@ def test_a_long_raw_query_is_stopped_at_the_server_deadline(tmp_path, clock):
         assert backend.integrity_report()["ok"], backend.integrity_report()
     finally:
         backend.close()
+
+
+# DuckDB evaluates a COLUMNS lambda while it binds, once per column, and does not check for interrupts there.
+BINDING_BOMB = "SELECT COLUMNS(c -> list_sum(range(30000000)) > 0) FROM input"
+
+
+def test_computation_while_binding_is_bounded_by_the_deadline(tmp_path, clock):
+    backend = Backend(tmp_path / "workspace", clock=clock, query_timeout=0.5)
+    try:
+        assert backend.import_dataset(str(ORDERS_CSV))["status"] == "success"
+        started = time.monotonic()
+        response = backend.transform_dataset("orders", {"raw_query": BINDING_BOMB})
+        assert time.monotonic() - started < 10
+        assert response["status"] == "error" and response["code"] == "EXECUTION_FAILED", response
+        assert response["recoverable"] is True
+        assert response["details"]["raw_query"] == {"refused": "deadline", "timeout_seconds": 0.5}
+        assert rows(backend.transform_dataset("orders", {"raw_query": "SELECT count(*) AS n FROM input"})) == [[12]]
+        assert not sandboxes_left(backend)
+    finally:
+        backend.close()
+
+
+def test_every_sandbox_step_that_binds_ends_at_the_deadline(backend, shop):
+    """Describing for validation, describing over the inputs and running: a binding that overruns cannot run on."""
+    sandbox = QuerySandbox(backend.engine, timeout=0.5)
+    relations = {"input": [(f"c{i}", "INTEGER") for i in range(8)]}
+    steps = [lambda: sandbox.describe_query(BINDING_BOMB, relations)]
+    with sandbox.session({"input": "ds_1_v1"}) as session:
+        steps += [lambda: session.describe(BINDING_BOMB), lambda: session.run(BINDING_BOMB)]
+        for step in steps:
+            started = time.monotonic()
+            with pytest.raises(ExecutionFailedError) as info:
+                step()
+            assert time.monotonic() - started < 10
+            assert info.value.details["raw_query"] == {"refused": "deadline", "timeout_seconds": 0.5}
+        assert session.run("SELECT count(*) AS n FROM input")[1] == [("n", "BIGINT", LogicalType.INTEGER)]
+    assert not sandboxes_left(backend)
+    assert backend.engine.list_tables() == ["ds_1_v1", "ds_2_v1", "ds_3_v1"]
+
+
+@pytest.mark.parametrize("sql, name", [
+    # a non-recursive CTE's body does not see its own name: DuckDB binds that reference to the catalog
+    ("WITH duckdb_databases AS (SELECT * FROM duckdb_databases) "
+     "SELECT path FROM input, duckdb_databases WHERE path IS NOT NULL", "duckdb_databases"),
+    ("WITH sqlite_master AS (SELECT * FROM sqlite_master) SELECT name FROM input, sqlite_master", "sqlite_master"),
+    # a CTE defined inside a subquery is not in scope outside it
+    ("SELECT input.* FROM input, (WITH duckdb_tables AS (SELECT 1 AS k) SELECT * FROM duckdb_tables) s, duckdb_tables",
+     "duckdb_tables"),
+    # a CTE sees only the CTEs defined before it
+    ("WITH a AS (SELECT * FROM b), b AS (SELECT * FROM input) SELECT * FROM a", "b"),
+])
+def test_a_cte_name_covers_only_the_references_in_its_scope(backend, shop, sql, name):
+    response = backend.transform_dataset("orders", {"raw_query": sql})
+    assert refused(response) == "unknown_placeholder"
+    assert response["details"]["raw_query"]["names"] == [name]
+    assert ".raw-query-" not in json.dumps(response) and "_result" not in json.dumps(response)
+
+
+def test_ctes_are_read_where_duckdb_binds_them(backend, shop):
+    chained = ("WITH a AS (SELECT customer, amount FROM input), "
+               "b AS (SELECT customer, sum(amount) AS total FROM a GROUP BY customer) SELECT * FROM b ORDER BY customer")
+    by_steps = {"aggregate": {"group_by": ["customer"], "measures": [{"function": "sum", "field": "amount", "alias": "total"}]},
+                "sort": "customer"}
+    assert rows(backend.transform_dataset("orders", {"raw_query": chained})) == rows(backend.transform_dataset("orders", by_steps))
+    in_subquery = ("WITH big AS (SELECT order_id FROM input WHERE amount > 500) "
+                   "SELECT order_id FROM input WHERE order_id IN (SELECT order_id FROM big) ORDER BY order_id")
+    assert rows(backend.transform_dataset("orders", {"raw_query": in_subquery})) == rows(
+        backend.transform_dataset("orders", {"filter": "amount > 500", "select": ["order_id"], "sort": "order_id"}))
+    recursive = ("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) "
+                 "SELECT n FROM r, (SELECT count(*) AS k FROM input) ORDER BY n")
+    assert rows(backend.transform_dataset("orders", {"raw_query": recursive})) == [[1], [2], [3]]
 
 
 def test_there_is_no_deadline_unless_the_server_sets_one(backend, tmp_path):

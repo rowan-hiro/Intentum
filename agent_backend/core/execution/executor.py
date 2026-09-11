@@ -62,13 +62,13 @@ class Executor:
                  f"-- then, over its result as raw_query:\n"
                  f"{self.compiler.compile(ir, plan.physical_inputs, base='raw_query')}")
         with self.queries.session(inputs) as session:
-            # DESCRIBE once more over the real inputs: the IR's schema is what the statement returns.
-            described = session.describe(query.sql)
+            # Bound once more over the real inputs, in the same process as the run: the IR's schema must be what the
+            # statement returns before its result is read.
+            base, described = session.run(query.sql)
             if ([name for name, _, _ in described] != list(query.columns)
                     or [logical for _, _, logical in described] != [f.logical_type for f in query.output_schema]):
                 raise ExecutionFailedError("The raw_query statement returns a different shape over its inputs than it "
                                            "did when it was validated.", details={"raw_query": {"refused": "execution"}})
-            base = session.run(query.sql)
             try:
                 result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs, base=base))
             except ExecutionFailedError as err:

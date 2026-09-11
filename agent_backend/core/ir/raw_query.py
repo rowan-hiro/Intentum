@@ -85,6 +85,7 @@ class TableReference:
     name: str
     schema: str = ""
     catalog: str = ""
+    cte: bool = False  # binds to a CTE in scope where it is written, under DuckDB's CTE scoping
 
     @property
     def qualified(self) -> bool:
@@ -111,7 +112,7 @@ class QueryShape:
     position: int | None = None
     tables: list[TableReference] = field(default_factory=list)
     functions: list[FunctionReference] = field(default_factory=list)
-    ctes: set[str] = field(default_factory=set)  # casefolded
+    ctes: set[str] = field(default_factory=set)  # every CTE name the statement defines, casefolded
     parameters: list[str] = field(default_factory=list)
     describes: bool = False  # DESCRIBE / SHOW / SUMMARIZE used as a relation
     dollar_names: list[tuple[int, str]] = field(default_factory=list)  # `$name` tokens: (offset of `$`, name)
@@ -120,7 +121,7 @@ class QueryShape:
 
 class QuerySession(Protocol):
     def describe(self, sql: str) -> list[tuple[str, str, LogicalType]]: ...
-    def run(self, sql: str) -> str: ...
+    def run(self, sql: str) -> tuple[str, list[tuple[str, str, LogicalType]]]: ...
 
 
 class QueryEngine(Protocol):
@@ -265,7 +266,7 @@ def analyze_query(
     unknown: list[str] = []
     for table in shape.tables:
         key = table.name.casefold()
-        if not table.qualified and key in shape.ctes:
+        if table.cte:
             continue
         if _looks_like_file(table.name):
             raise refusal(
@@ -320,6 +321,8 @@ def analyze_query(
         described = engine.describe_query(sql, {b.placeholder: b.columns for b in bindings})
     except BackendError as err:
         facts = dict(err.details.get("raw_query") or {})
+        if facts.get("refused") == "deadline":
+            raise  # binding outlasted the server's deadline: an execution failure, not a refused shape
         refused = str(facts.pop("refused", "binding"))
         facts["columns"] = {b.placeholder: [name for name, _ in b.columns] for b in bindings}
         facts["placeholders"] = bound
