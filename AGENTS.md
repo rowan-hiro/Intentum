@@ -28,7 +28,7 @@ perception extracts enters the backend only through `import_dataset` or
 | `agent_backend/core/logging.py` | Structured events for the execution stages. |
 | `agent_backend/core/naming.py` | Unicode-aware identifier rules shared by the IR, validator and resolvers. |
 | `agent_backend/core/models/` | Dataset, column, version, operation, lineage, and audit entities. |
-| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, and shared type rules. |
+| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, shared type rules, and the raw_query step's rules (`raw_query.py`, MADR 0002). |
 | `agent_backend/core/resolver/` | Resolve loose dataset, field, expression, and transform references into canonical IR. |
 | `agent_backend/core/validation/` | Independently validate IR types, schemas, input versions, and dataset state. |
 | `agent_backend/core/planner/` | Build explicit, inspectable execution plans. |
@@ -40,7 +40,7 @@ perception extracts enters the backend only through `import_dataset` or
 | `agent_backend/core/lineage/` | Record lineage edges and traverse upstream and downstream dependencies. |
 | `agent_backend/core/audit/` | Record and retrieve audit events for entities and operations. |
 | `agent_backend/storage/metadata/` | `MetadataStore` protocol and SQLite implementation. |
-| `agent_backend/storage/duckdb/` | `AnalyticsEngine` protocol and DuckDB implementation. |
+| `agent_backend/storage/duckdb/` | `AnalyticsEngine` protocol and DuckDB implementation, plus the sandbox raw_query statements are parsed, described and run in (`sandbox.py`). |
 | `agent_backend/storage/files/` | Managed workspace paths and imported source-file copies. |
 | `agent_backend/mcp/server/main.py` | MCP server creation and the `agent-backend-mcp` CLI entry point over stdio. |
 | `agent_backend/mcp/tools/registry.py` | Semantic MCP tool definitions that delegate to `Backend`. |

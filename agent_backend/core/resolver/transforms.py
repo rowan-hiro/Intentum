@@ -17,6 +17,7 @@ from ..ir import (
     AggregateStep,
     DatasetRef,
     DeriveStep,
+    FieldRef,
     FilterStep,
     JoinCondition,
     JoinOutput,
@@ -25,6 +26,8 @@ from ..ir import (
     Measure,
     OutputMode,
     OutputSpec,
+    QueryInput,
+    RawQueryStep,
     RenameMapping,
     RenameStep,
     SemiJoinStep,
@@ -34,6 +37,7 @@ from ..ir import (
     Step,
     TransformIR,
 )
+from ..ir.raw_query import DEFAULT_PLACEHOLDER, QueryBinding, QueryEngine, analyze_query, check_placeholder, refusal
 from ..ir.typing import aggregate_result_type
 from ..models.entities import Dataset, LogicalType, SemanticRole
 from .common import ResolutionNote, pick, reject_unknown_keys, slugify
@@ -67,6 +71,7 @@ _STEP_TYPE_ALIASES = {
     "derive": "derive", "compute": "derive", "mutate": "derive", "add_column": "derive",
     "join": "join", "merge": "join",
     "semi_join": "semi_join", "semijoin": "semi_join", "where_exists": "semi_join",
+    "raw_query": "raw_query", "sql": "raw_query",
 }
 # The keys each step handler accepts, besides "type". A single-key untyped step
 # whose value is an object made only of these keys carries the step body nested
@@ -81,10 +86,13 @@ _STEP_BODY_KEYS: dict[str, set[str]] = {
     "derive": {"derive", "compute", "name", "as", "alias", "expression", "expr", "formula"},
     "join": {"join", "right", "with", "dataset", "on", "how", "kind", "columns", "select"},
     "semi_join": {"semi_join", "semijoin", "where_exists", "right", "with", "dataset", "on"},
+    "raw_query": {"raw_query", "sql", "inputs"},
 }
 _AGGREGATE_BODY_KEYS = {"group_by", "groupby", "by", "measures", "metrics", "metric"}
-_IMPLICIT_ORDER = ("join", "semi_join", "filter", "derive", "select", "aggregate", "sort", "limit", "rename")
+# A raw_query reads datasets, so in a compact object it comes first and the other keys shape its result.
+_IMPLICIT_ORDER = ("raw_query", "join", "semi_join", "filter", "derive", "select", "aggregate", "sort", "limit", "rename")
 _IMPLICIT_KEYS = {
+    "raw_query": {"raw_query", "sql", "inputs"},
     "join": {"join"},
     "semi_join": {"semi_join", "semijoin", "where_exists"},
     "filter": {"filter", "where"},
@@ -120,10 +128,13 @@ def split_alias(text: str) -> tuple[str, str | None]:
 
 
 class TransformResolver:
-    def __init__(self, datasets: DatasetResolver, fields: FieldResolver | None = None) -> None:
+    def __init__(self, datasets: DatasetResolver, fields: FieldResolver | None = None,
+                 queries: QueryEngine | None = None) -> None:
         self.datasets = datasets
         self.fields = fields or FieldResolver()
         self.expressions = ExpressionResolver(self.fields)
+        # Parses and describes raw_query statements; None where the engine offers no sandbox.
+        self.queries = queries
 
     # -- public ----------------------------------------------------------
     def resolve(
@@ -229,7 +240,7 @@ class TransformResolver:
             present = keys & _IMPLICIT_KEYS[step_type]
             if not present:
                 continue
-            if step_type == "aggregate":
+            if step_type in ("aggregate", "raw_query"):
                 payload = {k: transform[k] for k in present}
             else:
                 if len(present) > 1:
@@ -343,6 +354,12 @@ class TransformResolver:
     ) -> tuple[list[Step], Scope]:
         step_type = loose["type"]
         where = f"transform.steps[{index}] ({step_type})"
+        if step_type == "raw_query" and index > 0:
+            raise refusal(
+                "raw_query must be the first step: its placeholders bind datasets, and input is the transform's "
+                "source, not the result of the steps before it. Semantic steps may follow it.",
+                where, "not_first", index=index,
+            )
         handler = getattr(self, f"_step_{step_type}")
         produced, scope = handler(loose, scope, where, context, notes, used)
         return (produced if isinstance(produced, list) else [produced]), scope
@@ -818,6 +835,87 @@ class TransformResolver:
             raise InvalidTransformError("semi_join cannot add fields from the right dataset.", field=where)
         step = SemiJoinStep(right=join.right, on=join.on, output_schema=scope.refs())
         return step, scope
+
+    def _step_raw_query(self, loose, scope, where, context, notes, used):
+        """Read-only SQL over placeholders: ``input`` is the source, each name under ``inputs`` a dataset (MADR 0002).
+
+        ``{"raw_query": "SELECT ... FROM input"}``, or with more inputs
+        ``{"raw_query": {"sql": "...", "inputs": {"customers": "customers"}}}``;
+        ``inputs`` may also list names that are dataset references themselves.
+        The output schema is DuckDB's DESCRIBE of the statement, mapped to the
+        backend's types.
+        """
+        reject_unknown_keys(loose, _STEP_BODY_KEYS["raw_query"] | {"type"}, where)
+        body = loose.get("raw_query")
+        if isinstance(body, dict):
+            reject_unknown_keys(body, {"sql", "inputs"}, where)
+            loose = {**{k: v for k, v in loose.items() if k != "raw_query"}, **body}
+        sql = pick(loose, "sql", "raw_query")
+        if not isinstance(sql, str) or not sql.strip():
+            raise refusal('raw_query needs its SQL as text, e.g. {"raw_query": "SELECT ... FROM input"}.', where, "empty")
+        if self.queries is None:
+            raise refusal("raw_query is not available: this backend's engine has no query sandbox.", where, "unavailable")
+        source = used[0]
+        bindings = [self._query_binding(DEFAULT_PLACEHOLDER, source)]
+        for placeholder, dataset in self._query_inputs(loose.get("inputs"), where, context, notes, used):
+            bindings.append(self._query_binding(placeholder, dataset))
+        analysis = analyze_query(sql, bindings, self.queries, where=where, dataset_named=self._dataset_named)
+        for written, name in analysis.renamed:
+            notes.append(ResolutionNote(f"{where}.columns", written, name, "normalized to snake_case"))
+        new_scope = scope.with_fields([
+            ScopeField(name=f.name, logical_type=f.logical_type,
+                       semantic_role=SemanticRole.MEASURE if f.logical_type.is_numeric else SemanticRole.UNKNOWN)
+            for f in analysis.fields
+        ])
+        datasets = {d.id: d for d in used}
+        inputs = [
+            QueryInput(
+                placeholder=b.placeholder,
+                dataset=DatasetRef(dataset_id=b.dataset_id, version=datasets[b.dataset_id].version, name=b.dataset),
+                fields=[FieldRef(name=c.name, logical_type=c.logical_type, column_id=c.id)
+                        for c in datasets[b.dataset_id].columns],
+            )
+            for b in bindings
+        ]
+        step = RawQueryStep(sql=sql, inputs=inputs, columns=analysis.columns, output_schema=new_scope.refs())
+        return step, new_scope
+
+    def _query_inputs(self, raw: Any, where: str, context, notes: list[ResolutionNote],
+                      used: list[Dataset]) -> list[tuple[str, Dataset]]:
+        """The named inputs of a raw_query, each resolved like any dataset reference."""
+        if raw is None:
+            return []
+        if isinstance(raw, dict):
+            pairs = list(raw.items())
+        elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            pairs = [(item, item) for item in raw]
+        else:
+            raise refusal('raw_query inputs map placeholder names to datasets, e.g. {"customers": "customers"}.',
+                          where, "placeholder_name", name=None)
+        bound: dict[str, Dataset] = {}
+        for placeholder, reference in pairs:
+            name = check_placeholder(placeholder, f"{where}.inputs")
+            if name.casefold() in {p.casefold() for p in bound}:
+                raise refusal(f"The placeholder {name!r} is bound twice.", f"{where}.inputs", "placeholder_name", name=name)
+            try:
+                dataset = self.datasets.resolve(reference, field=f"{where}.inputs.{name}", context=context, notes=notes)
+            except NotFoundError as err:
+                err.details = {**err.details, "raw_query": {"refused": "input_not_found", "name": name,
+                                                            "reference": reference if isinstance(reference, str) else None}}
+                raise
+            if all(d.id != dataset.id for d in used):
+                used.append(dataset)
+            bound[name] = dataset
+        return list(bound.items())
+
+    @staticmethod
+    def _query_binding(placeholder: str, dataset: Dataset) -> QueryBinding:
+        return QueryBinding(placeholder=placeholder, dataset_id=dataset.id, dataset=dataset.name,
+                            columns=[(c.name, c.physical_type) for c in dataset.columns])
+
+    def _dataset_named(self, name: str) -> str | None:
+        found = self.datasets.find_exact(name)
+        return found.name if found is not None else None
 
     @staticmethod
     def _check_unique(names: list[str], where: str, *, written: list[Any] | None = None,

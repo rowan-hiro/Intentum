@@ -23,6 +23,7 @@ from ..ir import (
     LimitStep,
     LiteralExpr,
     OutputMode,
+    RawQueryStep,
     RenameStep,
     SemiJoinStep,
     SelectStep,
@@ -30,6 +31,7 @@ from ..ir import (
     TransformIR,
     UnaryExpr,
 )
+from ..ir.raw_query import DEFAULT_PLACEHOLDER, QueryBinding, QueryEngine, analyze_query, check_placeholder, refusal
 from ..ir.typing import (
     aggregate_result_type,
     binary_result_type,
@@ -56,8 +58,9 @@ NAME_RE = _NameRule()
 
 
 class IRValidator:
-    def __init__(self, store: MetadataStore) -> None:
+    def __init__(self, store: MetadataStore, queries: QueryEngine | None = None) -> None:
         self.store = store
+        self.queries = queries  # re-parses and re-describes raw_query statements
 
     def validate_transform(self, ir: TransformIR) -> None:
         source = self._dataset(ir.source.dataset_id, ir.source.version, "source")
@@ -70,7 +73,10 @@ class IRValidator:
             )
         scope = list(ir.input_schema)
         for index, step in enumerate(ir.steps):
-            scope = self._validate_step(step, scope, index)
+            if isinstance(step, RawQueryStep):
+                scope = self._validate_raw_query(step, ir, scope, index)
+            else:
+                scope = self._validate_step(step, scope, index)
             if list(step.output_schema) != scope:
                 raise InvalidTransformError(
                     f"Declared output schema of step {index} ({step.type}) does not match the computed schema.",
@@ -186,6 +192,39 @@ class IRValidator:
                     )
             return scope
         raise InvalidTransformError(f"Unknown step type {type(step).__name__}.", field=where)
+
+    def _validate_raw_query(self, step: RawQueryStep, ir: TransformIR, scope: list[FieldRef], index: int) -> list[FieldRef]:
+        """Re-check a raw_query: first step, bindings current, statement within the rules, columns as DESCRIBE says."""
+        where = f"steps[{index}]"
+        if index != 0:
+            raise refusal("raw_query must be the first step.", where, "not_first", index=index)
+        if self.queries is None:
+            raise refusal("raw_query is not available: this backend's engine has no query sandbox.", where, "unavailable")
+        first = step.inputs[0]
+        if first.placeholder != DEFAULT_PLACEHOLDER or first.dataset != ir.source or list(first.fields) != scope:
+            raise InvalidTransformError(f"raw_query must bind {DEFAULT_PLACEHOLDER!r} to the transform's source.", field=where)
+        seen: set[str] = set()
+        bindings: list[QueryBinding] = []
+        for position, binding in enumerate(step.inputs):
+            name = check_placeholder(binding.placeholder, f"{where}.inputs", source=position == 0)
+            if name.casefold() in seen:
+                raise InvalidTransformError(f"The placeholder {name!r} is bound twice.", field=f"{where}.inputs")
+            seen.add(name.casefold())
+            dataset = self._dataset(binding.dataset.dataset_id, binding.dataset.version, f"{where}.inputs.{name}")
+            expected = [FieldRef(name=c.name, logical_type=c.logical_type, column_id=c.id) for c in dataset.columns]
+            if list(binding.fields) != expected:
+                raise InvalidSchemaError(
+                    f"The fields bound to {name!r} do not match the current schema of {dataset.name} ({dataset.id}).",
+                    field=f"{where}.inputs.{name}",
+                    hint="The dataset changed since the intent was resolved; resubmit the intent.",
+                )
+            bindings.append(QueryBinding(placeholder=name, dataset_id=dataset.id, dataset=dataset.name,
+                                         columns=[(c.name, c.physical_type) for c in dataset.columns]))
+        analysis = analyze_query(step.sql, bindings, self.queries, where=where)
+        if analysis.columns != list(step.columns) or analysis.fields != list(step.output_schema):
+            raise InvalidTransformError("Declared columns of the raw_query step do not match what its statement returns.",
+                                        field=where)
+        return list(step.output_schema)
 
     # -- expressions -----------------------------------------------------
     def _expr_type(self, expr: Expr, by_name: dict[str, FieldRef], where: str) -> LogicalType:
