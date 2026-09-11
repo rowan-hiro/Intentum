@@ -21,6 +21,7 @@ from ..ir import (
     JoinStep,
     LimitStep,
     LiteralExpr,
+    RawQueryStep,
     RenameStep,
     SemiJoinStep,
     SelectStep,
@@ -33,12 +34,27 @@ from ...storage.duckdb.engine import logical_to_physical, quote_ident as q
 
 
 class SqlCompiler:
-    def compile(self, ir: TransformIR, physical_inputs: dict[str, str]) -> str:
+    def compile(self, ir: TransformIR, physical_inputs: dict[str, str], base: str | None = None) -> str:
+        """The transform as one statement; after a raw_query, over ``base``, the relation holding its result.
+
+        A raw_query is never compiled here: it runs as written in its sandbox
+        (storage/duckdb/sandbox.py), and the steps after it read its result
+        under the field names the IR gives its columns.
+        """
         ctes: list[str] = []
-        current = f"SELECT {', '.join(q(f.name) for f in ir.input_schema)} FROM {q(physical_inputs[ir.source.dataset_id])}"
+        steps = list(enumerate(ir.steps, start=1))
+        if ir.steps and isinstance(ir.steps[0], RawQueryStep):
+            if base is None:
+                raise TypeError("a raw_query step is compiled over the relation holding its result")
+            query = ir.steps[0]
+            columns = [q(c) if c == f.name else f"{q(c)} AS {q(f.name)}" for c, f in zip(query.columns, query.output_schema)]
+            current = f"SELECT {', '.join(columns)} FROM {base}"
+            steps = [(index - 1, step) for index, step in steps[1:]]
+        else:
+            current = f"SELECT {', '.join(q(f.name) for f in ir.input_schema)} FROM {q(physical_inputs[ir.source.dataset_id])}"
         ctes.append(f"s0 AS ({current})")
         prev = "s0"
-        for index, step in enumerate(ir.steps, start=1):
+        for index, step in steps:
             name = f"s{index}"
             body = self._step_sql(step, prev, physical_inputs)
             ctes.append(f"{name} AS ({body})")

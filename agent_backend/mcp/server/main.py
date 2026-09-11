@@ -1,6 +1,6 @@
 """Thin MCP server entry point.
 
-    agent-backend-mcp [--workspace DIR]
+    agent-backend-mcp [--workspace DIR] [--export-root DIR] [--query-timeout SECONDS]
 
 The server validates protocol input (handled by the MCP SDK from the tool
 signatures), invokes the backend, and returns the backend's structured
@@ -27,6 +27,7 @@ This server is an agent-ready data backend. Express what you want, not how to do
 - If a response has status "error", read `code`, `message` and `advice`: each advice entry says what the backend accepts instead of what you wrote and, when the fix is mechanical, carries `rewrite`, your request as tool calls to send as-is; `candidates` lists what a name could have meant. Most errors are recoverable by fixing the intent.
 - A successful response may carry `advice` too: an empty result says where a filtered value actually occurs; a result that already has the declared output shape says so and names the next call.
 - State-changing tools are safe to retry; identical requests replay the original result.
+- Transforms are written in semantic steps. Only for a shape the steps cannot express (a window over groups, every row tied at an extremum, a union) use a raw_query first step: one read-only SELECT over placeholders (input is the source, other datasets are bound under inputs), run in a sandbox; its response says used_raw_query.
 - Declare the shape of your deliverable with declare_output while the requirement is in front of you; export_result holds the file to it.
 - After declare_output returns, read its contract, summary and any names facts before making calls that depend on the declaration. Compare the described deliverable with the original request. If it matches, keep the declaration and continue; if the requirement changed or you misinterpreted it, call declare_output again with a reason explaining the correction. Do not amend merely to fit the current dataset. A successful declaration records your interpretation; it does not verify that interpretation against the request.
 The backend owns identifiers, storage layout, versions, lineage, audit and transactions.
@@ -39,18 +40,31 @@ def create_server(backend: Backend) -> MCPServer:
     return server
 
 
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number of seconds, got {text!r}") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of seconds, got {text!r}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Agent-ready backend MCP server")
     parser.add_argument("--workspace", default=os.environ.get("AGENT_BACKEND_WORKSPACE", "./workspace"),
                         help="Managed workspace directory (default: ./workspace or $AGENT_BACKEND_WORKSPACE)")
     parser.add_argument("--export-root", default=os.environ.get("AGENT_BACKEND_EXPORT_ROOT"),
                         help="Directory exports may be written to (default: <workspace>/exports)")
+    parser.add_argument("--query-timeout", type=_seconds, default=os.environ.get("AGENT_BACKEND_QUERY_TIMEOUT"),
+                        help="Seconds a raw_query statement may run before it is stopped with a structured error "
+                             "(default: no deadline, or $AGENT_BACKEND_QUERY_TIMEOUT)")
     parser.add_argument("--log-level", default=os.environ.get("AGENT_BACKEND_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     export_root = args.export_root or os.path.join(args.workspace, "exports")
-    backend = Backend(args.workspace, export_root=export_root)
+    backend = Backend(args.workspace, export_root=export_root, query_timeout=args.query_timeout)
     try:
         create_server(backend).run(transport="stdio")
     finally:

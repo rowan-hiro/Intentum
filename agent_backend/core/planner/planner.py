@@ -18,6 +18,7 @@ from ..ir import (
     JoinStep,
     LimitStep,
     OutputMode,
+    RawQueryStep,
     RenameStep,
     SemiJoinStep,
     SelectStep,
@@ -69,13 +70,14 @@ class Planner:
         output_dataset_id: str | None,
     ) -> ExecutionPlan:
         source_table = versions[ir.source.dataset_id].physical_table
-        steps = [
-            PlanStep(
+        steps = []
+        if not (ir.steps and isinstance(ir.steps[0], RawQueryStep)):
+            # A raw_query reads its inputs itself, in its sandbox; the plan starts with it instead.
+            steps.append(PlanStep(
                 "Scan",
                 f"Scan({ir.source.name} v{ir.source.version})",
                 {"dataset_id": ir.source.dataset_id, "table": source_table, "columns": [f.name for f in ir.input_schema]},
-            )
-        ]
+            ))
         for index, step in enumerate(ir.steps):
             steps.append(self._plan_step(step, index, versions))
         if ir.output.mode == OutputMode.MATERIALIZED:
@@ -126,6 +128,18 @@ class Planner:
                 "SemiJoin",
                 f"SemiJoin({step.right.name} v{step.right.version} on {', '.join(on)})",
                 {"right_table": versions[step.right.dataset_id].physical_table, "on": on},
+                index,
+            )
+        if isinstance(step, RawQueryStep):
+            bound = [f"{b.placeholder}={b.dataset.name} v{b.dataset.version}" for b in step.inputs]
+            return PlanStep(
+                "RawQuery",
+                f"RawQuery({', '.join(bound)})",
+                {"sql": step.sql,
+                 "inputs": {b.placeholder: {"dataset_id": b.dataset.dataset_id, "name": b.dataset.name,
+                                            "version": b.dataset.version} for b in step.inputs},
+                 "columns": [f.name for f in step.output_schema],
+                 "sandbox": "read-only; one table per placeholder; no file, network, extension or setting access"},
                 index,
             )
         raise TypeError(f"unplannable step {type(step).__name__}")
