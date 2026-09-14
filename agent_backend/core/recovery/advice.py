@@ -1035,29 +1035,48 @@ def _name_in_expression(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _derived(step: Any) -> tuple[str, Any] | None:
+    """A normalized derive step's name (as the backend names it) and expression."""
+    if not isinstance(step, dict) or str(step.get("type") or "").lower() != "derive":
+        return None
+    body = step["derive"] if isinstance(step.get("derive"), dict) else step
+    return (slugify(str(body["name"])), body.get("expression")) if body.get("name") else None
+
+
 def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """Join keys of different types: cast the left key to the right key's type in a derive, then join on it."""
     facts = err.details.get("join_key_types")
     if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(facts, dict):
         return None
     left, right, target = facts["left"], facts["right"], facts["right_type"]
-    derived = slugify(f"{left}_as_{target}")
     cast = f"cast({_name_in_expression(left)} as {target})"
-    shown = {"derive": {"name": derived, "expression": cast}}
+    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), facts.get("steps"), facts.get("index")
+    located = (isinstance(steps, list) and isinstance(index, int) and 0 <= index < len(steps)
+               and isinstance(pairs, list) and isinstance(failed, int)
+               and all(isinstance(side, str) for pair in pairs for side in pair))
+    # A later join on the same key reuses the column an earlier derive cast; a column of that name made any other way
+    # stays, and the cast takes a name not in scope.
+    available = set(facts.get("available") or [])
+    base = slugify(f"{left}_as_{target}")
+    reused = base in available and located and any(_derived(s) == (base, cast) for s in steps[:index])
+    derived, suffix = base, 2
+    while not reused and derived in available:
+        derived, suffix = f"{base}_{suffix}", suffix + 1
+    join_on = json.dumps({derived: right}, ensure_ascii=False)
+    if reused:
+        how = f"{derived}, derived earlier as {cast}, is already {target}: join on {join_on}."
+    else:
+        shown = json.dumps({"derive": {"name": derived, "expression": cast}}, ensure_ascii=False)
+        how = f"Derive the left key as {target} first, {shown}, then join on {join_on}."
     explanation = (
         f"{left} is {facts['left_type']} and {right} in {facts['right_dataset']} is {target}; a join compares keys of "
-        f"one type. Derive the left key as {target} first, {json.dumps(shown, ensure_ascii=False)}, then join on "
-        f"{json.dumps({derived: right}, ensure_ascii=False)}. A value that does not convert fails the transform; when "
-        "some keys may not convert (blanks, other text), a raw_query first step joins with TRY_CAST, which leaves them "
-        "unmatched."
+        f"one type. {how} A value that does not convert fails the transform; when some keys may not convert (blanks, "
+        "other text), a raw_query first step joins with TRY_CAST, which leaves them unmatched."
     )
     # The rewrite is the steps as the backend normalized them: a compact object is several steps there, so the cast
     # lands right before the refused join (after a raw_query, not before it), and an earlier join with the same on
     # is left alone.
-    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), facts.get("steps"), facts.get("index")
-    if (not isinstance(steps, list) or not isinstance(index, int) or not 0 <= index < len(steps)
-            or not isinstance(pairs, list) or not isinstance(failed, int)
-            or not all(isinstance(side, str) for pair in pairs for side in pair)):
+    if not located:
         return Advice("join_key_types", explanation)
     steps = copy.deepcopy(steps)
     step = steps[index]
@@ -1066,7 +1085,8 @@ def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> 
     if holder is None:
         return Advice("join_key_types", explanation)
     holder["on"] = {(derived if i == failed else pair[0]): pair[1] for i, pair in enumerate(pairs)}
-    steps.insert(index, {"type": "derive", "name": derived, "expression": cast})
+    if not reused:
+        steps.insert(index, {"type": "derive", "name": derived, "expression": cast})
     return Advice("join_key_types", explanation,
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=steps))])
 

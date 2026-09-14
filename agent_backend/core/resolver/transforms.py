@@ -804,11 +804,12 @@ class TransformResolver:
                 raise InvalidTransformError(
                     f"Cannot join {left_field.name} ({left_field.logical_type}) with {right_field.name} ({right_field.logical_type}).",
                     field=where,
-                    # What the advice needs to cast one key: both keys, their types, and the key pairs as written.
+                    # What the advice needs to cast one key: both keys, their types, the key pairs as written, and the
+                    # names already in scope, so a cast column is not derived twice.
                     details={"join_key_types": {
                         "left": left_field.name, "left_type": str(left_field.logical_type),
                         "right": right_field.name, "right_type": str(right_field.logical_type), "right_dataset": right.name,
-                        "pairs": [list(p) for p in pairs], "failed": index,
+                        "pairs": [list(p) for p in pairs], "failed": index, "available": scope.names(),
                     }},
                 )
             conditions.append(JoinCondition(left=left_field.ref(), right=right_field.ref()))
