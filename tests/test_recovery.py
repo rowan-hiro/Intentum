@@ -6,6 +6,7 @@ as good as the call it proposes. The shapes come from the qwen3.5-35b-a3b runs o
 2026-09-02 on task_44 (agent_harness/scenarios/dataspace/README.md).
 """
 
+import json
 from pathlib import Path
 
 from tests.conftest import write_csv
@@ -285,6 +286,27 @@ def test_a_preview_one_reshape_away_from_the_contract_gets_the_reshape(backend, 
     assert kinds(materialized) == ["matches_contract"]
 
 
+def test_a_one_per_contract_is_matched_only_once_the_keys_are_counted_as_export_counts_them(backend, orders):
+    backend.declare_output(["region", "product"], rows={"one_per": ["region"]})
+    repeated = {"select": ["region", "product"]}  # twelve orders over four regions
+    assert "matches_contract" not in kinds(backend.transform_dataset("orders", repeated))
+    assert "matches_contract" not in kinds(backend.transform_dataset(
+        "orders", {"raw_query": {"sql": "SELECT region, product FROM input"}}))
+    materialized = backend.materialize_result("orders", repeated, "region_products")
+    assert materialized["status"] == "success" and "matches_contract" not in kinds(materialized)
+    refused = backend.export_result("region_products", str(Path(backend.workspace.root) / "repeated.csv"))
+    assert refused["code"] == "CONTRACT_MISMATCH"
+
+    grouped = {"group_by": ["region"], "measures": [{"function": "min", "field": "product", "alias": "product"}]}
+    queried = {"raw_query": {"sql": "SELECT region, min(product) AS product FROM input GROUP BY region"}}
+    assert "matches_contract" in kinds(backend.transform_dataset("orders", grouped))
+    assert "matches_contract" in kinds(backend.transform_dataset("orders", queried))
+    done = backend.materialize_result("orders", queried, "first_product")
+    assert kinds(done) == ["matches_contract"]
+    exported = backend.export_result("first_product", str(Path(backend.workspace.root) / "unique.csv"))
+    assert exported["status"] == "success" and exported["contract"]["status"] == "satisfied"
+
+
 def test_a_preview_missing_a_declared_column_gets_no_contract_advice(backend, orders):
     backend.declare_output(["region", "revenue"], rows="at_least_one")
     preview = backend.transform_dataset("orders", {"group_by": ["region"], "measures": [{"function": "sum", "field": "amount", "alias": "total"}]})
@@ -471,6 +493,124 @@ def test_after_a_join_the_right_key_is_selected_from_the_left_one(backend, order
     (result,) = run(backend, found["rewrite"])
     assert names(result) == ["order_no", "order_note", "paid"]
     assert kinds(response) == ["join_scope_names"]  # the general field advice does not stack on it
+
+
+def refunds(backend, tmp_path: Path):
+    """Order numbers kept as text, as a spreadsheet export or an extracted document often keeps ids."""
+    path = tmp_path / "refunds.json"
+    path.write_text(json.dumps([{"order_id": "1002", "reason": "damaged"}, {"order_id": "1004", "reason": "late"}]))
+    response = backend.import_dataset(str(path))
+    assert response["status"] == "success", response
+
+
+def test_join_keys_of_different_types_are_cast_in_a_derive_before_the_join(backend, orders, tmp_path):
+    refunds(backend, tmp_path)
+    transform = {"join": {"right": "orders", "on": {"order_id": "order_id"}}, "select": ["order_id", "reason", "amount"]}
+    response = backend.transform_dataset("refunds", transform)
+    assert response["message"] == "Cannot join order_id (string) with order_id (integer)."
+    found = advice(response, "join_key_types")
+    assert "order_id is string and order_id in orders is integer" in found["explanation"]
+    assert "fails the transform" in found["explanation"] and "TRY_CAST" in found["explanation"]
+    (rewritten,) = found["rewrite"]
+    assert rewritten["arguments"]["transform"] == [  # the steps as the backend normalized them
+        {"type": "derive", "name": "order_id_as_integer", "expression": "cast(order_id as integer)"},
+        {"type": "join", "join": {"right": "orders", "on": {"order_id_as_integer": "order_id"}}},
+        {"type": "select", "select": ["order_id", "reason", "amount"]},
+    ]
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [["1002", "damaged", 297.0], ["1004", "late", 450.0]]
+    assert kinds(response) == ["join_key_types"]
+
+
+def test_a_semi_join_on_a_shared_name_of_different_types_gets_the_same_cast(backend, orders, tmp_path):
+    refunds(backend, tmp_path)
+    response = backend.transform_dataset("orders", [{"semi_join": {"right": "refunds", "on": "order_id"}},
+                                                    {"select": ["order_id", "amount"]}])
+    found = advice(response, "join_key_types")
+    assert found["rewrite"][0]["arguments"]["transform"] == [
+        {"type": "derive", "name": "order_id_as_string", "expression": "cast(order_id as string)"},
+        {"type": "semi_join", "right": "refunds", "on": {"order_id_as_string": "order_id"}},
+        {"type": "select", "select": ["order_id", "amount"]},
+    ]
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [[1002, 297.0], [1004, 450.0]]
+
+
+def test_the_cast_goes_to_the_refused_join_not_an_earlier_one_with_the_same_on(backend, orders, tmp_path):
+    refunds(backend, tmp_path)
+    notes = tmp_path / "notes.json"
+    notes.write_text(json.dumps([{"order_id": "1002", "note": "call back"}, {"order_id": "1004", "note": "resend"}]))
+    assert backend.import_dataset(str(notes))["status"] == "success"
+    response = backend.transform_dataset("refunds", [{"join": {"right": "notes", "on": "order_id"}},
+                                                     {"join": {"right": "orders", "on": "order_id"}},
+                                                     {"select": ["order_id", "note", "amount"]}])
+    assert response["message"] == "Cannot join order_id (string) with order_id (integer)."
+    found = advice(response, "join_key_types")
+    assert found["rewrite"][0]["arguments"]["transform"] == [
+        {"type": "join", "right": "notes", "on": "order_id"},
+        {"type": "derive", "name": "order_id_as_integer", "expression": "cast(order_id as integer)"},
+        {"type": "join", "right": "orders", "on": {"order_id_as_integer": "order_id"}},
+        {"type": "select", "select": ["order_id", "note", "amount"]},
+    ]
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [["1002", "call back", 297.0], ["1004", "resend", 450.0]]
+
+
+def deliveries(backend, tmp_path: Path):
+    path = write_csv(tmp_path / "deliveries.csv", "order_id,carrier", ["1002,post", "1004,courier"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_a_second_join_on_the_same_text_key_reuses_the_cast_the_first_rewrite_made(backend, orders, tmp_path):
+    refunds(backend, tmp_path)
+    deliveries(backend, tmp_path)
+    transform = [{"join": {"right": "orders", "on": "order_id"}}, {"join": {"right": "deliveries", "on": "order_id"}},
+                 {"select": ["order_id", "amount", "carrier"]}]
+    first = advice(backend.transform_dataset("refunds", transform), "join_key_types")
+    second_response = backend.transform_dataset("refunds", first["rewrite"][0]["arguments"]["transform"])
+    assert second_response["message"] == "Cannot join order_id (string) with order_id (integer)."
+    second = advice(second_response, "join_key_types")
+    assert "order_id_as_integer, derived earlier as cast(order_id as integer), is already integer" in second["explanation"]
+    assert second["rewrite"][0]["arguments"]["transform"] == [
+        {"type": "derive", "name": "order_id_as_integer", "expression": "cast(order_id as integer)"},
+        {"type": "join", "right": "orders", "on": {"order_id_as_integer": "order_id"}},
+        {"type": "join", "right": "deliveries", "on": {"order_id_as_integer": "order_id"}},
+        {"type": "select", "select": ["order_id", "amount", "carrier"]},
+    ]
+    (result,) = run(backend, second["rewrite"])
+    assert sorted(result["result"]["rows"]) == [["1002", 297.0, "post"], ["1004", 450.0, "courier"]]
+
+
+def test_a_column_that_already_has_the_casts_name_keeps_it_and_the_cast_takes_another(backend, orders, tmp_path):
+    refunds(backend, tmp_path)
+    transform = [{"derive": {"name": "order_id_as_integer", "expression": "length(order_id)"}},
+                 {"join": {"right": "orders", "on": "order_id"}}, {"select": ["order_id", "order_id_as_integer", "amount"]}]
+    found = advice(backend.transform_dataset("refunds", transform), "join_key_types")
+    assert found["rewrite"][0]["arguments"]["transform"] == [
+        {"type": "derive", "name": "order_id_as_integer", "expression": "length(order_id)"},
+        {"type": "derive", "name": "order_id_as_integer_2", "expression": "cast(order_id as integer)"},
+        {"type": "join", "right": "orders", "on": {"order_id_as_integer_2": "order_id"}},
+        {"type": "select", "select": ["order_id", "order_id_as_integer", "amount"]},
+    ]
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [["1002", 4, 297.0], ["1004", 4, 450.0]]
+
+
+def test_after_a_raw_query_in_a_compact_object_the_cast_runs_between_the_query_and_the_join(backend, orders, tmp_path):
+    refunds(backend, tmp_path)
+    response = backend.transform_dataset("refunds", {"raw_query": {"sql": "SELECT order_id, reason FROM input"},
+                                                     "join": {"right": "orders", "on": "order_id"},
+                                                     "select": ["order_id", "reason", "amount"]})
+    found = advice(response, "join_key_types")
+    assert found["rewrite"][0]["arguments"]["transform"] == [
+        {"type": "raw_query", "raw_query": {"sql": "SELECT order_id, reason FROM input"}},
+        {"type": "derive", "name": "order_id_as_integer", "expression": "cast(order_id as integer)"},
+        {"type": "join", "join": {"right": "orders", "on": {"order_id_as_integer": "order_id"}}},
+        {"type": "select", "select": ["order_id", "reason", "amount"]},
+    ]
+    (result,) = run(backend, found["rewrite"])
+    assert result["used_raw_query"] is True
+    assert sorted(result["result"]["rows"]) == [["1002", "damaged", 297.0], ["1004", "late", 450.0]]
 
 
 def test_after_a_join_a_qualified_name_is_unqualified(backend, orders, tmp_path):

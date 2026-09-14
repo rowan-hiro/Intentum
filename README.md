@@ -167,7 +167,10 @@ Expressions may be strings (`"quantity * unit_price"`,
 are always resolved against the current schema and functions come from an
 allowlist (`abs round floor ceil upper lower trim length substr substring left
 right concat coalesce year month day date date_trunc strftime is_null contains
-starts_with ends_with`; `||` is read as `concat`). A two-argument call written
+starts_with ends_with`; `||` is read as `concat`). `cast(x as type)` converts to
+`integer`, `float`, `string`, `boolean`, `date` or `timestamp`, and accepts SQL
+names such as `int`, `bigint`, `double`, `varchar`, `text`, `bool` and
+`datetime`; a value that does not convert fails the transform. A two-argument call written
 the other way round (`strftime('%Y-%m-%d', ts)`) is reordered to its signature
 and reported as a resolution note; a type error names the signature it
 expected. There is no SQL passthrough in expressions; SQL enters only as a
@@ -376,7 +379,9 @@ a filter (limit step), an inline relation or a join written as `source`
 name belongs, an unknown key (nearest accepted key), a predicate that is not
 boolean, a literal of the wrong type in a comparison (re-typed when lossless),
 a qualified or right-key name after a join (unqualified, or the left key under
-that name, naming any fuzzy match that hid it), a string function on a date or
+that name, naming any fuzzy match that hid it), join keys whose types do not
+compare (a derive casting the left key to the right key's type, then the join on
+it), a string function on a date or
 timestamp (how dates are computed, and that rendering belongs to export), a
 document, media file or unsupported format where a dataset is expected
 (`attach_metadata`, or that the host reads it, MADR 0009), a document name no
@@ -399,7 +404,9 @@ Two silent failures get the same treatment on *successful* responses: an empty
 result whose filter literal is absent from the filtered column says where in
 the workspace that literal does occur (`value_not_found`), and a result that
 already has, or mechanically reshapes to, the open output contract says so with
-the next call (`matches_contract`, `near_contract`). The backend teaches its own
+the next call (`matches_contract`, `near_contract`). A `one_per` contract is
+said to match only after the result's distinct keys are counted, as
+`export_result` counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
 turn budget, repeated previews) belongs to the agent harness.
 

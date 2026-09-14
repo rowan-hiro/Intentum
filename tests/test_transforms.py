@@ -280,3 +280,21 @@ def test_canonical_ir_is_strict(backend, orders):
     ir_dict["extra"] = 1
     with pytest.raises(Exception):
         TransformIR.model_validate(ir_dict)
+
+
+def test_cast_converts_in_a_derive_and_a_filter_and_reads_sql_type_names(backend, orders):
+    response = backend.transform_dataset("orders", [
+        {"derive": {"name": "order_ref", "expression": "cast(order_id as varchar(20))"}},
+        {"filter": "cast(quantity as double) / 4 > 2"},
+        {"select": ["order_ref", "quantity"]},
+        {"sort": "order_ref"},
+    ])
+    assert response["status"] == "success", response
+    assert response["result"]["columns"][0] == {"name": "order_ref", "type": "string"}
+    assert all(isinstance(ref, str) and quantity > 8 for ref, quantity in response["result"]["rows"])
+
+
+def test_cast_to_an_unknown_type_names_the_accepted_types(backend, orders):
+    response = backend.transform_dataset("orders", {"derive": {"name": "x", "expression": "cast(amount as money)"}})
+    assert response["code"] == "INVALID_TRANSFORM"
+    assert "Unknown type 'money'" in response["message"] and "'integer'" in response["message"] and "varchar" in response["message"]
