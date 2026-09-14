@@ -8,6 +8,7 @@ aggregate alias). Every lenient decision is recorded as a ``ResolutionNote``.
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -154,8 +155,18 @@ class TransformResolver:
         used = [dataset]
 
         steps: list[Step] = []
-        for index, loose_step in enumerate(self._normalize_steps(transform)):
-            produced, scope = self._resolve_step(loose_step, scope, index, context, notes, used)
+        normalized = self._normalize_steps(transform)
+        written = copy.deepcopy(normalized)  # the steps as normalized, before resolving reads them
+        for index, loose_step in enumerate(normalized):
+            try:
+                produced, scope = self._resolve_step(loose_step, scope, index, context, notes, used)
+            except InvalidTransformError as err:
+                # A cast for a join's keys goes right before that join, which only the normalized steps locate:
+                # a compact object is several steps, and an earlier join may have the same on.
+                facts = err.details.get("join_key_types")
+                if isinstance(facts, dict):
+                    facts.update(steps=written, index=index)
+                raise
             steps.extend(produced)
 
         if output_name is not None:
@@ -793,11 +804,11 @@ class TransformResolver:
                 raise InvalidTransformError(
                     f"Cannot join {left_field.name} ({left_field.logical_type}) with {right_field.name} ({right_field.logical_type}).",
                     field=where,
-                    # What the advice needs to cast one key: both keys, their types, and the on as written.
+                    # What the advice needs to cast one key: both keys, their types, and the key pairs as written.
                     details={"join_key_types": {
                         "left": left_field.name, "left_type": str(left_field.logical_type),
                         "right": right_field.name, "right_type": str(right_field.logical_type), "right_dataset": right.name,
-                        "on": raw_on, "pairs": [list(p) for p in pairs], "failed": index,
+                        "pairs": [list(p) for p in pairs], "failed": index,
                     }},
                 )
             conditions.append(JoinCondition(left=left_field.ref(), right=right_field.ref()))

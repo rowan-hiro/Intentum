@@ -1043,28 +1043,32 @@ def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> 
     left, right, target = facts["left"], facts["right"], facts["right_type"]
     derived = slugify(f"{left}_as_{target}")
     cast = f"cast({_name_in_expression(left)} as {target})"
-    derive = {"derive": {"name": derived, "expression": cast}}
+    shown = {"derive": {"name": derived, "expression": cast}}
     explanation = (
         f"{left} is {facts['left_type']} and {right} in {facts['right_dataset']} is {target}; a join compares keys of "
-        f"one type. Derive the left key as {target} first, {json.dumps(derive, ensure_ascii=False)}, then join on "
+        f"one type. Derive the left key as {target} first, {json.dumps(shown, ensure_ascii=False)}, then join on "
         f"{json.dumps({derived: right}, ensure_ascii=False)}. A value that does not convert fails the transform; when "
         "some keys may not convert (blanks, other text), a raw_query first step joins with TRY_CAST, which leaves them "
         "unmatched."
     )
-    pairs, failed = facts.get("pairs"), facts.get("failed")
-    steps = _steps(arguments.get("transform"))
-    holder_at = next(((index, holder) for index, step in enumerate(steps)
-                      for holder in [step, *(step[k] for k in _JOIN_KEYS if isinstance(step.get(k), dict))]
-                      if "on" in holder and holder["on"] == facts.get("on")), None)
-    if (holder_at is None or not isinstance(pairs, list) or not isinstance(failed, int)
+    # The rewrite is the steps as the backend normalized them: a compact object is several steps there, so the cast
+    # lands right before the refused join (after a raw_query, not before it), and an earlier join with the same on
+    # is left alone.
+    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), facts.get("steps"), facts.get("index")
+    if (not isinstance(steps, list) or not isinstance(index, int) or not 0 <= index < len(steps)
+            or not isinstance(pairs, list) or not isinstance(failed, int)
             or not all(isinstance(side, str) for pair in pairs for side in pair)):
         return Advice("join_key_types", explanation)
-    index, holder = holder_at
+    steps = copy.deepcopy(steps)
+    step = steps[index]
+    holder = step if "on" in step else next(
+        (step[k] for k in _JOIN_KEYS + _RIGHT_KEYS if isinstance(step.get(k), dict) and "on" in step[k]), None)
+    if holder is None:
+        return Advice("join_key_types", explanation)
     holder["on"] = {(derived if i == failed else pair[0]): pair[1] for i, pair in enumerate(pairs)}
-    steps.insert(index, derive)
-    transform = _rebuild(arguments.get("transform"), steps)
+    steps.insert(index, {"type": "derive", "name": derived, "expression": cast})
     return Advice("join_key_types", explanation,
-                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=transform))])
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=steps))])
 
 
 def _join_scope_names(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
