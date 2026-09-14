@@ -29,7 +29,7 @@ from ..contracts import repair_transform, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
 from ..ir import BinaryExpr, CastExpr, ColumnExpr, FilterStep, InExpr, LiteralExpr, TransformIR
 from ..ir.expression_parser import parse_expression
-from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract
+from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
 
 
@@ -1025,10 +1025,76 @@ def _join_spec(steps: list[dict[str, Any]]) -> tuple[int, dict[str, Any], dict[s
     return None
 
 
+_PLAIN_NAME = re.compile(r"[^\W\d]\w*")
+_EXPRESSION_WORDS = {"and", "or", "not", "in", "is", "null", "true", "false", "cast", "as"}
+
+
+def _name_in_expression(name: str) -> str:
+    if _PLAIN_NAME.fullmatch(name) and name.lower() not in _EXPRESSION_WORDS:
+        return name
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _derived(step: Any) -> tuple[str, Any] | None:
+    """A normalized derive step's name (as the backend names it) and expression."""
+    if not isinstance(step, dict) or str(step.get("type") or "").lower() != "derive":
+        return None
+    body = step["derive"] if isinstance(step.get("derive"), dict) else step
+    return (slugify(str(body["name"])), body.get("expression")) if body.get("name") else None
+
+
+def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """Join keys of different types: cast the left key to the right key's type in a derive, then join on it."""
+    facts = err.details.get("join_key_types")
+    if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(facts, dict):
+        return None
+    left, right, target = facts["left"], facts["right"], facts["right_type"]
+    cast = f"cast({_name_in_expression(left)} as {target})"
+    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), facts.get("steps"), facts.get("index")
+    located = (isinstance(steps, list) and isinstance(index, int) and 0 <= index < len(steps)
+               and isinstance(pairs, list) and isinstance(failed, int)
+               and all(isinstance(side, str) for pair in pairs for side in pair))
+    # A later join on the same key reuses the column an earlier derive cast; a column of that name made any other way
+    # stays, and the cast takes a name not in scope.
+    available = set(facts.get("available") or [])
+    base = slugify(f"{left}_as_{target}")
+    reused = base in available and located and any(_derived(s) == (base, cast) for s in steps[:index])
+    derived, suffix = base, 2
+    while not reused and derived in available:
+        derived, suffix = f"{base}_{suffix}", suffix + 1
+    join_on = json.dumps({derived: right}, ensure_ascii=False)
+    if reused:
+        how = f"{derived}, derived earlier as {cast}, is already {target}: join on {join_on}."
+    else:
+        shown = json.dumps({"derive": {"name": derived, "expression": cast}}, ensure_ascii=False)
+        how = f"Derive the left key as {target} first, {shown}, then join on {join_on}."
+    explanation = (
+        f"{left} is {facts['left_type']} and {right} in {facts['right_dataset']} is {target}; a join compares keys of "
+        f"one type. {how} A value that does not convert fails the transform; when some keys may not convert (blanks, "
+        "other text), a raw_query first step joins with TRY_CAST, which leaves them unmatched."
+    )
+    # The rewrite is the steps as the backend normalized them: a compact object is several steps there, so the cast
+    # lands right before the refused join (after a raw_query, not before it), and an earlier join with the same on
+    # is left alone.
+    if not located:
+        return Advice("join_key_types", explanation)
+    steps = copy.deepcopy(steps)
+    step = steps[index]
+    holder = step if "on" in step else next(
+        (step[k] for k in _JOIN_KEYS + _RIGHT_KEYS if isinstance(step.get(k), dict) and "on" in step[k]), None)
+    if holder is None:
+        return Advice("join_key_types", explanation)
+    holder["on"] = {(derived if i == failed else pair[0]): pair[1] for i, pair in enumerate(pairs)}
+    if not reused:
+        steps.insert(index, {"type": "derive", "name": derived, "expression": cast})
+    return Advice("join_key_types", explanation,
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=steps))])
+
+
 def _join_scope_names(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """After a join, names are unqualified and a right-side key is not copied: it equals the left key."""
-    if err.code not in (ErrorCode.NOT_FOUND, ErrorCode.INVALID_TRANSFORM):
-        return None
+    if err.code not in (ErrorCode.NOT_FOUND, ErrorCode.INVALID_TRANSFORM) or "join_key_types" in err.details:
+        return None  # a refusal of the key types is about the keys, not the names after the join
     steps = _steps(arguments.get("transform"))
     spec = _join_spec(steps)
     if spec is None:
@@ -1477,6 +1543,7 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_measure_needs_field, _TRANSFORM_TOOLS, False),
     (_aggregate_body_misplaced, _TRANSFORM_TOOLS, False),
     (_compare_literal_type, _TRANSFORM_TOOLS, False),
+    (_join_key_types, _TRANSFORM_TOOLS, False),
     (_join_scope_names, _TRANSFORM_TOOLS, False),
     (_field_created_later, _TRANSFORM_TOOLS, False),
     (_document_not_found, ("attach_metadata",), False),
@@ -1618,12 +1685,20 @@ def advise_contract(
     tool: str,
     arguments: dict[str, Any],
     materialized_name: str | None,
+    distinct_keys: int | None = None,
 ) -> Advice | None:
-    """A result that has, or mechanically reshapes to, the declared output shape: say so, with the next call."""
+    """A result that has, or mechanically reshapes to, the declared output shape: say so, with the next call.
+
+    ``distinct_keys`` counts the result's distinct combinations of a one_per contract's keys. export_result
+    checks rows with that count, so without it a keyed result is never said to match.
+    """
     if contract.status != ContractStatus.OPEN:
         return None
     actual = [(f.name, f.logical_type) for f in ir.output_schema]
-    problems = verify_columns(contract, actual) + verify_rows(contract, row_count, None)
+    problems = verify_columns(contract, actual) + verify_rows(contract, row_count, distinct_keys)
+    keyed = contract.rows == RowCardinality.ONE_PER and all(k in {n for n, _ in actual} for k in contract.row_keys)
+    if not problems and keyed and row_count > 0 and distinct_keys is None:
+        return None
     shape = f"columns [{', '.join(c.name for c in contract.columns)}]" + (f", rows {contract.rows}" if contract.rows else "")
     answer = f"answer_{contract.id}"
     if not problems:

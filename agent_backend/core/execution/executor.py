@@ -22,6 +22,7 @@ class ExecutionResult:
     physical_table: str | None = None
     truncated: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    distinct_keys: int | None = None  # distinct combinations of the columns asked for, when asked
 
 
 class Executor:
@@ -31,24 +32,43 @@ class Executor:
         self.compiler = compiler or SqlCompiler()
         self.queries = queries  # the sandbox raw_query statements run in
 
-    def execute_transform(self, ir: TransformIR, plan: ExecutionPlan) -> ExecutionResult:
+    def execute_transform(self, ir: TransformIR, plan: ExecutionPlan,
+                          count_distinct: list[str] | None = None) -> ExecutionResult:
+        """Run the transform; ``count_distinct`` names columns whose distinct combinations the result should count."""
         if ir.steps and isinstance(ir.steps[0], RawQueryStep):
-            return self._execute_after_query(ir, plan)
-        return self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs))
+            return self._execute_after_query(ir, plan, count_distinct)
+        return self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs), count_distinct)
 
-    def _execute(self, ir: TransformIR, plan: ExecutionPlan, sql: str) -> ExecutionResult:
+    def _execute(self, ir: TransformIR, plan: ExecutionPlan, sql: str,
+                 count_distinct: list[str] | None = None) -> ExecutionResult:
         if ir.output.mode == OutputMode.MATERIALIZED:
             assert plan.output_table is not None
             row_count = self.engine.create_table_from_query(plan.output_table, sql)
             columns, rows = self.engine.sample(plan.output_table, ir.output.preview_limit)
-            return ExecutionResult(columns=columns, rows=[list(r) for r in rows], row_count=row_count, sql=sql,
-                                   physical_table=plan.output_table, truncated=row_count > len(rows))
+            result = ExecutionResult(columns=columns, rows=[list(r) for r in rows], row_count=row_count, sql=sql,
+                                     physical_table=plan.output_table, truncated=row_count > len(rows))
+            if count_distinct and row_count:
+                result.distinct_keys = self._count(lambda: self.engine.count_distinct_rows(plan.output_table, count_distinct))
+            return result
         row_count = self.engine.count_rows_of_query(sql)
         columns, rows = self.engine.query(sql, limit=ir.output.preview_limit)
-        return ExecutionResult(columns=columns, rows=[list(r) for r in rows], row_count=row_count, sql=sql,
-                               truncated=row_count > len(rows))
+        result = ExecutionResult(columns=columns, rows=[list(r) for r in rows], row_count=row_count, sql=sql,
+                                 truncated=row_count > len(rows))
+        if count_distinct and row_count:
+            # A preview has no table, and after a raw_query its SQL runs only while the sandbox session is open.
+            result.distinct_keys = self._count(lambda: self.engine.count_distinct_of_query(sql, count_distinct))
+        return result
 
-    def _execute_after_query(self, ir: TransformIR, plan: ExecutionPlan) -> ExecutionResult:
+    @staticmethod
+    def _count(count: Any) -> int | None:
+        """The count serves advice only: when it fails the transform still succeeds, and no match is promised."""
+        try:
+            return count()
+        except ExecutionFailedError:
+            return None
+
+    def _execute_after_query(self, ir: TransformIR, plan: ExecutionPlan,
+                             count_distinct: list[str] | None = None) -> ExecutionResult:
         """Run the raw_query in its sandbox, then the rest of the transform over its result as usual."""
         query = ir.steps[0]
         assert isinstance(query, RawQueryStep)
@@ -70,7 +90,7 @@ class Executor:
                                            "did when it was validated.", details={"raw_query": {"refused": "execution"}})
             base = session.run(query.sql)
             try:
-                result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs, base=base))
+                result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs, base=base), count_distinct)
             except ExecutionFailedError as err:
                 if "sql" in err.details:
                     err.details = {**err.details, "sql": shown}
