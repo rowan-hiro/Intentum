@@ -283,12 +283,30 @@ class ExpressionResolver:
 
     @staticmethod
     def _parse_type(value: Any) -> LogicalType:
-        try:
-            return LogicalType(str(value).lower())
-        except ValueError as exc:
+        text = str(value).strip().lower()
+        target = _SQL_TYPE_NAMES.get(text)
+        if target is None:
+            try:
+                target = LogicalType(text)
+            except ValueError:
+                target = None
+        if target is None:
+            accepted = [str(t) for t in LogicalType]
             raise InvalidTransformError(
-                f"Unknown type {value!r}; expected one of {[str(t) for t in LogicalType]}.", field="cast"
-            ) from exc
+                f"Unknown type {value!r}; expected one of {accepted}, or a SQL name such as int, double, varchar, "
+                "bool or datetime.", field="cast", details={"received": value, "accepted": accepted},
+            )
+        return target
+
+
+# SQL spellings agents write for the logical types a cast can target.
+_SQL_TYPE_NAMES: dict[str, LogicalType] = {
+    **{name: LogicalType.INTEGER for name in ("int", "int2", "int4", "int8", "smallint", "tinyint", "bigint", "hugeint")},
+    **{name: LogicalType.FLOAT for name in ("double", "real", "decimal", "numeric", "float4", "float8")},
+    **{name: LogicalType.STRING for name in ("varchar", "text", "char", "str")},
+    "bool": LogicalType.BOOLEAN,
+    "datetime": LogicalType.TIMESTAMP,
+}
 
 
 def _comparable(left: LogicalType, right: LogicalType) -> bool:

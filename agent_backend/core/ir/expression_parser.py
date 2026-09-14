@@ -212,6 +212,8 @@ class ExpressionParser:
         if token.kind == "qident":
             return {"column": token.text[1:-1].replace('""', '"')}
         if token.kind == "ident":
+            if token.text.lower() == "cast" and self._accept("op", "("):
+                return self._parse_cast()
             if self._accept("op", "("):
                 args: list[dict[str, Any]] = []
                 if not self._accept("op", ")"):
@@ -230,6 +232,26 @@ class ExpressionParser:
             field="expression",
             details={"token": token.text, "position": token.pos, "expression": self.text},
         )
+
+    def _parse_cast(self) -> dict[str, Any]:
+        """``cast(expression as type)``; a length or precision after the type, as in varchar(20), is ignored."""
+        inner = self._parse_or()
+        word = self._advance()
+        if word.kind != "ident" or word.text.lower() != "as":
+            raise InvalidTransformError(
+                f"Expected 'as' at position {word.pos} in expression {self.text!r}, got {word.text or 'end of input'!r}.",
+                field="expression",
+                details={"token": word.text, "position": word.pos, "expression": self.text},
+                hint="Write cast(expression as type), e.g. cast(record_id as integer).",
+            )
+        target = self._expect("ident")
+        if self._accept("op", "("):
+            self._expect("number")
+            while self._accept("op", ","):
+                self._expect("number")
+            self._expect("op", ")")
+        self._expect("op", ")")
+        return {"cast": inner, "to": target.text}
 
 
 def parse_expression(text: str) -> dict[str, Any]:

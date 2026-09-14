@@ -784,7 +784,7 @@ class TransformResolver:
                 else:
                     raise InvalidTransformError(f"Invalid join condition {item!r}.", field=where)
         conditions: list[JoinCondition] = []
-        for left_name, right_name in pairs:
+        for index, (left_name, right_name) in enumerate(pairs):
             left_field = self.fields.resolve(left_name, scope, field=f"{where}.on.left", notes=notes)
             right_field = self.fields.resolve(right_name, right_scope, field=f"{where}.on.right", notes=notes)
             from ..ir.typing import comparable
@@ -793,6 +793,12 @@ class TransformResolver:
                 raise InvalidTransformError(
                     f"Cannot join {left_field.name} ({left_field.logical_type}) with {right_field.name} ({right_field.logical_type}).",
                     field=where,
+                    # What the advice needs to cast one key: both keys, their types, and the on as written.
+                    details={"join_key_types": {
+                        "left": left_field.name, "left_type": str(left_field.logical_type),
+                        "right": right_field.name, "right_type": str(right_field.logical_type), "right_dataset": right.name,
+                        "on": raw_on, "pairs": [list(p) for p in pairs], "failed": index,
+                    }},
                 )
             conditions.append(JoinCondition(left=left_field.ref(), right=right_field.ref()))
 

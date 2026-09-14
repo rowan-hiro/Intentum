@@ -832,10 +832,10 @@ class Backend:
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
-            result = self.executor.execute_transform(ir, plan)
+            result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir))
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
-                                            ir.output.name if materialize else None)
+                                            ir.output.name if materialize else None, distinct_keys=result.distinct_keys)
 
             now = self.clock()
             response: dict[str, Any]
@@ -874,8 +874,21 @@ class Backend:
             log_event("state.committed", operation_id=op.id, dataset_id=dataset_id)
             return self._with_notes(response, notes)
 
+    def _contract_keys(self, ir: TransformIR) -> list[str] | None:
+        """The open contract's one_per keys when the result has them all: export counts them, so the advice must too."""
+        try:
+            contract = self.store.latest_contract()
+        except Exception as err:  # advice never breaks a response
+            log_event("advice.skipped", error=repr(err))
+            return None
+        if contract is None or contract.status != ContractStatus.OPEN or contract.rows != RowCardinality.ONE_PER:
+            return None
+        names = {f.name for f in ir.output_schema}
+        return list(contract.row_keys) if all(k in names for k in contract.row_keys) else None
+
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
-                          arguments: dict[str, Any], materialized_name: str | None) -> list[Advice]:
+                          arguments: dict[str, Any], materialized_name: str | None,
+                          distinct_keys: int | None = None) -> list[Advice]:
         """Advice on a successful transform: an empty result explained, or a result that fits the contract."""
         advice: list[Advice] = []
         try:
@@ -887,7 +900,7 @@ class Backend:
             contract = self.store.latest_contract()
             if contract is not None:
                 found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,
-                                        materialized_name=materialized_name)
+                                        materialized_name=materialized_name, distinct_keys=distinct_keys)
                 if found is not None:
                     advice.append(found)
         except Exception as err:  # advice never breaks a response
