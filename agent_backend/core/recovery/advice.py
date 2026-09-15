@@ -29,6 +29,7 @@ from ..contracts import repair_transform, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
 from ..ir import BinaryExpr, CastExpr, ColumnExpr, FilterStep, InExpr, LiteralExpr, TransformIR
 from ..ir.expression_parser import parse_expression
+from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
 
@@ -746,6 +747,114 @@ def _transform_required(err: BackendError, tool: str, arguments: dict[str, Any])
         "[...], \"measures\": [...]}; a raw_query first step holds SQL over input. An empty list previews the source as "
         "it is, or with materialize_result copies it under the new name.",
     )
+
+
+# ----------------------------------------------------------------------------
+# functions the language lacks
+# ----------------------------------------------------------------------------
+
+_ONE_PER_GROUP = ("any_value", "first", "arbitrary")
+# DuckDB aggregates an agent writes where a scalar is expected; a query over input cannot run them without a group.
+_AGGREGATE_NAMES = frozenset({"first", "last", "any_value", "arbitrary", "median", "mode", "quantile", "string_agg",
+                              "listagg", "group_concat", "list", "array_agg", "stddev", "stddev_samp", "stddev_pop",
+                              "variance", "var_samp", "var_pop", "bool_and", "bool_or", "sum", "avg", "count", "min",
+                              "max"})
+
+
+def _measure_objects(step: dict[str, Any]) -> list[dict[str, Any]]:
+    """The measure objects of a loose aggregate step, wherever its body sits."""
+    holders = [step] + [step[k] for k in ("aggregate", "summarize", "group") if isinstance(step.get(k), dict)]
+    found: list[dict[str, Any]] = []
+    for holder in holders:
+        for key in _MEASURE_KEYS:
+            value = holder.get(key)
+            if isinstance(value, dict):
+                found.append(value)
+            elif isinstance(value, list):
+                found.extend(m for m in value if isinstance(m, dict))
+    return found
+
+
+def _rename_call(text: str, name: str, replacement: str) -> str | None:
+    """``name(`` respelled as ``replacement(`` outside string literals; None when the text has no such call."""
+    pattern = re.compile(rf"(?<![\w.]){re.escape(name)}\s*\(", re.IGNORECASE)
+    out = _outside_literals(text, lambda code: pattern.sub(f"{replacement}(", code) if pattern.search(code) else None)
+    return out
+
+
+def _unknown_function(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A function the language lacks: the accepted name it was close to, or a raw_query first step, which runs any
+    DuckDB function (MADR 0002)."""
+    details = err.details if isinstance(err.details, dict) else {}
+    name, allowed = details.get("function"), details.get("allowed_functions")
+    if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(name, str) or not isinstance(allowed, list):
+        return None
+    listed = ", ".join(allowed)
+    steps = _steps(arguments.get("transform"))
+    if "aggregate" in err.message:
+        if name.lower() in _ONE_PER_GROUP and details.get("min_applies"):
+            changed = False
+            for step in steps:
+                for measure in _measure_objects(step):
+                    for key in ("function", "fn", "agg"):
+                        if str(measure.get(key, "")).lower() == name.lower():
+                            measure[key] = "min"
+                            changed = True
+            if changed:
+                return Advice("unknown_aggregate", f"{name} is not an aggregate here; the aggregates are {listed}. "
+                              "min picks one value per group, and for a field that is constant within each group it "
+                              "is that value; max does the same. The same request with min:",
+                              rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+        return Advice("unknown_aggregate", f"{name} is not an aggregate here; the aggregates are {listed}. A raw_query "
+                      f"first step runs any DuckDB aggregate: SELECT key, {name}(x) AS name FROM input GROUP BY key, "
+                      "with input as the source; semantic steps may follow it.")
+    close = details.get("renamed")  # the resolver checked that the call resolves under this name
+    if isinstance(close, str):
+        changed = False
+        for step in steps:
+            for path, text in _expression_texts(step):
+                renamed = _rename_call(text, name, close)
+                if renamed is not None:
+                    _set_path(step, path, renamed)
+                    changed = True
+        if changed:
+            return Advice("unknown_function", f"{name} is not a function here; {close} is, as {signature(close)}. "
+                          "The same request with that name:",
+                          rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+    if name.lower() in _AGGREGATE_NAMES:
+        return Advice("unknown_function", f"{name} is an aggregate, not a function of one row: it needs a group. Put it "
+                      "in an aggregate step when it is sum, avg, min, max, count or count_distinct; otherwise a "
+                      f"raw_query first step runs it with GROUP BY, or as {name}(x) OVER (PARTITION BY key) to keep "
+                      "every row.")
+    explanation = (f"{name} is not a function of semantic expressions; the functions are {listed}. A raw_query first "
+                   "step runs any DuckDB function: one read-only SELECT in which input is the source, and other "
+                   "datasets are bound by name under inputs; semantic steps may follow it.")
+    resolution = err.resolution or {}
+    normalized, index = resolution.get("steps"), resolution.get("index")
+    if isinstance(normalized, list) and normalized and index == 0:
+        pattern = re.compile(rf"(?<![\w.]){re.escape(name)}\s*\(", re.IGNORECASE)
+        text = next((t for _, t in _expression_texts(normalized[0]) if pattern.search(t)), None)
+        query = _step_as_query(normalized[0], text, []) if text is not None else None
+        if query is not None:
+            rewritten = [{"raw_query": {"sql": query}}, *copy.deepcopy(normalized[1:])]
+            return Advice("unknown_function", explanation + " The same request with that step as the query:",
+                          rewrite=[call(tool, **_call_arguments(tool, arguments, transform=rewritten))])
+    return Advice("unknown_function", explanation + " Written in the transform's first step, a filter or a derive, "
+                                                    "it is rewritten as that query.")
+
+
+def _temporal_difference(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """``end - start`` on dates or timestamps: the difference is a count of units, which date_diff computes."""
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code != ErrorCode.TYPE_MISMATCH or details.get("operator") != "-":
+        return None
+    types = {str((details.get(side) or {}).get("type")) for side in ("left", "right")}
+    if not types or not types <= {"date", "timestamp"}:
+        return None
+    return Advice("temporal_difference",
+                  "Dates and timestamps are not subtracted; the distance between two is a count of units, which "
+                  "date_diff(unit, start, end) computes as an integer, e.g. date_diff('day', admitted, discharged). "
+                  "The unit is one of second, minute, hour, day, week, month, quarter and year.")
 
 
 _UNKNOWN_KEYS_RE = re.compile(r"Unknown key\(s\) \[(?P<keys>.*?)\]")
@@ -1806,6 +1915,8 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_aggregate_body_misplaced, _TRANSFORM_TOOLS, False),
     (_compare_literal_type, _TRANSFORM_TOOLS, False),
     (_join_key_types, _TRANSFORM_TOOLS, False),
+    (_unknown_function, _TRANSFORM_TOOLS, False),
+    (_temporal_difference, _TRANSFORM_TOOLS, False),
     (_join_scope_names, _TRANSFORM_TOOLS, False),
     (_field_created_later, _TRANSFORM_TOOLS, False),
     (_document_not_found, ("attach_metadata",), False),

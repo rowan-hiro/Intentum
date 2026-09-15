@@ -27,6 +27,7 @@ from ..ir.typing import (
     binary_result_type,
     comparable,
     function_result_type,
+    renamed_function,
     literal_type,
     signature,
     unary_result_type,
@@ -99,6 +100,10 @@ class ExpressionResolver:
             return UnaryExpr(op="neg", operand=operand, logical_type=unary_result_type("neg", operand.logical_type))
         if "function" in loose or "fn" in loose:
             name = str(pick(loose, "function", "fn")).lower()
+            if name in _FUNCTION_ALIASES:
+                if notes is not None:
+                    notes.append(ResolutionNote(field, name, _FUNCTION_ALIASES[name], "spelled as the function is named here"))
+                name = _FUNCTION_ALIASES[name]
             args = [self.resolve(a, scope, field=field, notes=notes) for a in loose.get("args", [])]
             if arguments_are_swapped(name, [a.logical_type for a in args]):
                 # The call fits its signature the other way round; the IR keeps one order.
@@ -107,7 +112,16 @@ class ExpressionResolver:
                     notes.append(ResolutionNote(field, f"{name}({args[1].logical_type}, {args[0].logical_type})",
                                                 signature(name), "arguments reordered to the function's signature"))
             validate_function_arguments(name, args)
-            return FunctionExpr(name=name, args=args, logical_type=function_result_type(name, [a.logical_type for a in args]))
+            types = [a.logical_type for a in args]
+            try:
+                return FunctionExpr(name=name, args=args, logical_type=function_result_type(name, types))
+            except InvalidTransformError as err:
+                if err.details.get("function") == name:
+                    # The nearest accepted name, only when this call resolves under it; advice rewrites to it.
+                    renamed = renamed_function(name, args, types)
+                    if renamed is not None:
+                        err.details["renamed"] = renamed
+                raise
         if "cast" in loose or "try_cast" in loose:
             spelling = "cast" if "cast" in loose else "try_cast"
             target = self._parse_type(loose.get("to") or loose.get("type"))
@@ -303,6 +317,10 @@ class ExpressionResolver:
 
 
 # SQL spellings agents write for the logical types a cast can target.
+# Other dialects' names for functions that exist here with the same arguments.
+_FUNCTION_ALIASES = {"datediff": "date_diff", "len": "length", "ucase": "upper", "lcase": "lower",
+                     "ifnull": "coalesce", "nvl": "coalesce"}
+
 _SQL_TYPE_NAMES: dict[str, LogicalType] = {
     **{name: LogicalType.INTEGER for name in ("int", "int2", "int4", "int8", "smallint", "tinyint", "bigint", "hugeint")},
     **{name: LogicalType.FLOAT for name in ("double", "real", "decimal", "numeric", "float4", "float8")},

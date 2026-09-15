@@ -554,9 +554,20 @@ class TransformResolver:
             raise InvalidTransformError("Measure needs a 'function' (sum, avg, min, max, count, count_distinct).", field=where)
         function = _AGG_ALIASES.get(str(raw_fn).lower())
         if function is None:
+            # Whether min would take the measure's field, for advice that offers min as one value per group.
+            min_applies = False
+            try:
+                named = pick(loose, "field", "column", "of")
+                if named not in (None, "*", ""):
+                    resolved = self.fields.resolve_measure_field(named, scope, field=where, notes=None)
+                    aggregate_result_type(AggregateFunction.MIN, resolved.logical_type)
+                    min_applies = True
+            except BackendError:
+                pass
             raise InvalidTransformError(
                 f"Unknown aggregate function {raw_fn!r}.", field=where,
-                details={"allowed_functions": [str(f) for f in AggregateFunction]},
+                details={"function": str(raw_fn), "allowed_functions": [str(f) for f in AggregateFunction],
+                         "min_applies": min_applies},
             )
         raw_field = pick(loose, "field", "column", "of")
         alias = pick(loose, "alias", "as", "name")
