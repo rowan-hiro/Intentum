@@ -768,6 +768,34 @@ def test_a_dataset_keyed_to_its_steps_or_placeholders_keyed_to_datasets_are_spli
         assert phrase in found["explanation"] and "rewrite" not in found, found
 
 
+def test_a_source_object_the_resolver_accepts_is_not_taken_for_an_inline_body(backend, orders, tmp_path):
+    """{name}, {id} and the like are references; the refusal is elsewhere and the advice for it must not be masked."""
+    payments(backend, tmp_path)
+    for reference in ({"name": "orders"}, {"id": orders["id"]}, {"dataset": "orders"}):
+        missing = backend.transform_dataset(reference, None)
+        assert [a["kind"] for a in missing["advice"]] == ["transform_required"], missing
+        unknown = backend.transform_dataset(reference, {"select": ["nope"]})
+        assert [a["kind"] for a in unknown["advice"]] == ["field_not_in_scope"], unknown
+    # A reference key beside a join or a query still names the source of the rewrite.
+    joined = backend.transform_dataset({"dataset": "orders", "right": "payments", "on": {"order_id": "order_no"}},
+                                       {"select": ["order_id", "paid"]})
+    (rewrite,) = advice(joined, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"]["source"] == "orders" and rewrite["arguments"]["transform"][0]["join"]["right"] == "payments"
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 3
+    named = backend.transform_dataset({"name": "orders", "sql": "SELECT count(*) AS n FROM input"}, None)
+    (rewrite,) = advice(named, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"] == {"source": "orders", "transform": [{"raw_query": {"sql": "SELECT count(*) AS n FROM input"}}]}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [[12]]
+    # Step keys written beside the query stay as the compact object's other steps.
+    limited = backend.transform_dataset({"sql": "SELECT order_id FROM o ORDER BY order_id", "inputs": {"o": "orders"}, "limit": 1}, None)
+    (rewrite,) = advice(limited, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"]["transform"] == [{"raw_query": {"sql": "SELECT order_id FROM o ORDER BY order_id", "inputs": {"o": "orders"}}, "limit": 1}]
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [[1001]]
+
+
 def test_an_unknown_document_is_pointed_at_the_one_that_exists(backend, tmp_path):
     root = tmp_path / "ws"
     (root / "doc").mkdir(parents=True)
