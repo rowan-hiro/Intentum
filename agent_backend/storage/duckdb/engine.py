@@ -95,6 +95,7 @@ class AnalyticsEngine(Protocol):
     def count_distinct_of_query(self, sql: str, columns: list[str]) -> int: ...
     def column_contains(self, table: str, column: str, value: Any) -> bool: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
+    def profile_columns(self, table: str, columns: list[str], *, ranged: list[str]) -> dict[str, dict[str, Any]]: ...
     def read_table(self, table: str, *, columns: list[str] | None = None,
                    order_by: list[tuple[str, bool]] | None = None) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def drop_table(self, table: str) -> None: ...
@@ -319,6 +320,27 @@ class DuckDBEngine:
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)
+
+    def profile_columns(self, table: str, columns: list[str], *, ranged: list[str]) -> dict[str, dict[str, Any]]:
+        """Per column, how many values are not null and how many are distinct (nulls not counted), plus the
+        minimum and maximum of the columns named in ``ranged``; one scan of the table."""
+        if not columns:
+            return {}
+        parts: list[str] = []
+        for column in columns:
+            ident = quote_ident(column)
+            parts.append(f"COUNT({ident}), COUNT(DISTINCT {ident})")
+            if column in ranged:
+                parts.append(f"MIN({ident}), MAX({ident})")
+        row = self.conn.execute(f"SELECT {', '.join(parts)} FROM {quote_ident(table)}").fetchone() or ()
+        values = iter(row)
+        profile: dict[str, dict[str, Any]] = {}
+        for column in columns:
+            facts: dict[str, Any] = {"non_null": int(next(values)), "distinct": int(next(values))}
+            if column in ranged:
+                facts["min"], facts["max"] = next(values), next(values)
+            profile[column] = facts
+        return profile
 
     def read_table(self, table: str, *, columns: list[str] | None = None,
                    order_by: list[tuple[str, bool]] | None = None) -> tuple[list[str], list[tuple[Any, ...]]]:

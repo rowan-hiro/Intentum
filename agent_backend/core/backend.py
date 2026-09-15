@@ -289,8 +289,12 @@ class Backend:
             "count": len(artifacts),
         }
 
+    # Columns beyond which describe_dataset skips the per-column profile: one scan with four aggregates per column.
+    PROFILE_COLUMN_BOUND = 300
+
     @semantic_operation("describe_dataset")
-    def describe_dataset(self, dataset: Any, *, sample_rows: int = 5, principal: str | None = None) -> dict[str, Any]:
+    def describe_dataset(self, dataset: Any, *, sample_rows: int = 5, profile: bool = True,
+                         principal: str | None = None) -> dict[str, Any]:
         notes: list[ResolutionNote] = []
         try:
             ds = self.datasets.resolve(dataset, field="dataset", notes=notes)
@@ -305,6 +309,18 @@ class Backend:
         if sample_rows > 0 and version is not None:
             cols, rows = self.engine.sample(version.physical_table, min(sample_rows, 100))
             sample = {"columns": cols, "rows": _jsonable([list(r) for r in rows])}
+        schema = [self._column_summary(c) for c in ds.columns]
+        profiled: str | None = None
+        if profile and version is not None and len(ds.columns) <= self.PROFILE_COLUMN_BOUND:
+            # What the data holds, column by column: repetition (distinct against rows), gaps (non-null against
+            # rows) and the range, so a count of entities or a filter on a range needs no exploratory query.
+            ranged = [c.name for c in ds.columns if c.logical_type.is_numeric or c.logical_type in (LogicalType.DATE, LogicalType.TIMESTAMP)]
+            facts = self.engine.profile_columns(version.physical_table, [c.name for c in ds.columns], ranged=ranged)
+            for entry in schema:
+                entry.update(_jsonable(facts.get(entry["name"], {})))
+            profiled = "non_null and distinct count every column's values; min and max are the range of numeric and temporal columns"
+        elif profile and version is not None:
+            profiled = f"skipped: {len(ds.columns)} columns, more than {self.PROFILE_COLUMN_BOUND}; aggregate counts the ones needed"
         body = {
             "status": "success",
             "dataset": {
@@ -312,7 +328,7 @@ class Backend:
                 "physical_location": ds.physical_location,
                 "metadata": ds.metadata,
             },
-            "schema": [self._column_summary(c) for c in ds.columns],
+            "schema": schema,
             "row_count": version.row_count if version else None,
             "versions": [
                 {"version": v.version, "rows": v.row_count, "created_at": v.created_at.isoformat(), "operation_id": v.operation_id}
@@ -329,6 +345,8 @@ class Backend:
             body["source"] = source
         if sample is not None:
             body["sample"] = sample
+        if profiled is not None:
+            body["profile"] = profiled
         return self._with_notes(body, notes)
 
     @semantic_operation("search_datasets")
