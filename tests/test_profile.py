@@ -38,3 +38,14 @@ def test_the_profile_can_be_left_out_and_is_skipped_beyond_the_column_bound(back
     backend.PROFILE_COLUMN_BOUND = 3
     wide = backend.describe_dataset("orders")
     assert wide["profile"].startswith("skipped: 8 columns, more than 3") and all("non_null" not in c for c in wide["schema"])
+
+
+def test_a_range_without_finite_bounds_is_left_out_and_infinities_travel_as_text(backend, orders, tmp_path: Path):
+    assert backend.materialize_result("orders", {"derive": {"x": "amount / 0"}}, "infish")["status"] == "success"
+    described = backend.describe_dataset("infish", sample_rows=1)
+    assert facts(described, "x") == {"non_null": 12, "distinct": 1}  # inf is no range
+    assert described["sample"]["rows"][0][-1] == "inf"  # not null, and not a token JSON lacks
+    path = write_csv(tmp_path / "blank.csv", "id,score", ["1,", "2,"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    blank = backend.describe_dataset("blank", sample_rows=0)
+    assert "min" not in facts(blank, "score") and facts(blank, "score")["non_null"] == 0

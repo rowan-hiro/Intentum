@@ -12,6 +12,7 @@ import datetime as dt
 import functools
 import inspect
 import json
+import math
 import os
 import re
 import stat
@@ -97,11 +98,18 @@ def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
 
+def _finite(value: Any) -> bool:
+    """A range bound worth reporting: present, and not an infinity or nan."""
+    return value is not None and not (isinstance(value, float) and not math.isfinite(value))
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (dt.datetime, dt.date)):
         return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)  # JSON has no inf or nan; the MCP layer would otherwise send null
     if isinstance(value, bytes):
         return value.hex()
     if isinstance(value, (list, tuple)):
@@ -317,10 +325,15 @@ class Backend:
             ranged = [c.name for c in ds.columns if c.logical_type.is_numeric or c.logical_type in (LogicalType.DATE, LogicalType.TIMESTAMP)]
             facts = self.engine.profile_columns(version.physical_table, [c.name for c in ds.columns], ranged=ranged)
             for entry in schema:
-                entry.update(_jsonable(facts.get(entry["name"], {})))
+                column_facts = facts.get(entry["name"], {})
+                if not all(_finite(column_facts.get(k)) for k in ("min", "max")):
+                    column_facts = {k: v for k, v in column_facts.items() if k not in ("min", "max")}  # no finite range
+                entry.update(_jsonable(column_facts))
             profiled = "non_null and distinct count every column's values; min and max are the range of numeric and temporal columns"
         elif profile and version is not None:
             profiled = f"skipped: {len(ds.columns)} columns, more than {self.PROFILE_COLUMN_BOUND}; aggregate counts the ones needed"
+        elif profile:
+            profiled = "skipped: the dataset has no physical version to scan"
         body = {
             "status": "success",
             "dataset": {
