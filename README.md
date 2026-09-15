@@ -394,7 +394,14 @@ subquery: the step as a `raw_query` first step when it is the first step and
 reads only the source), a function the language lacks (the accepted name it was
 close to, otherwise the step as a `raw_query` first step, which runs any DuckDB
 function), an aggregate that picks one value per group (`min`), a subtraction
-between dates or timestamps (`date_diff`), a string function on a date or
+between dates or timestamps (`date_diff`), a dataset name nothing matches (the
+close names and the datasets there are), a path that does not exist (where it
+was looked for and what the nearest directory holds), a join without keys (the
+shared fields; the join on the one shared field), a step written as strings in
+the list, two synonymous keys in one step, an unknown step type, a duplicate
+output field (each rewritten when mechanical), a constant where a field belongs,
+an empty select, an amendment of the open contract without a reason (what
+differs, and how to amend or keep it), a string function on a date or
 timestamp (how dates are computed, and that rendering belongs to export), a
 document, media file or unsupported format where a dataset is expected
 (`attach_metadata`, or that the host reads it, MADR 0009), a document name no

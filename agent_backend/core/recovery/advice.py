@@ -857,6 +857,274 @@ def _temporal_difference(err: BackendError, tool: str, arguments: dict[str, Any]
                   "The unit is one of second, minute, hour, day, week, month, quarter and year.")
 
 
+# ----------------------------------------------------------------------------
+# refusals that name what exists: datasets, paths, join keys, step shapes, contracts
+# ----------------------------------------------------------------------------
+
+def _dataset_not_found(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A reference no dataset matches: the close names, the datasets there are, and the one close match sent back."""
+    details = err.details if isinstance(err.details, dict) else {}
+    where = str(err.field or "")
+    if err.code != ErrorCode.NOT_FOUND or not isinstance(details.get("available"), list):
+        return None
+    if where not in ("source", "dataset") and not where.endswith(".right"):
+        return None  # a field, not a dataset
+    if not all(isinstance(d, dict) and "id" in d for d in details["available"]):
+        return None
+    available = [str(d.get("name")) for d in details["available"]]
+    candidates = [str(c.get("name")) for c in getattr(err, "candidates", None) or [] if isinstance(c, dict)]
+    reference = str(details.get("reference") or "")
+    if re.search(r"\.\w{1,5}$", reference):
+        return None  # a file or document name, which its own advice covers
+    # The argument that carries the refused reference; the right side of a join is inside the transform.
+    argument = where if where in ("source", "dataset") and arguments.get(where) == reference else None
+    explanation = (f"No dataset is named {reference!r}. "
+                   + (f"Close names: {', '.join(candidates)}. " if candidates else "")
+                   + (f"Datasets here: {', '.join(available)}" + ("; " if len(available) >= 20 else ". ") if available
+                      else "No dataset is imported yet; import_dataset or import_workspace loads one. ")
+                   + ("list_datasets shows them all with their columns, and a source file's tables are datasets of "
+                      "their own, named after the table, not the file." if available else ""))
+    close = difflib.get_close_matches(normalize(reference), [normalize(n) for n in available], n=2, cutoff=0.75) if reference else []
+    if argument is None or len(close) != 1:
+        return Advice("dataset_not_found", explanation.strip())
+    target = next(n for n in available if normalize(n) == close[0])
+    keep = {k: v for k, v in arguments.items() if k not in (argument, "principal") and v is not None}
+    return Advice("dataset_not_found", explanation.strip() + f" The same request over {target}:",
+                  rewrite=[call(tool, **{argument: target}, **keep)])
+
+
+def _path_not_found(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A path that does not exist: where it was looked for, and what the nearest existing directory holds."""
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code != ErrorCode.NOT_FOUND or err.field != "path" or "resolved" not in details:
+        return None
+    entries = [str(e) for e in details.get("entries") or []]
+    return Advice(
+        "path_not_found",
+        f"{details.get('resolved')} does not exist. A relative path resolves against the backend's working directory, "
+        f"{details.get('cwd')}, not the caller's. The nearest existing directory, {details.get('nearest_directory')}, "
+        + (f"holds: {', '.join(entries)}. " if entries else "is empty. ")
+        + "list_datasets shows what is already imported; a dataset is used by name, not by its file path.",
+    )
+
+
+def _join_needs_on(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A join without keys: the fields the two datasets share, and the join on the one shared field when there is one."""
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code != ErrorCode.INVALID_TRANSFORM or "shared_fields" not in details:
+        return None
+    shared = [str(f) for f in details.get("shared_fields") or []]
+    right = str(details.get("right") or "the right dataset")
+    shape = "{\"join\": {\"right\": \"other\", \"on\": {\"left_field\": \"right_field\"}}}"
+    if not shared:
+        return Advice("join_needs_on", f"join needs the fields it joins on, {shape}; a shared name may be written once. "
+                      f"The source and {right} share no field name, so name the pair whose values match.")
+    explanation = (f"join needs the fields it joins on, {shape}. The source and {right} share "
+                   f"{', '.join(shared)}; a shared name may be written once, as on: \"{shared[0]}\".")
+    if len(shared) != 1:
+        return Advice("join_needs_on", explanation)
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        holders = [step] + [step[k] for k in _JOIN_KEYS if isinstance(step.get(k), dict)]
+        kind = _pick(step, *_TYPE_KEYS)
+        for holder in holders:
+            is_join = holder is not step or (isinstance(kind, str) and kind.lower() in _JOIN_KEYS)
+            if is_join and "on" not in holder and str(_pick(holder, *_RIGHT_KEYS)) == right:
+                holder["on"] = shared[0]
+                changed = True
+    if not changed:
+        return Advice("join_needs_on", explanation)
+    return Advice("join_needs_on", explanation + " The same request joined on it:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+
+
+def _step_as_strings(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A step written as its name and body side by side in the list: each name takes the item after it."""
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code != ErrorCode.INVALID_TRANSFORM or not err.message.startswith("Each step must be an object"):
+        return None
+    transform = arguments.get("transform")
+    explanation = ("Each step is an object: {\"filter\": \"amount > 100\"}, {\"select\": [\"a\", \"b\"]}, or "
+                   "{\"type\": \"filter\", \"filter\": \"...\"}; a compact object holds several steps at once.")
+    if not isinstance(transform, list):
+        return Advice("step_as_strings", explanation)
+    steps: list[dict[str, Any]] = []
+    items = list(transform)
+    while items:
+        item = items.pop(0)
+        if isinstance(item, dict):
+            steps.append(copy.deepcopy(item))
+        elif isinstance(item, str) and item.lower() in _STEP_KEYS and items and not isinstance(items[0], dict):
+            if item.lower() in _JOIN_KEYS:
+                return Advice("step_as_strings", explanation + " A join is an object with the right dataset and the "
+                              "keys: {\"join\": {\"right\": \"other\", \"on\": {\"left_field\": \"right_field\"}}}.")
+            steps.append({item.lower(): items.pop(0)})
+        else:
+            return Advice("step_as_strings", explanation)
+    return Advice("step_as_strings", explanation + " Read as such, the request is:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=steps))])
+
+
+def _one_key_per_step(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """Two synonymous keys in one step: the one kept when they agree, two filter steps when both are filters."""
+    details = err.details if isinstance(err.details, dict) else {}
+    keys = details.get("keys")
+    if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(keys, list) or "step" not in details:
+        return None
+    kind = str(details["step"])
+    explanation = f"{' and '.join(repr(k) for k in keys)} are the same {kind} key; a step names it once."
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        present = [k for k in keys if k in step]
+        if len(present) < 2:
+            continue
+        if details.get("values_equal"):
+            for key in present[1:]:
+                step.pop(key)
+            changed = True
+        elif kind == "filter":
+            # Two predicates both hold: one conjunction.
+            step[present[0]] = " and ".join(f"({step.pop(k)})" for k in list(present)) if all(isinstance(step[k], str) for k in present) else step[present[0]]
+            changed = step.get(present[0]) is not None and all(k not in step for k in present[1:])
+    if not changed:
+        return Advice("one_key_per_step", explanation + (" Their values differ: keep the one meant, or make two steps."
+                                                        if not details.get("values_equal") else ""))
+    return Advice("one_key_per_step", explanation + (" Both predicates hold, so they are one conjunction:" if kind == "filter" and not details.get("values_equal") else " The same request with one:"),
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+
+
+def _unknown_step_type(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """An unknown step type: the nearest accepted one."""
+    details = err.details if isinstance(err.details, dict) else {}
+    received, allowed = details.get("received"), details.get("allowed_types")
+    if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(received, str) or not isinstance(allowed, list):
+        return None
+    listed = ", ".join(str(a) for a in allowed)
+    renamed = details.get("renamed")  # the resolver checked that the step's keys are ones the near type takes
+    if not isinstance(renamed, str):
+        return Advice("unknown_step_type", f"{received!r} is not a step type; the steps are {listed}. A step may also be "
+                      "written without a type, as {\"filter\": \"...\"} or {\"select\": [...]}.")
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        for key in _TYPE_KEYS:
+            if str(step.get(key, "")).lower() == received.lower():
+                step[key] = renamed
+                changed = True
+    if not changed:
+        return Advice("unknown_step_type", f"{received!r} is not a step type; the nearest is {renamed!r}. The steps are {listed}.")
+    return Advice("unknown_step_type", f"{received!r} is not a step type; the nearest is {renamed!r}. The steps are {listed}. "
+                  "The same request with it:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+
+
+_ALIAS_SAME_RE = re.compile(r"^\s*(?P<name>\"[^\"]+\"|[^\s]+)\s+as\s+(?P<alias>\"[^\"]+\"|[^\s]+)\s*$", re.IGNORECASE)
+
+
+def _duplicate_output_field(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """Two entries produce one output name: the repeat dropped, or an alias equal to the name dropped; a derive
+    onto an existing name explained."""
+    details = err.details if isinstance(err.details, dict) else {}
+    name = details.get("name")
+    if err.code != ErrorCode.INVALID_TRANSFORM or not err.message.startswith("Duplicate output field") or not isinstance(name, str):
+        return None
+    if details.get("resolution"):
+        return None  # a lenient match produced the duplicate; join_scope_names says which
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        holders = [step] + [step[k] for k in ("aggregate", "summarize") if isinstance(step.get(k), dict)]
+        for holder in holders:
+            for key in _SELECT_KEYS + _GROUP_KEYS:
+                items = holder.get(key)
+                if not isinstance(items, list):
+                    continue
+                kept: list[Any] = []
+                for item in items:
+                    text = item
+                    match = _ALIAS_SAME_RE.match(item) if isinstance(item, str) else None
+                    if match and match.group("name").strip('"') == match.group("alias").strip('"') == name:
+                        text = match.group("name")  # "x as x" is x
+                        changed = True
+                    if isinstance(text, str) and text.strip('"') == name and any(
+                            isinstance(k, str) and k.strip('"') == name for k in kept):
+                        changed = True  # the same field named twice
+                        continue
+                    kept.append(text)
+                holder[key] = kept
+    if changed:
+        return Advice("duplicate_output_field", f"{name!r} would be produced twice; a result names each field once. "
+                      "The same request naming it once:",
+                      rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+    entries = [str(e) for e in details.get("entries") or []]
+    if "(derive)" not in str(err.field):
+        produced = f", by {' and '.join(repr(e) for e in entries)}" if len(entries) > 1 else " by a field and an alias, or by two aliases"
+        return Advice("duplicate_output_field", f"{name!r} would be produced twice{produced}; a result names each field "
+                      "once. Give one of them another alias, or leave it out.")
+    return Advice("duplicate_output_field", f"{name!r} is already a field of the result; a derive adds a field, it does "
+                  "not replace one. Give the derived field another name, or select or rename the fields so that the "
+                  "name is free.")
+
+
+def _literal_as_field(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A number or object where a field name belongs: a constant is derived, not measured or selected."""
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code != ErrorCode.INVALID_INTENT or not err.message.endswith("must be a field name.") or "received" not in details:
+        return None
+    received = details["received"]
+    where = str(err.field)
+    if isinstance(received, (int, float)) and not isinstance(received, bool):
+        return Advice("literal_as_field", f"{where} names a field of the source, and {received!r} is a constant. A "
+                      "constant becomes a column through a derive step whose expression is the constant as text, "
+                      "{\"derive\": {\"total\": \"" + str(received) + "\"}}, which an aggregate or a select may then use; "
+                      "a single constant answer is that derive after an aggregate, or a raw_query such as SELECT "
+                      + str(received) + " AS total FROM input LIMIT 1.")
+    return Advice("literal_as_field", f"{where} names a field of the source: a name, or {{\"field\": \"name\"}}; an "
+                  "expression belongs in a derive step, and a constant in a derive too.")
+
+
+def _select_needs_fields(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """An empty or malformed select: the fields there are."""
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code != ErrorCode.INVALID_TRANSFORM or not err.message.startswith("select needs a non-empty list") or "available" not in details:
+        return None
+    available = [str(a) for a in details.get("available") or []]
+    return Advice("select_needs_fields", "select lists the fields to keep, in order, as [\"a\", \"b\"] or [\"a as alias\"]; "
+                  f"to keep them all, leave select out. The fields here are {', '.join(available)}.")
+
+
+def _contract_amendment(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A declaration that would change the open contract without saying why: what differs, and how to amend or keep it."""
+    details = err.details if isinstance(err.details, dict) else {}
+    contract = details.get("contract")
+    if err.code != ErrorCode.CONFLICT or err.field != "reason" or not isinstance(contract, dict):
+        return None
+    declared = [str(c.get("name")) for c in contract.get("columns") or [] if isinstance(c, dict)]
+    asked = arguments.get("columns")
+    if isinstance(asked, str):
+        try:
+            asked = json.loads(asked)
+        except ValueError:
+            asked = [asked]
+    names = [str(c.get("name") if isinstance(c, dict) else c) for c in asked] if isinstance(asked, list) else []
+    differences = []
+    if names and names != declared:
+        differences.append(f"columns {declared} would become {names}")
+    rows = contract.get("rows")
+    if arguments.get("rows") is None and rows is not None:
+        differences.append(f"the row cardinality {rows} would be dropped")
+    elif arguments.get("rows") is not None and arguments.get("rows") != rows:
+        differences.append(f"the row cardinality {rows} would become {arguments.get('rows')!r}")
+    what = ("; ".join(differences)[0].upper() + "; ".join(differences)[1:] + ". ") if differences else ""
+    return Advice("contract_amendment",
+                  f"Output contract {contract.get('id')} is open with columns {declared}"
+                  + (f" and rows {rows}" if rows is not None else "") + f". {what}"
+                  "To change it, send the declaration again with reason saying what changed in the requirement; to "
+                  "keep it, declare nothing more: export_result checks the dataset against it as it stands.")
+
+
 _UNKNOWN_KEYS_RE = re.compile(r"Unknown key\(s\) \[(?P<keys>.*?)\]")
 
 
@@ -1920,6 +2188,16 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_join_scope_names, _TRANSFORM_TOOLS, False),
     (_field_created_later, _TRANSFORM_TOOLS, False),
     (_document_not_found, ("attach_metadata",), False),
+    (_dataset_not_found, _DATASET_TOOLS, False),
+    (_path_not_found, ("import_dataset", "import_workspace"), False),
+    (_join_needs_on, _TRANSFORM_TOOLS, False),
+    (_step_as_strings, _TRANSFORM_TOOLS, False),
+    (_one_key_per_step, _TRANSFORM_TOOLS, False),
+    (_unknown_step_type, _TRANSFORM_TOOLS, False),
+    (_duplicate_output_field, _TRANSFORM_TOOLS, False),
+    (_literal_as_field, _TRANSFORM_TOOLS, False),
+    (_select_needs_fields, _TRANSFORM_TOOLS, False),
+    (_contract_amendment, ("declare_output",), False),
     (_file_exists, ("export_result",), False),
     (_name_taken, _TRANSFORM_TOOLS, False),
     (_derive_without_expression, _TRANSFORM_TOOLS, False),

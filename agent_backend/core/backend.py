@@ -187,6 +187,20 @@ def _run_operation(self: "Backend", fn, signature: inspect.Signature, action: st
         _CURRENT_CALL.reset(token)
 
 
+def _path_facts(path: Path) -> dict[str, Any]:
+    """Where a path that does not exist was looked for: the directory it resolved against, and what the nearest
+    existing directory above it holds, so the caller can see the spelling or the root it meant."""
+    resolved = path.resolve()
+    nearest = resolved
+    while not nearest.is_dir() and nearest != nearest.parent:
+        nearest = nearest.parent
+    try:
+        entries = sorted(p.name + ("/" if p.is_dir() else "") for p in nearest.iterdir() if not p.name.startswith("."))[:30]
+    except OSError:
+        entries = []
+    return {"resolved": str(resolved), "cwd": str(Path.cwd()), "nearest_directory": str(nearest), "entries": entries}
+
+
 @dataclass
 class _ImportSpec:
     """Everything needed to turn one tabular source into a dataset."""
@@ -428,7 +442,8 @@ class Backend:
     ) -> dict[str, Any]:
         source = Path(str(path)).expanduser()
         if not source.is_file():
-            raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True)
+            raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True,
+                                details=_path_facts(source))
         kind = self._classify(source, format)
         if not kind.is_tabular:
             # What was received (the kind), what is accepted (the formats), and who reads the rest (MADR 0009).
@@ -486,7 +501,7 @@ class Backend:
     ) -> dict[str, Any]:
         root = Path(str(path)).expanduser()
         if not root.is_dir():
-            raise NotFoundError(f"Directory {path!r} does not exist.", field="path")
+            raise NotFoundError(f"Directory {path!r} does not exist.", field="path", details=_path_facts(root))
         intent = _jsonable({"path": path, "description": description, "include_documents": include_documents})
         files = sorted(p for p in root.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts))
 
