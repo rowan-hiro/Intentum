@@ -23,7 +23,7 @@ _TOKEN_RE = re.compile(
   | (?P<string>'(?:[^']|'')*')
   | (?P<qident>"(?:[^"]|"")*")
   | (?P<ident>[^\W\d]\w*)
-  | (?P<op>\|\||<=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|\[|\]|,)
+  | (?P<op>\|\||::|<=|>=|<>|!=|==|=|<|>|\+|-|\*|/|%|\(|\)|\[|\]|,)
     """,
     re.VERBOSE,
 )
@@ -197,7 +197,13 @@ class ExpressionParser:
             if "value" in operand and isinstance(operand["value"], (int, float)) and len(operand) == 1:
                 return {"value": -operand["value"]}
             return {"neg": operand}
-        return self._parse_primary()
+        return self._parse_postfix_cast(self._parse_primary())
+
+    def _parse_postfix_cast(self, operand: dict[str, Any]) -> dict[str, Any]:
+        """``expression::type``, the PostgreSQL spelling of a cast; it binds tighter than any operator."""
+        while self._accept("op", "::"):
+            operand = {"cast": operand, "to": self._parse_type_name()}
+        return operand
 
     def _parse_primary(self) -> dict[str, Any]:
         token = self._advance()
@@ -212,8 +218,8 @@ class ExpressionParser:
         if token.kind == "qident":
             return {"column": token.text[1:-1].replace('""', '"')}
         if token.kind == "ident":
-            if token.text.lower() == "cast" and self._accept("op", "("):
-                return self._parse_cast()
+            if token.text.lower() in ("cast", "try_cast") and self._accept("op", "("):
+                return self._parse_cast(token.text.lower())
             if self._accept("op", "("):
                 args: list[dict[str, Any]] = []
                 if not self._accept("op", ")"):
@@ -233,8 +239,8 @@ class ExpressionParser:
             details={"token": token.text, "position": token.pos, "expression": self.text},
         )
 
-    def _parse_cast(self) -> dict[str, Any]:
-        """``cast(expression as type)``; a length or precision after the type, as in varchar(20), is ignored."""
+    def _parse_cast(self, spelling: str) -> dict[str, Any]:
+        """``cast(expression as type)`` or ``try_cast(expression as type)``, which yields null where a cast fails."""
         inner = self._parse_or()
         word = self._advance()
         if word.kind != "ident" or word.text.lower() != "as":
@@ -242,16 +248,21 @@ class ExpressionParser:
                 f"Expected 'as' at position {word.pos} in expression {self.text!r}, got {word.text or 'end of input'!r}.",
                 field="expression",
                 details={"token": word.text, "position": word.pos, "expression": self.text},
-                hint="Write cast(expression as type), e.g. cast(record_id as integer).",
+                hint=f"Write {spelling}(expression as type), e.g. {spelling}(record_id as integer).",
             )
+        target = self._parse_type_name()
+        self._expect("op", ")")
+        return {spelling: inner, "to": target}
+
+    def _parse_type_name(self) -> str:
+        """A type name; a length or precision after it, as in varchar(20) or decimal(10, 2), is ignored."""
         target = self._expect("ident")
         if self._accept("op", "("):
             self._expect("number")
             while self._accept("op", ","):
                 self._expect("number")
             self._expect("op", ")")
-        self._expect("op", ")")
-        return {"cast": inner, "to": target.text}
+        return target.text
 
 
 def parse_expression(text: str) -> dict[str, Any]:

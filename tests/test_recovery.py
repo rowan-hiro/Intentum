@@ -510,7 +510,7 @@ def test_join_keys_of_different_types_are_cast_in_a_derive_before_the_join(backe
     assert response["message"] == "Cannot join order_id (string) with order_id (integer)."
     found = advice(response, "join_key_types")
     assert "order_id is string and order_id in orders is integer" in found["explanation"]
-    assert "fails the transform" in found["explanation"] and "TRY_CAST" in found["explanation"]
+    assert "fails the transform" in found["explanation"] and "try_cast(order_id as integer)" in found["explanation"]
     (rewritten,) = found["rewrite"]
     assert rewritten["arguments"]["transform"] == [  # the steps as the backend normalized them
         {"type": "derive", "name": "order_id_as_integer", "expression": "cast(order_id as integer)"},
@@ -780,3 +780,123 @@ def test_stray_characters_after_a_complete_expression_are_dropped(backend, order
     # a tail that could still be expression text is not cut
     unfinished = backend.transform_dataset("orders", {"filter": "region = 'West' and amount > 100 \u0ac0 'x'"})
     assert "stray_characters" not in kinds(unfinished)
+
+
+def amounts_as_text(backend, tmp_path: Path):
+    path = write_csv(tmp_path / "amounts.csv", "id,amount", ["1,10.5", "2,", "3,n/a", "4,40"])
+    assert backend.import_dataset(str(path), name="amounts")["status"] == "success"
+
+
+def test_backtick_names_and_extract_are_respelled(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "`amount` > 500 AND EXTRACT(DAY FROM order_date) = 26",
+                                                    "select": ["order_id"]})
+    found = advice(response, "sql_spelling")
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == '"amount" > 500 AND day(order_date) = 26'
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [[1006], [1010]]
+
+
+def test_ilike_and_like_on_a_function_result_become_contains(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "region = 'West' AND (LOWER(customer) LIKE '%acme%' OR customer ILIKE '%UMBRELLA%')",
+                                                    "select": ["order_id", "customer"]})
+    found = advice(response, "like_as_function")
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == (
+        "region = 'West' AND (contains(LOWER(customer), 'acme') OR contains(lower(customer), 'umbrella'))")
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [[1001, "Acme Corp"], [1004, "Umbrella"]]
+
+
+def test_case_in_the_first_derive_becomes_a_raw_query_first_step(backend, orders):
+    response = backend.transform_dataset("orders", [{"derive": {"size": "CASE WHEN quantity >= 10 THEN 'big' ELSE 'small' END"}},
+                                                    {"select": ["order_id", "size"]}, {"sort": "order_id"}, {"limit": 2}])
+    found = advice(response, "sql_in_expression")
+    assert found["explanation"].startswith("CASE is SQL that semantic expressions do not have.")
+    assert found["rewrite"][0]["arguments"]["transform"][0] == {
+        "raw_query": {"sql": "SELECT *, CASE WHEN quantity >= 10 THEN 'big' ELSE 'small' END AS \"size\" FROM input"}}
+    (result,) = run(backend, found["rewrite"])
+    assert result["used_raw_query"] is True and result["result"]["rows"] == [[1001, "big"], [1002, "small"]]
+
+
+def test_a_window_in_the_first_filter_becomes_a_qualify_query(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "row_number() OVER (PARTITION BY region ORDER BY amount DESC) = 1",
+                                                    "select": ["region", "amount"]})
+    found = advice(response, "sql_in_expression")
+    assert found["rewrite"][0]["arguments"]["transform"] == [  # the normalized steps, the first as the query
+        {"raw_query": {"sql": "SELECT * FROM input QUALIFY row_number() OVER (PARTITION BY region ORDER BY amount DESC) = 1"}},
+        {"type": "select", "select": ["region", "amount"]}]
+    (result,) = run(backend, found["rewrite"])
+    assert sorted(result["result"]["rows"]) == [["East", 900.0], ["North", 450.0], ["South", 495.0], ["West", 450.0]]
+
+
+def test_a_scalar_subquery_over_the_source_becomes_a_query_and_one_over_another_dataset_is_explained(backend, orders, tmp_path):
+    response = backend.transform_dataset("orders", {"filter": "amount = (SELECT MAX(amount) FROM input)", "select": ["order_id"]})
+    found = advice(response, "sql_in_expression")
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [[1006]]
+
+    customers(backend, tmp_path)
+    other = advice(backend.transform_dataset("orders", {"filter": "customer = (SELECT MIN(name) FROM customers)"}), "sql_in_expression")
+    assert "rewrite" not in other and "under inputs" in other["explanation"]
+    later = advice(backend.transform_dataset("orders", [{"filter": "region = 'West'"},
+                                                        {"derive": {"size": "CASE WHEN quantity >= 10 THEN 'big' END"}}]),
+                   "sql_in_expression")
+    assert "rewrite" not in later and "first step, a filter or a derive" in later["explanation"]
+
+
+def test_a_cast_that_meets_a_value_it_cannot_convert_is_retried_with_try_cast(backend, tmp_path):
+    amounts_as_text(backend, tmp_path)
+    response = backend.transform_dataset("amounts", [{"derive": {"x": "cast(amount as double)"}}, {"select": ["id", "x"]}])
+    assert response["code"] == "EXECUTION_FAILED"
+    found = advice(response, "cast_conversion")
+    assert found["rewrite"][0]["arguments"]["transform"] == [{"derive": {"x": "try_cast(amount as double)"}}, {"select": ["id", "x"]}]
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [[1, 10.5], [2, None], [3, None], [4, 40.0]]
+
+    postfix = advice(backend.transform_dataset("amounts", {"filter": "amount::double > 20"}), "cast_conversion")
+    assert postfix["rewrite"][0]["arguments"]["transform"] == {"filter": "try_cast(amount as double) > 20"}
+    (kept,) = run(backend, postfix["rewrite"])
+    assert kept["result"]["rows"] == [[4, "40"]]
+
+
+def test_a_window_after_a_filter_is_explained_not_moved_ahead_of_it(backend, orders):
+    # In a compact object the filter runs first; a query in its place would rank every order, then filter.
+    compact = backend.transform_dataset("orders", {"filter": "region = 'West'",
+                                                   "derive": {"r": "row_number() OVER (ORDER BY amount DESC, order_id)"},
+                                                   "select": ["order_id", "r"], "sort": "r"})
+    found = advice(compact, "sql_in_expression")
+    assert "rewrite" not in found
+    listed = backend.transform_dataset("orders", [{"type": "filter", "filter": "region = 'West'"},
+                                                  {"type": "filter", "filter": "amount = (SELECT MAX(amount) FROM input)"}])
+    assert "rewrite" not in advice(listed, "sql_in_expression")
+
+
+def test_a_window_derive_before_a_filter_keeps_the_filter_after_the_query(backend, orders):
+    response = backend.transform_dataset("orders", [{"derive": {"r": "row_number() OVER (ORDER BY amount DESC, order_id)"}},
+                                                    {"filter": "region = 'West'"}, {"select": ["order_id", "r"]}, {"sort": "r"}])
+    found = advice(response, "sql_in_expression")
+    assert found["rewrite"][0]["arguments"]["transform"] == [
+        {"raw_query": {"sql": 'SELECT *, row_number() OVER (ORDER BY amount DESC, order_id) AS "r" FROM input'}},
+        {"type": "filter", "filter": "region = 'West'"}, {"type": "select", "select": ["order_id", "r"]},
+        {"type": "sort", "sort": "r"}]
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [[1004, 4], [1009, 9], [1001, 10]]  # ranked over all orders, as written
+
+
+def test_respelling_and_try_cast_leave_string_literals_as_written(backend, tmp_path):
+    labels = write_csv(tmp_path / "labels.csv", "id,label", ["1,Use `code`", '2,"Use ""code"""', "3,EXTRACT(DAY FROM x)"])
+    assert backend.import_dataset(str(labels), name="labels")["status"] == "success"
+    ticked = advice(backend.transform_dataset("labels", {"filter": "`label` = 'Use `code`'"}), "sql_spelling")
+    assert ticked["rewrite"][0]["arguments"]["transform"] == {"filter": "\"label\" = 'Use `code`'"}
+    (rows,) = run(backend, ticked["rewrite"])
+    assert rows["result"]["rows"] == [[1, "Use `code`"]]
+    extract = advice(backend.transform_dataset("labels", {"filter": "`label` = 'EXTRACT(DAY FROM x)'"}), "sql_spelling")
+    assert extract["rewrite"][0]["arguments"]["transform"] == {"filter": "\"label\" = 'EXTRACT(DAY FROM x)'"}
+
+    amounts_as_text(backend, tmp_path)
+    tagged = advice(backend.transform_dataset("amounts", {"derive": {"tag": "concat('cast(amount as int)::x=', cast(amount as int))"},
+                                                          "select": ["id", "tag"]}), "cast_conversion")
+    assert tagged["rewrite"][0]["arguments"]["transform"]["derive"] == {
+        "tag": "concat('cast(amount as int)::x=', try_cast(amount as int))"}
+    (tags,) = run(backend, tagged["rewrite"])
+    assert [tag for _, tag in tags["result"]["rows"]] == [  # the literal prefix is kept on every row
+        "cast(amount as int)::x=11", "cast(amount as int)::x=", "cast(amount as int)::x=", "cast(amount as int)::x=40"]
