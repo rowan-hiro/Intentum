@@ -147,7 +147,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "in (a, b) or in [a, b], cast(x as integer|float|string|boolean|date|timestamp) (SQL names such as "
                              "int, double and varchar also work; x::type is the same cast) and try_cast(x as type), which "
                              "yields null where cast would fail, and the functions abs round floor ceil upper lower trim length "
-                             "substr left right concat (or ||) coalesce year month day date date_trunc strftime "
+                             "substr left right concat (or ||) coalesce year month day date date_trunc date_diff(unit, start, end) strftime "
                              "is_null contains starts_with ends_with. Field names may be approximate; the response "
                              "lists how each was resolved, or returns needs_resolution with candidates. Transforms "
                              "compute values; how they are rendered as text is export_result's business. `transform` is required; "
