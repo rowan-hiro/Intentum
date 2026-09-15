@@ -42,11 +42,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
 
     @server.tool(name="describe_dataset", annotations=annotations("read"),
                  description="Describe one dataset: schema with types, semantic roles, units and descriptions, row count, "
+                             "a per-column profile (non_null and distinct counts; min and max of numeric and temporal "
+                             "columns, so repetition and gaps show without a query; profile=false leaves it out), "
                              "metadata, source artifact, recent versions, lineage summary, semantic hints and a small "
                              "sample. `dataset` may be an id, a name, an alias (any script), or a loose description "
                              "such as 'the orders I imported today'.")
-    def describe_dataset(dataset: str, sample_rows: int = 5) -> dict[str, Any]:
-        return backend.describe_dataset(dataset, sample_rows=sample_rows)
+    def describe_dataset(dataset: str, sample_rows: int = 5, profile: bool = True) -> dict[str, Any]:
+        return backend.describe_dataset(dataset, sample_rows=sample_rows, profile=profile)
 
     @server.tool(name="search_datasets", annotations=annotations("read"),
                  description="Search datasets by name, description, aliases, column names, column descriptions and metadata.")

@@ -86,6 +86,15 @@ def test_a_loose_argument_is_refused_by_the_backend_with_advice_not_by_the_sdk(s
     assert parsed["status"] == "success"
 
 
+def test_describe_dataset_carries_the_column_profile_through_the_server(server):
+    assert call(server, "import_dataset", path=str(ORDERS_CSV))["status"] == "success"
+    described = call(server, "describe_dataset", dataset="orders", sample_rows=0)
+    region = next(c for c in described["schema"] if c["name"] == "region")
+    assert (region["non_null"], region["distinct"]) == (12, 4)
+    plain = call(server, "describe_dataset", dataset="orders", profile=False)
+    assert "non_null" not in next(c for c in plain["schema"] if c["name"] == "region")
+
+
 def test_a_call_without_its_transform_is_refused_by_the_backend_with_advice(server):
     assert call(server, "import_dataset", path=str(ORDERS_CSV))["status"] == "success"
     for tool, extra in (("transform_dataset", {}), ("materialize_result", {"name": "orders_copy"})):

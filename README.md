@@ -560,6 +560,13 @@ Client configuration (Claude Desktop / Claude Code / Codex style; see
 
 Claude Code: `claude mcp add agent-backend -- uv run --directory /abs/path/to/Intentum agent-backend-mcp --workspace /abs/path/to/workspace`.
 
+`describe_dataset` carries a per-column profile beside the schema: `non_null` and
+`distinct` counts for every column, and `min` and `max` for numeric and temporal
+ones, from one scan of the current version, so repetition (a count of entities
+against a count of rows) and gaps show without an exploratory query;
+`profile=false` leaves it out, and a dataset wider than 300 columns is described
+without it and says so.
+
 Tools exposed (all semantic; no SQL tool, since read-only SQL enters only as the
 `raw_query` step of a transform, and no file or table primitives):
 `list_datasets`, `list_artifacts`, `describe_dataset`, `search_datasets`,
