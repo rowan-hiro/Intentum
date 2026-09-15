@@ -71,6 +71,7 @@ def _date(_: list[LogicalType]) -> LogicalType:
 
 
 DATE_TRUNC_PARTS = ("day", "week", "month", "quarter", "year")
+DATE_DIFF_PARTS = ("second", "minute", "hour", "day", "week", "month", "quarter", "year")
 
 
 FUNCTIONS: dict[str, FunctionSpec] = {
@@ -100,6 +101,8 @@ FUNCTIONS: dict[str, FunctionSpec] = {
         # Rendering a value as text belongs to export (MADR 0005); strftime is here so a
         # date part can be *computed* (a month key to group by), not to format an answer.
         FunctionSpec("strftime", (_tmp, _str), _string),
+        # The distance between two dates or timestamps is a count of calendar units, never a temporal value.
+        FunctionSpec("date_diff", (_str, _tmp, _tmp), _int),
         FunctionSpec("is_null", (_any,), _bool, sql="({0} IS NULL)"),
         FunctionSpec("contains", (_str, _str), _bool),
         FunctionSpec("starts_with", (_str, _str), _bool),
@@ -160,6 +163,16 @@ def validate_function_arguments(name: str, args: list) -> None:
                 field="expression",
                 details={"allowed_parts": list(DATE_TRUNC_PARTS), "signature": signature(name)},
             )
+    if name == "date_diff" and args:
+        part = args[0]
+        if not isinstance(part, LiteralExpr) or not isinstance(part.value, str) or part.value.lower() not in DATE_DIFF_PARTS:
+            raise InvalidTransformError(
+                f"date_diff needs a unit as its first argument, one of {list(DATE_DIFF_PARTS)}; "
+                f"got {part.value!r}." if isinstance(part, LiteralExpr) else
+                f"date_diff needs a unit literal as its first argument, one of {list(DATE_DIFF_PARTS)}.",
+                field="expression",
+                details={"allowed_parts": list(DATE_DIFF_PARTS), "signature": signature(name)},
+            )
 
 
 def function_result_type(name: str, arg_types: list[LogicalType]) -> LogicalType:
@@ -168,7 +181,7 @@ def function_result_type(name: str, arg_types: list[LogicalType]) -> LogicalType
         raise InvalidTransformError(
             f"Unknown function {name!r}.",
             field="expression",
-            details={"allowed_functions": sorted(FUNCTIONS)},
+            details={"function": name, "allowed_functions": sorted(FUNCTIONS)},
         )
     required = [a for a in spec.args if not a.optional]
     if len(arg_types) < len(required) or (not spec.variadic and len(arg_types) > len(spec.args)):
@@ -207,6 +220,8 @@ def binary_result_type(op: str, left: LogicalType, right: LogicalType) -> Logica
                 return LogicalType.INTEGER
             return LogicalType.FLOAT
         hint = "Use concat(a, b) to combine strings." if op == "+" and LogicalType.STRING in (left, right) else None
+        if op == "-" and left in TEMPORAL and right in TEMPORAL:
+            hint = "date_diff('day', start, end) counts the days from start to end; the unit may also be a month or a year."
         raise TypeMismatchError(
             f"Operator {op!r} requires numeric operands, got {left} and {right}.",
             field="expression",

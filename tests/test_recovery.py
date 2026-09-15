@@ -796,6 +796,52 @@ def test_a_source_object_the_resolver_accepts_is_not_taken_for_an_inline_body(ba
     assert result["result"]["rows"] == [[1001]]
 
 
+def test_an_unknown_function_close_to_an_accepted_name_is_renamed(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "lenght(customer) > 5 and customer != 'lenght(x)'",
+                                                    "select": ["customer"], "limit": 2})
+    assert response["code"] == "INVALID_TRANSFORM" and response["details"]["function"] == "lenght"
+    found = advice(response, "unknown_function")
+    assert "length is, as length(string)" in found["explanation"]
+    (rewrite,) = found["rewrite"]
+    assert rewrite["arguments"]["transform"] == {"filter": "length(customer) > 5 and customer != 'lenght(x)'",
+                                                 "select": ["customer"], "limit": 2}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [["Acme Corp"], ["Globex"]]
+
+
+def test_an_unknown_function_in_the_first_step_becomes_a_raw_query_and_elsewhere_is_explained(backend, orders):
+    derived = backend.transform_dataset("orders", [{"derive": {"initial": "regexp_extract(customer, '^[A-Z]')"}},
+                                                   {"select": ["customer", "initial"]}, {"limit": 2}])
+    found = advice(derived, "unknown_function")
+    (rewrite,) = found["rewrite"]
+    assert rewrite["arguments"]["transform"][0] == {"raw_query": {"sql": "SELECT *, regexp_extract(customer, '^[A-Z]') AS \"initial\" FROM input"}}
+    (result,) = run(backend, [rewrite])
+    assert result["used_raw_query"] and result["result"]["rows"] == [["Acme Corp", "A"], ["Globex", "G"]]
+    filtered = backend.transform_dataset("orders", {"filter": "regexp_matches(customer, '^A')", "select": ["customer"]})
+    (rewrite,) = advice(filtered, "unknown_function")["rewrite"]
+    assert rewrite["arguments"]["transform"][0] == {"raw_query": {"sql": "SELECT * FROM input WHERE regexp_matches(customer, '^A')"}}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 3
+    later = backend.transform_dataset("orders", [{"filter": "amount > 100"}, {"derive": {"initial": "regexp_extract(customer, '^[A-Z]')"}}])
+    found = advice(later, "unknown_function")
+    assert "raw_query first step runs any DuckDB function" in found["explanation"] and "rewrite" not in found
+
+
+def test_an_aggregate_that_picks_one_value_per_group_becomes_min_and_others_are_explained(backend, orders):
+    response = backend.transform_dataset("orders", {"aggregate": {"group_by": ["region"], "measures": [
+        {"function": "any_value", "field": "customer", "alias": "someone"}, {"fn": "count", "alias": "n"}]}})
+    assert response["code"] == "INVALID_TRANSFORM"
+    found = advice(response, "unknown_aggregate")
+    assert "min picks one value per group" in found["explanation"]
+    (rewrite,) = found["rewrite"]
+    assert rewrite["arguments"]["transform"]["aggregate"]["measures"][0]["function"] == "min"
+    (result,) = run(backend, [rewrite])
+    assert names(result) == ["region", "someone", "n"] and result["result"]["row_count"] == 4
+    median = backend.transform_dataset("orders", {"aggregate": {"group_by": ["region"], "measures": [{"function": "median", "field": "amount"}]}})
+    found = advice(median, "unknown_aggregate")
+    assert "median(x) AS name FROM input GROUP BY key" in found["explanation"] and "rewrite" not in found
+
+
 def test_an_unknown_document_is_pointed_at_the_one_that_exists(backend, tmp_path):
     root = tmp_path / "ws"
     (root / "doc").mkdir(parents=True)

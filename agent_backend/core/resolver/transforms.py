@@ -556,7 +556,7 @@ class TransformResolver:
         if function is None:
             raise InvalidTransformError(
                 f"Unknown aggregate function {raw_fn!r}.", field=where,
-                details={"allowed_functions": [str(f) for f in AggregateFunction]},
+                details={"function": str(raw_fn), "allowed_functions": [str(f) for f in AggregateFunction]},
             )
         raw_field = pick(loose, "field", "column", "of")
         alias = pick(loose, "alias", "as", "name")

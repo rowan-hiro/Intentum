@@ -99,6 +99,10 @@ class ExpressionResolver:
             return UnaryExpr(op="neg", operand=operand, logical_type=unary_result_type("neg", operand.logical_type))
         if "function" in loose or "fn" in loose:
             name = str(pick(loose, "function", "fn")).lower()
+            if name in _FUNCTION_ALIASES:
+                if notes is not None:
+                    notes.append(ResolutionNote(field, name, _FUNCTION_ALIASES[name], "spelled as the function is named here"))
+                name = _FUNCTION_ALIASES[name]
             args = [self.resolve(a, scope, field=field, notes=notes) for a in loose.get("args", [])]
             if arguments_are_swapped(name, [a.logical_type for a in args]):
                 # The call fits its signature the other way round; the IR keeps one order.
@@ -303,6 +307,10 @@ class ExpressionResolver:
 
 
 # SQL spellings agents write for the logical types a cast can target.
+# Other dialects' names for functions that exist here with the same arguments.
+_FUNCTION_ALIASES = {"datediff": "date_diff", "len": "length", "ucase": "upper", "lcase": "lower",
+                     "ifnull": "coalesce", "nvl": "coalesce"}
+
 _SQL_TYPE_NAMES: dict[str, LogicalType] = {
     **{name: LogicalType.INTEGER for name in ("int", "int2", "int4", "int8", "smallint", "tinyint", "bigint", "hugeint")},
     **{name: LogicalType.FLOAT for name in ("double", "real", "decimal", "numeric", "float4", "float8")},
