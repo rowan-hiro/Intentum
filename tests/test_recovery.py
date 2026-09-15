@@ -9,6 +9,7 @@ as good as the call it proposes. The shapes come from the qwen3.5-35b-a3b runs o
 import json
 from pathlib import Path
 
+from agent_backend import Backend
 from tests.conftest import write_csv
 
 
@@ -869,6 +870,119 @@ def test_an_aggregate_that_picks_one_value_per_group_becomes_min_and_others_are_
     boolean = backend.transform_dataset("orders", {"derive": {"west": "region = 'West'"}, "aggregate": {
         "group_by": ["region"], "measures": [{"function": "any_value", "field": "west", "alias": "hit"}]}})
     assert "rewrite" not in advice(boolean, "unknown_aggregate")
+
+
+def test_a_dataset_nothing_matches_is_advised_with_the_names_there_are(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    response = backend.transform_dataset("sub_db", {"limit": 1})
+    assert response["code"] == "NOT_FOUND"
+    found = advice(response, "dataset_not_found")
+    assert "Datasets here: orders, payments" in found["explanation"] and "rewrite" not in found
+    described = backend.describe_dataset("sqlite_master")
+    assert "list_datasets shows them all" in advice(described, "dataset_not_found")["explanation"]
+    empty = Backend(tmp_path / "empty")
+    try:
+        nothing = empty.transform_dataset("orders", {"limit": 1})
+        assert "No dataset is imported yet" in advice(nothing, "dataset_not_found")["explanation"]
+    finally:
+        empty.close()
+
+
+def test_a_path_that_does_not_exist_is_advised_with_where_it_was_looked_for(backend, tmp_path):
+    (tmp_path / "data").mkdir()
+    write_csv(tmp_path / "data" / "orders.csv", "id", ["1"])
+    response = backend.import_workspace(str(tmp_path / "data" / "context"))
+    assert response["code"] == "NOT_FOUND"
+    found = advice(response, "path_not_found")
+    assert f"{tmp_path / 'data' / 'context'} does not exist" in found["explanation"]
+    assert f"The nearest existing directory, {tmp_path / 'data'}, holds: orders.csv" in found["explanation"]
+    assert "working directory" in found["explanation"] and "rewrite" not in found
+    missing = backend.import_dataset(str(tmp_path / "data" / "db" / "x.csv"))
+    assert advice(missing, "path_not_found")["explanation"].startswith(str(tmp_path / "data" / "db" / "x.csv"))
+
+
+def test_a_join_without_keys_is_joined_on_the_one_shared_field(backend, orders, tmp_path):
+    path = write_csv(tmp_path / "shipments.csv", "order_id,carrier", ["1001,ups", "1002,dhl"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    response = backend.transform_dataset("orders", {"join": {"right": "shipments", "how": "left"}, "select": ["order_id", "carrier"]})
+    assert response["code"] == "INVALID_TRANSFORM" and response["details"]["shared_fields"] == ["order_id"]
+    found = advice(response, "join_needs_on")
+    (rewrite,) = found["rewrite"]
+    assert rewrite["arguments"]["transform"]["join"] == {"right": "shipments", "how": "left", "on": "order_id"}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 12 and names(result) == ["order_id", "carrier"]
+    typed = backend.transform_dataset("orders", [{"type": "join", "right": "shipments"}])
+    assert advice(typed, "join_needs_on")["rewrite"][0]["arguments"]["transform"] == [{"type": "join", "right": "shipments", "on": "order_id"}]
+    payments(backend, tmp_path)  # shares no field name with orders
+    none = backend.transform_dataset("orders", {"join": {"right": "payments"}})
+    found = advice(none, "join_needs_on")
+    assert "share no field name" in found["explanation"] and "rewrite" not in found
+
+
+def test_malformed_steps_are_rewritten_when_the_repair_is_mechanical(backend, orders):
+    strings = backend.transform_dataset("orders", ["filter", "amount > 100", {"aggregate": {"measures": [{"alias": "n", "function": "count"}]}}])
+    assert strings["code"] == "INVALID_TRANSFORM"
+    (rewrite,) = advice(strings, "step_as_strings")["rewrite"]
+    assert rewrite["arguments"]["transform"] == [{"filter": "amount > 100"}, {"aggregate": {"measures": [{"alias": "n", "function": "count"}]}}]
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [[10]]
+    stray = backend.transform_dataset("orders", ["amount > 100"])
+    assert "rewrite" not in advice(stray, "step_as_strings")
+    same = backend.transform_dataset("orders", {"filter": "amount > 100", "where": "amount > 100", "limit": 1})
+    assert same["details"]["values_equal"] is True
+    (rewrite,) = advice(same, "one_key_per_step")["rewrite"]
+    assert rewrite["arguments"]["transform"] == {"filter": "amount > 100", "limit": 1}
+    both = backend.transform_dataset("orders", {"filter": "amount > 100", "where": "region = 'West'", "limit": 5})
+    (rewrite,) = advice(both, "one_key_per_step")["rewrite"]
+    assert rewrite["arguments"]["transform"] == {"limit": 5, "filter": "(amount > 100) and (region = 'West')"}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 3
+    sorts = backend.transform_dataset("orders", {"sort": "-amount", "order_by": "amount"})
+    found = advice(sorts, "one_key_per_step")
+    assert "Their values differ" in found["explanation"] and "rewrite" not in found
+    typo = backend.transform_dataset("orders", [{"type": "filtr", "filter": "amount > 100"}, {"type": "limit", "limit": 1}])
+    (rewrite,) = advice(typo, "unknown_step_type")["rewrite"]
+    assert rewrite["arguments"]["transform"][0] == {"type": "filter", "filter": "amount > 100"}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 1
+    far = backend.transform_dataset("orders", [{"type": "xyzzy", "filter": "amount > 100"}])
+    assert "rewrite" not in advice(far, "unknown_step_type")
+
+
+def test_a_duplicate_output_field_is_named_once_and_a_derive_onto_a_name_is_explained(backend, orders):
+    aliased = backend.transform_dataset("orders", {"group_by": ["region as region"], "measures": ["count"]})
+    assert aliased["code"] == "INVALID_TRANSFORM"
+    (rewrite,) = advice(aliased, "duplicate_output_field")["rewrite"]
+    assert rewrite["arguments"]["transform"] == {"group_by": ["region"], "measures": ["count"]}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 4
+    twice = backend.transform_dataset("orders", {"select": ["region", "amount", "region"], "limit": 1})
+    (rewrite,) = advice(twice, "duplicate_output_field")["rewrite"]
+    assert rewrite["arguments"]["transform"] == {"select": ["region", "amount"], "limit": 1}
+    derived = backend.transform_dataset("orders", {"derive": {"amount": "amount * 2"}})
+    found = advice(derived, "duplicate_output_field")
+    assert "a derive adds a field, it does not replace one" in found["explanation"] and "rewrite" not in found
+
+
+def test_a_constant_where_a_field_belongs_and_an_empty_select_are_explained(backend, orders):
+    constant = backend.transform_dataset("orders", {"aggregate": {"group_by": [], "measures": [{"alias": "total", "fn": "sum", "of": 36}]}})
+    assert constant["code"] == "INVALID_INTENT" and constant["details"]["received"] == 36
+    found = advice(constant, "literal_as_field")
+    assert "36 is a constant" in found["explanation"] and "SELECT 36 AS name FROM input LIMIT 1" in found["explanation"]
+    empty = backend.transform_dataset("orders", {"select": []})
+    found = advice(empty, "select_needs_fields")
+    assert "The fields here are order_id, order_date" in found["explanation"]
+
+
+def test_an_amendment_without_a_reason_is_advised_with_what_differs(backend, orders):
+    assert backend.declare_output(["region", "n"], rows={"one_per": ["region"]})["status"] == "success"
+    response = backend.declare_output('["region", "n"]', rows="one")
+    assert response["code"] == "CONFLICT"
+    found = advice(response, "contract_amendment")
+    assert "The row cardinality {'one_per': ['region']} would become 'one'" in found["explanation"]
+    assert "send the declaration again with reason" in found["explanation"] and "rewrite" not in found
+    columns = backend.declare_output(["region"], rows={"one_per": ["region"]})
+    assert "Columns ['region', 'n'] would become ['region']" in advice(columns, "contract_amendment")["explanation"]
 
 
 def test_an_unknown_document_is_pointed_at_the_one_that_exists(backend, tmp_path):

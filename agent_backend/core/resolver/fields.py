@@ -169,7 +169,7 @@ class FieldResolver:
                 value = reference.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
-        raise InvalidIntentError(f"{field} must be a field name.", field=field)
+        raise InvalidIntentError(f"{field} must be a field name.", field=field, details={"received": reference})
 
     @staticmethod
     def _note(notes: list[ResolutionNote] | None, field: str, text: str, resolved: ScopeField, reason: str) -> None:
