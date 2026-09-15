@@ -102,12 +102,20 @@ class CastExpr(IRModel):
     logical_type: LogicalType
 
 
+class TryCastExpr(IRModel):
+    """A cast that yields null for a value that does not convert, where a cast fails the transform."""
+
+    kind: Literal["try_cast"] = "try_cast"
+    expr: Expr
+    logical_type: LogicalType
+
+
 Expr = Annotated[
-    Union[ColumnExpr, LiteralExpr, BinaryExpr, UnaryExpr, FunctionExpr, InExpr, CastExpr],
+    Union[ColumnExpr, LiteralExpr, BinaryExpr, UnaryExpr, FunctionExpr, InExpr, CastExpr, TryCastExpr],
     Field(discriminator="kind"),
 ]
 
-for _model in (BinaryExpr, UnaryExpr, FunctionExpr, InExpr, CastExpr):
+for _model in (BinaryExpr, UnaryExpr, FunctionExpr, InExpr, CastExpr, TryCastExpr):
     _model.model_rebuild()
 
 

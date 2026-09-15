@@ -106,7 +106,8 @@ _IMPLICIT_KEYS = {
 }
 
 
-_ALIAS_RE = re.compile(r"""^(?P<head>.+?)\s+as\s+(?P<alias>"[^"]+"|'[^']+'|[^\s"']+)\s*$""", re.IGNORECASE)
+_AS_RE = re.compile(r"\s+as\s+", re.IGNORECASE)
+_ALIAS_NAME_RE = re.compile(r"""\s*(?:"[^"]+"|'[^']+'|[^\s"'()]+)\s*""")
 
 
 def _looks_like_expression(text: str) -> bool:
@@ -119,13 +120,13 @@ def split_alias(text: str) -> tuple[str, str | None]:
     Returns ``(text, None)`` when there is no alias. The caller decides whether
     the split is real: a field may legitimately be called ``x as y``.
     """
-    match = _ALIAS_RE.match(text.strip())
-    if match is None:
-        return text, None
-    alias = match.group("alias")
-    if alias[:1] in ('"', "'"):
-        alias = alias[1:-1]
-    return match.group("head").strip(), alias
+    stripped = text.strip()
+    for match in reversed(list(_AS_RE.finditer(stripped))):
+        head, alias = stripped[:match.start()].strip(), stripped[match.end():].strip()
+        # An "as" inside parentheses belongs to the expression, as in cast(x as double), not to an alias.
+        if head and head.count("(") == head.count(")") and _ALIAS_NAME_RE.fullmatch(alias):
+            return head, alias[1:-1] if alias[:1] in ('"', "'") else alias
+    return text, None
 
 
 class TransformResolver:

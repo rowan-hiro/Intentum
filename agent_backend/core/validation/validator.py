@@ -12,6 +12,7 @@ from ..ir import (
     AggregateStep,
     BinaryExpr,
     CastExpr,
+    TryCastExpr,
     ColumnExpr,
     DeriveStep,
     Expr,
@@ -259,7 +260,7 @@ class IRValidator:
                 if not comparable(t, v.logical_type):
                     raise TypeMismatchError(f"IN list value {v.value!r} is not comparable with {t}.", field=where)
             return LogicalType.BOOLEAN
-        if isinstance(expr, CastExpr):
+        if isinstance(expr, (CastExpr, TryCastExpr)):
             self._expr_type(expr.expr, by_name, where)
             return expr.logical_type
         raise InvalidTransformError(f"Unknown expression node {type(expr).__name__}.", field=where)

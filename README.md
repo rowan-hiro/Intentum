@@ -170,7 +170,9 @@ right concat coalesce year month day date date_trunc strftime is_null contains
 starts_with ends_with`; `||` is read as `concat`). `cast(x as type)` converts to
 `integer`, `float`, `string`, `boolean`, `date` or `timestamp`, and accepts SQL
 names such as `int`, `bigint`, `double`, `varchar`, `text`, `bool` and
-`datetime`; a value that does not convert fails the transform. A two-argument call written
+`datetime`; a value that does not convert fails the transform. `x::type` is the
+same cast, and `try_cast(x as type)` yields null for a value that does not
+convert (DuckDB `TRY_CAST`). A two-argument call written
 the other way round (`strftime('%Y-%m-%d', ts)`) is reordered to its signature
 and reported as a resolution note; a type error names the signature it
 expected. There is no SQL passthrough in expressions; SQL enters only as a
@@ -381,7 +383,11 @@ boolean, a literal of the wrong type in a comparison (re-typed when lossless),
 a qualified or right-key name after a join (unqualified, or the left key under
 that name, naming any fuzzy match that hid it), join keys whose types do not
 compare (a derive casting the left key to the right key's type, then the join on
-it), a string function on a date or
+it), a cast that meets a value it cannot convert (the same request with
+`try_cast`), SQL spellings with a direct equivalent (backtick names, `EXTRACT`,
+`ILIKE`), SQL that expressions do not have (`CASE`, a window function, a scalar
+subquery: the step as a `raw_query` first step when it is the first step and
+reads only the source), a string function on a date or
 timestamp (how dates are computed, and that rendering belongs to export), a
 document, media file or unsupported format where a dataset is expected
 (`attach_metadata`, or that the host reads it, MADR 0009), a document name no
