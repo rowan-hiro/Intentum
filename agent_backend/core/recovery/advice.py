@@ -241,11 +241,12 @@ def _drop_none(step: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in step.items() if v is not None}
 
 
-_LIKE_RE = re.compile(r"""(?P<col>"[^"]+"|[\w.]+)\s+(?P<neg>not\s+)?like\s+'(?P<pat>(?:[^']|'')*)'""", re.IGNORECASE)
+_LIKE_RE = re.compile(r"""(?P<col>"[^"]+"|\w+\([^()]*\)|[\w.]+)\s+(?P<neg>not\s+)?(?P<op>i?like)\s+'(?P<pat>(?:[^']|'')*)'""",
+                      re.IGNORECASE)
 
 
 def _like(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
-    """``x like '%a%'`` is contains(x, 'a'); a pattern without wildcards is an equality."""
+    """``x like '%a%'`` is contains(x, 'a'); a pattern without wildcards is an equality; ``ilike`` compares lower-cased."""
     steps = _steps(arguments.get("transform"))
     seen = False
     rewritable = True
@@ -258,6 +259,8 @@ def _like(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | N
             def replace(match: re.Match[str]) -> str:
                 nonlocal rewritable
                 col, pat = match.group("col"), match.group("pat")
+                if match.group("op").lower() == "ilike":
+                    col, pat = f"lower({col})", pat.lower()
                 core = pat.strip("%")
                 if "%" in core or "_" in core:
                     rewritable = False
@@ -275,11 +278,161 @@ def _like(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | N
             _set_path(step, path, _LIKE_RE.sub(replace, text))
     if not seen:
         return None
-    explanation = ("LIKE is not an operator in this language. Use contains(field, 'text'), starts_with(field, 'text') or "
-                   "ends_with(field, 'text') on text fields; a pattern without wildcards is an equality.")
+    explanation = ("LIKE and ILIKE are not operators in this language. Use contains(field, 'text'), starts_with(field, "
+                   "'text') or ends_with(field, 'text') on text fields, on lower(field) for a case-insensitive match; a pattern "
+                   "without wildcards is an equality.")
     if not rewritable:
         return Advice("like_as_function", explanation + " A wildcard in the middle of a pattern has no equivalent here.")
     return Advice("like_as_function", explanation,
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+
+
+_EXTRACT_RE = re.compile(r"\bextract\s*\(\s*(year|month|day)\s+from\s+", re.IGNORECASE)
+_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+
+
+def _outside_literals(text: str, respell: Callable[[str], str | None]) -> str | None:
+    """Apply ``respell`` to an expression with its single-quoted literals held aside, so their text is kept as written."""
+    literals: list[str] = []
+
+    def hold(match: re.Match[str]) -> str:
+        literals.append(match.group(0))
+        return f"\x00{len(literals) - 1}\x00"
+
+    masked = respell(_STRING_LITERAL_RE.sub(hold, text))
+    return None if masked is None else re.sub(r"\x00(\d+)\x00", lambda m: literals[int(m.group(1))], masked)
+
+
+def _respelled(text: str) -> str | None:
+    """SQL spellings with a direct equivalent here: backtick identifiers, and EXTRACT of a year, month or day."""
+    return _outside_literals(text, _respell_code)
+
+
+def _respell_code(text: str) -> str | None:
+    out = re.sub(r'`"([^"`]+)"`', r'"\1"', text)
+    out = re.sub(r"`([^`]+)`", lambda m: '"' + m.group(1).replace('"', '""') + '"', out)
+    while (match := _EXTRACT_RE.search(out)) is not None:
+        depth, end = 1, match.end()
+        while end < len(out) and depth:
+            depth += {"(": 1, ")": -1}.get(out[end], 0)
+            end += 1
+        if depth:
+            return None
+        out = out[:match.start()] + f"{match.group(1).lower()}({out[match.end():end - 1].strip()})" + out[end:]
+    return out
+
+
+def _sql_spelling(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """Backtick identifiers and EXTRACT(part FROM x) have direct spellings here: "name" and year(x), month(x), day(x)."""
+    if err.code != ErrorCode.INVALID_TRANSFORM or "expression" not in err.details:
+        return None
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        for path, text in _expression_texts(step):
+            code = _STRING_LITERAL_RE.sub("''", text)
+            if "`" not in code and not _EXTRACT_RE.search(code):
+                continue
+            respelled = _respelled(text)
+            if respelled is None or respelled == text:
+                continue
+            try:
+                parse_expression(respelled)
+            except BackendError:
+                continue
+            _set_path(step, path, respelled)
+            changed = True
+    if not changed:
+        return None
+    return Advice("sql_spelling",
+                  "This language quotes names with double quotes, not backticks, and writes EXTRACT(YEAR FROM x) as "
+                  "year(x) (likewise month and day). The same request respelled:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+
+
+_SQL_ONLY = (("CASE", re.compile(r"\bcase\b[\s\S]*\bwhen\b", re.IGNORECASE)),
+             ("a window function", re.compile(r"\bover\s*\(", re.IGNORECASE)),
+             ("a subquery", re.compile(r"\(\s*select\b", re.IGNORECASE)))
+
+
+def _sql_in_expression(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """CASE, a window function or a scalar subquery: SQL the steps lack, which a raw_query first step runs (MADR 0002)."""
+    if err.code != ErrorCode.INVALID_TRANSFORM or "expression" not in err.details:
+        return None
+    text = str(err.details["expression"])
+    code = _STRING_LITERAL_RE.sub("''", text)
+    found = [name for name, pattern in _SQL_ONLY if pattern.search(code)]
+    if not found or re.search(r"\bin\s*\(\s*select\b", code, re.IGNORECASE):
+        return None  # IN (SELECT ...) is a semi_join; _subquery says so
+    named = " and ".join(found)
+    explanation = (f"{named[0].upper()}{named[1:]} is SQL that semantic expressions do not have. A raw_query first "
+                   "step runs it: one read-only SELECT in which input is the source, and other datasets are bound by "
+                   "name under inputs; semantic steps may follow it.")
+    tables = {name.strip('"').lower() for name in re.findall(r"\bfrom\s+(\"[^\"]+\"|[\w.]+)", code, re.IGNORECASE)}
+    if tables - {"input"}:
+        return Advice("sql_in_expression", explanation + " The subquery reads other datasets, which the query binds "
+                                                          "under inputs by name.")
+    # Only the request's first step, as the backend normalized it, can become the query without reordering what
+    # runs before it; a filter or join ahead of it would otherwise run after it.
+    resolution = err.resolution or {}
+    steps, index = resolution.get("steps"), resolution.get("index")
+    query = _step_as_query(steps[0], text, found) if isinstance(steps, list) and steps and index == 0 else None
+    if query is None:
+        return Advice("sql_in_expression", explanation + " Written in the transform's first step, a filter or a "
+                                                          "derive, it is rewritten as that query.")
+    rewritten = [{"raw_query": {"sql": query}}, *copy.deepcopy(steps[1:])]
+    return Advice("sql_in_expression", explanation + " The same request with that step as the query:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=rewritten))])
+
+
+def _step_as_query(step: dict[str, Any], text: str, found: list[str]) -> str | None:
+    """A normalized filter or single derive whose expression is ``text``, as the equivalent query over input."""
+    kind = str(step.get("type") or "").lower()
+    body = next((step[k] for k in (kind, "compute") if isinstance(step.get(k), dict)), step)
+    if kind == "filter":
+        expression = next((v for k, v in {**step, **body}.items() if k in _FILTER_KEYS and isinstance(v, str)), None)
+        if expression != text:
+            return None
+        clause = "QUALIFY" if "a window function" in found else "WHERE"  # a window is filtered after it is computed
+        return f"SELECT * FROM input {clause} {text}"
+    if kind == "derive":
+        if isinstance(body.get("name"), str) and body.get("expression") == text:
+            name = body["name"]
+        elif len(body) == 1 and next(iter(body.values())) == text:
+            name = next(iter(body))
+        else:
+            return None
+        return f'SELECT *, {text} AS "{name}" FROM input'
+    return None
+
+
+_CAST_CALL_RE = re.compile(r"(?<![\w.])cast\s*\(", re.IGNORECASE)
+_POSTFIX_CAST_RE = re.compile(r"""(?P<operand>"[^"]+"|\w+\([^()]*\)|[\w.]+)::(?P<type>\w+(?:\s*\([\d,\s]+\))?)""")
+
+
+def _cast_conversion(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A cast that met a value it cannot convert failed the transform; try_cast yields null for such a value."""
+    if err.code != ErrorCode.EXECUTION_FAILED or "Conversion Error" not in str(err.message) or "raw_query" in err.details:
+        return None
+    explanation = ("A cast met a value it cannot convert, so the transform failed. try_cast(x as type) yields null for "
+                   "such a value instead; filter the nulls out or keep them, as the request needs.")
+    steps = _steps(arguments.get("transform"))
+    changed = False
+    for step in steps:
+        for path, text in _expression_texts(step):
+            safe = _outside_literals(text, lambda code: _CAST_CALL_RE.sub("try_cast(", _POSTFIX_CAST_RE.sub(
+                lambda m: f"try_cast({m.group('operand')} as {m.group('type')})", code)))
+            if safe is None or safe == text or "::" in _STRING_LITERAL_RE.sub("", safe):
+                continue
+            try:
+                parse_expression(safe)
+            except BackendError:
+                continue
+            _set_path(step, path, safe)
+            changed = True
+    if not changed:
+        return Advice("cast_conversion", explanation)
+    return Advice("cast_conversion", explanation + " The same request with try_cast:",
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
 
 
@@ -526,7 +679,7 @@ def _unknown_key(err: BackendError, tool: str, arguments: dict[str, Any]) -> Adv
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
 
 
-_ALIAS_RE = re.compile(r"""^(?P<expr>.+?)\s+as\s+(?P<alias>"[^"]+"|'[^']+'|[^\s"']+)\s*$""", re.IGNORECASE)
+_ALIAS_RE = re.compile(r"""^(?P<expr>.+?)\s+as\s+(?P<alias>"[^"]+"|'[^']+'|[^\s"'()]+)\s*$""", re.IGNORECASE)
 
 
 def _looks_like_expression(text: str) -> bool:
@@ -1050,7 +1203,8 @@ def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> 
         return None
     left, right, target = facts["left"], facts["right"], facts["right_type"]
     cast = f"cast({_name_in_expression(left)} as {target})"
-    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), facts.get("steps"), facts.get("index")
+    resolution = err.resolution or {}
+    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), resolution.get("steps"), resolution.get("index")
     located = (isinstance(steps, list) and isinstance(index, int) and 0 <= index < len(steps)
                and isinstance(pairs, list) and isinstance(failed, int)
                and all(isinstance(side, str) for pair in pairs for side in pair))
@@ -1071,7 +1225,8 @@ def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> 
     explanation = (
         f"{left} is {facts['left_type']} and {right} in {facts['right_dataset']} is {target}; a join compares keys of "
         f"one type. {how} A value that does not convert fails the transform; when some keys may not convert (blanks, "
-        "other text), a raw_query first step joins with TRY_CAST, which leaves them unmatched."
+        f"other text), derive with try_cast({_name_in_expression(left)} as {target}) instead, which leaves them null and "
+        "unmatched."
     )
     # The rewrite is the steps as the backend normalized them: a compact object is several steps there, so the cast
     # lands right before the refused join (after a raw_query, not before it), and an earlier join with the same on
@@ -1525,6 +1680,9 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_subquery, _TRANSFORM_TOOLS, False),
     (_limit_tail, _TRANSFORM_TOOLS, False),
     (_like, _TRANSFORM_TOOLS, False),
+    (_sql_spelling, _TRANSFORM_TOOLS, False),
+    (_sql_in_expression, _TRANSFORM_TOOLS, False),
+    (_cast_conversion, _TRANSFORM_TOOLS, False),
     (_distinct, _TRANSFORM_TOOLS, False),
     (_join_on, _TRANSFORM_TOOLS, False),
     (_aggregate_in_select, _TRANSFORM_TOOLS, False),

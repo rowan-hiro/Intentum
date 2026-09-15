@@ -12,6 +12,7 @@ from ..ir import (
     AggregateStep,
     BinaryExpr,
     CastExpr,
+    TryCastExpr,
     ColumnExpr,
     DeriveStep,
     Expr,
@@ -130,6 +131,8 @@ class SqlCompiler:
             return f"({self.expr(e.expr)} {'NOT IN' if e.negated else 'IN'} ({values}))"
         if isinstance(e, CastExpr):
             return f"CAST({self.expr(e.expr)} AS {logical_to_physical(e.logical_type)})"
+        if isinstance(e, TryCastExpr):
+            return f"TRY_CAST({self.expr(e.expr)} AS {logical_to_physical(e.logical_type)})"
         raise TypeError(f"cannot compile expression {type(e).__name__}")
 
     @staticmethod

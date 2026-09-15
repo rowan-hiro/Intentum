@@ -298,3 +298,45 @@ def test_cast_to_an_unknown_type_names_the_accepted_types(backend, orders):
     response = backend.transform_dataset("orders", {"derive": {"name": "x", "expression": "cast(amount as money)"}})
     assert response["code"] == "INVALID_TRANSFORM"
     assert "Unknown type 'money'" in response["message"] and "'integer'" in response["message"] and "varchar" in response["message"]
+
+
+def amounts(backend, tmp_path):
+    """Amounts kept as text, with a blank and a word among the numbers, as exported spreadsheets often hold them."""
+    path = tmp_path / "amounts.csv"
+    path.write_text("id,amount\n1,10.5\n2,\n3,n/a\n4,40\n")
+    assert backend.import_dataset(str(path), name="amounts")["status"] == "success"
+
+
+def test_try_cast_yields_null_where_cast_fails(backend, tmp_path):
+    amounts(backend, tmp_path)
+    safe = backend.transform_dataset("amounts", [{"derive": {"x": "try_cast(amount as double)"}}, {"select": ["id", "x"]}])
+    assert safe["status"] == "success", safe
+    assert safe["result"]["rows"] == [[1, 10.5], [2, None], [3, None], [4, 40.0]]
+    assert safe["result"]["columns"][1] == {"name": "x", "type": "float"}
+    assert "try_cast(amount as float)" in safe["plan"]
+    kept = backend.transform_dataset("amounts", {"filter": "try_cast(amount as double) > 20"})
+    assert kept["result"]["rows"] == [[4, "40"]]
+    strict = backend.transform_dataset("amounts", [{"derive": {"x": "cast(amount as double)"}}])
+    assert strict["code"] == "EXECUTION_FAILED" and "Conversion Error" in strict["message"]
+
+
+def test_the_postfix_cast_is_a_strict_cast(backend, orders):
+    response = backend.transform_dataset("orders", [{"filter": "quantity::double / 4 > 2"}, {"select": ["order_id"]},
+                                                    {"sort": "order_id"}])
+    assert response["result"]["rows"] == [[1001], [1007], [1009]]
+    derived = backend.transform_dataset("orders", {"derive": {"code": "order_id::varchar(10)"}, "select": ["code"], "limit": 1})
+    assert derived["result"]["columns"] == [{"name": "code", "type": "string"}]
+
+
+def test_a_cast_in_group_by_is_not_taken_for_an_alias(backend, orders):
+    # Read as an expression, it gets group_by's own rule and hint instead of a parse error about 'cast(quantity'.
+    unnamed = backend.transform_dataset("orders", {"group_by": ["cast(quantity as double)"], "metric": "amount"})
+    assert unnamed["message"] == "group_by cannot use the expression 'cast(quantity as double)' without a name."
+    named = backend.transform_dataset("orders", {"group_by": ["cast(quantity as double) as q"], "metric": "amount"})
+    assert named["status"] == "success" and named["result"]["columns"][0]["name"] == "q"
+
+
+def test_adding_try_cast_leaves_the_cast_expression_and_its_fingerprints_as_they_were():
+    from agent_backend.core.ir import CastExpr
+
+    assert set(CastExpr.model_fields) == {"kind", "expr", "logical_type"}
