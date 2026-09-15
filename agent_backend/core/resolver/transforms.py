@@ -188,7 +188,12 @@ class TransformResolver:
     # -- step normalization ---------------------------------------------
     def _normalize_steps(self, transform: Any) -> list[dict[str, Any]]:
         if transform is None:
-            return []
+            # Absent is not empty: an agent that forgot the steps would otherwise get a copy of the source under the
+            # name it meant for the result (MADR 0010). An explicit [] is the identity.
+            raise InvalidIntentError(
+                "transform is required: the steps that read the source, as a list or one compact object.",
+                field="transform", details={"missing": "transform"},
+            )
         if isinstance(transform, str):
             raise InvalidTransformError(
                 "transform must be an object (or list of steps), not a string.",

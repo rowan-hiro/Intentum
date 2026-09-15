@@ -574,8 +574,39 @@ def _aggregate_in_select(err: BackendError, tool: str, arguments: dict[str, Any]
     )
 
 
+_LEFT_KEYS = ("left", "input", "from", "source", "dataset", "base")
+# The keys of an object the dataset resolver reads as one reference (datasets.py); such an object is not an inline body.
+_REFERENCE_KEYS = ("dataset_id", "id", "name", "dataset", "ref", "reference")
+_SOURCE_IS_ONE = "source names one dataset (id, name or description)"
+
+
+def _joins_right(steps: list[dict[str, Any]], right: str) -> bool:
+    """Whether a step already joins ``right``."""
+    for step in steps:
+        body = _pick(step, *_JOIN_KEYS)
+        kind = _pick(step, *_TYPE_KEYS)
+        if not isinstance(body, dict) and isinstance(kind, str) and kind.lower() in _JOIN_KEYS:
+            body = step
+        if isinstance(body, dict) and str(_pick(body, *_RIGHT_KEYS)) == right:
+            return True
+    return False
+
+
+def _query_source(inputs: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """The source a query over ``inputs`` reads, and the inputs left to bind.
+
+    A binding named ``input`` is the source's, so it leaves the inputs; otherwise the first dataset is the source and
+    stays bound under its placeholder too, which raw_query accepts as reading the source.
+    """
+    named = next((k for k in inputs if k.casefold() == "input"), None)
+    if named is not None and isinstance(inputs[named], str):
+        return inputs[named], {k: v for k, v in inputs.items() if k != named}
+    first = next((v for v in inputs.values() if isinstance(v, str)), None)
+    return first, dict(inputs)
+
+
 def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
-    """A relation written inline as the source is a dataset to materialize first."""
+    """A relation written inline as the source is a dataset to materialize first, or a step of the transform."""
     source = arguments.get("source")
     if isinstance(source, str) and source.strip()[:1] in "{[":
         try:
@@ -584,22 +615,51 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
             return None
     if err.code == ErrorCode.INVALID_INTENT and isinstance(err.details.get("received"), (dict, list)):
         source = err.details["received"]
-    if isinstance(source, dict) and "right" in source and ("left" in source or "on" in source):
+    steps = _steps(arguments.get("transform"))
+    if isinstance(source, dict) and source and set(source) <= set(_REFERENCE_KEYS):
+        return None  # a dataset reference the resolver accepts; the refusal is elsewhere in the request
+    reference = next((source[k] for k in _REFERENCE_KEYS if isinstance(source.get(k), str)), None) \
+        if isinstance(source, dict) else None
+    if isinstance(source, dict) and any(k in source for k in _QUERY_KEYS):
+        # A query written as the source: its SQL reads the source as input, and the others under inputs. A reference
+        # key beside it names the source; step keys beside it stay as the compact object's other steps.
+        sql, inputs = _query_parts(source)
+        explanation = (f"{_SOURCE_IS_ONE}; a query is a raw_query first step of the transform. Its SQL reads the "
+                       "source as input, and every other dataset by the name inputs binds it to.")
+        if sql is None:
+            return Advice("source_as_dataset", explanation)
+        dataset, bound = (reference, inputs) if reference is not None else _query_source(inputs)
+        if dataset is None:
+            return Advice("source_as_dataset", explanation + " Name the dataset the SQL reads as the source and read "
+                          "it as input in the SQL; a physical table name is not a placeholder.")
+        body = {k: v for k, v in source.items() if k not in _REFERENCE_KEYS}
+        return Advice("source_as_dataset", explanation + f" Here {dataset} is the source and the query is the first step.",
+                      rewrite=[call(tool, **_call_arguments(tool, arguments, source=dataset,
+                                                            transform=[_query_restated(body, sql, bound)] + steps))])
+    if isinstance(source, dict) and "right" in source:
         # A join written as the source: the left side is the source, the join is the first step.
-        left = source.get("left") or source.get("from")
-        if not isinstance(left, str):
-            return Advice("source_as_dataset", "source names one dataset; a join is a step of the transform, "
-                          "{\"join\": {\"right\": \"other\", \"on\": {\"left_field\": \"right_field\"}}}.")
+        left = next((source[k] for k in _LEFT_KEYS if isinstance(source.get(k), str)), None)
+        right = str(source["right"])
+        shape = "{\"join\": {\"right\": \"other\", \"on\": {\"left_field\": \"right_field\"}}}"
+        if left is None:
+            return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}; a join is a step of the transform, {shape}. "
+                          "Name the left dataset as the source.")
+        if _joins_right(steps, right):
+            return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}: the left dataset, {left}. The transform already "
+                          f"joins {right}.", rewrite=[call(tool, **_call_arguments(tool, arguments, source=left))])
+        if source.get("on") is None:
+            return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}: the left dataset, {left}. The join is the first "
+                          f"step of the transform, {shape}, and needs the fields it joins on.")
         join: dict[str, Any] = {"right": source["right"]}
         on = source.get("on")
         if isinstance(on, (str, list)):
             texts = [on] if isinstance(on, str) else [t for t in on if isinstance(t, str)]
-            join["on"] = _on_mapping(texts, str(source["right"])) if any("=" in t for t in texts) else on
-        elif on is not None:
+            join["on"] = _on_mapping(texts, right) if any("=" in t for t in texts) else on
+        else:
             join["on"] = on
         if source.get("how"):
             join["how"] = source["how"]
-        steps = [{"join": join}] + _steps(arguments.get("transform"))
+        steps = [{"join": join}] + steps
         if isinstance(join.get("on"), dict):
             # The right key is never copied into the joined scope: it equals the left key, so a later step
             # that names it gets the left key under that name.
@@ -611,19 +671,46 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
                         step[key] = [f"{right_keys[i]} as {i}" if isinstance(i, str) and i in right_keys else i for i in items]
         return Advice(
             "source_as_dataset",
-            "source names one dataset (id, name or description); a join is a step of the transform. The left dataset "
-            "is the source and the join comes first: {\"join\": {\"right\": \"other\", \"on\": "
-            "{\"left_field\": \"right_field\"}}}. After the join, names are unqualified and the right key is not copied.",
+            f"{_SOURCE_IS_ONE}; a join is a step of the transform. The left dataset "
+            f"is the source and the join comes first: {shape}. After the join, names are unqualified and the right "
+            "key is not copied.",
             rewrite=[call(tool, **_call_arguments(tool, arguments, source=left, transform=steps))],
         )
+    if isinstance(source, dict) and source and not set(source) & (_STEP_KEYS | set(_DATASET_KEYS) | set(_LEFT_KEYS)
+                                                                  | set(_REFERENCE_KEYS)):
+        values = list(source.values())
+        if len(source) == 1 and isinstance(values[0], dict) and set(values[0]) & _STEP_KEYS:
+            # {"dataset": {steps}}: the key is the source and the value its transform.
+            (name,) = source
+            return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}, here {name}; the steps applied to it are the "
+                          "transform.", rewrite=[call(tool, **_call_arguments(tool, arguments, source=name,
+                                                                                transform=_steps(values[0]) + steps))])
+        if all(isinstance(v, str) for v in values):
+            # {"placeholder": "dataset", ...}: the inputs of a query.
+            found = _query_step(arguments.get("transform"))
+            if found is None:
+                return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}. Several datasets are read by a join step, or "
+                              "by a raw_query first step whose inputs binds each of the others to a placeholder.")
+            steps, index, step = found
+            sql, inputs = _query_parts(step)
+            dataset, bound = _query_source({**source, **inputs})
+            steps[index] = _query_restated(step, sql or "", bound)
+            return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}, here {dataset}; the other datasets a raw_query "
+                          "reads are bound under its inputs.",
+                          rewrite=[call(tool, **_call_arguments(tool, arguments, source=dataset,
+                                                                transform=_rebuild(arguments.get("transform"), steps)))])
     if isinstance(source, list):
         specs = [s for s in source if isinstance(s, dict)]
     elif isinstance(source, dict) and set(source) & _STEP_KEYS:
         specs = [source]
+    elif isinstance(source, dict):
+        # Rows or a configuration written inline: nothing here names a dataset.
+        return Advice("source_as_dataset", f"{_SOURCE_IS_ONE} the backend manages. Rows written inline are not "
+                      "a source; a query over the source computes them.")
     else:
         return None
     explanation = (
-        "source names one dataset (id, name or description). A relation built inline, filtered or projected, is a "
+        f"{_SOURCE_IS_ONE}. A relation built inline, filtered or projected, is a "
         "dataset of its own: materialize it first, then use its name as the source, or as the right dataset of a join."
     )
     if not specs:
@@ -631,6 +718,9 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
     first = specs[0]
     ds_key = next((k for k in _DATASET_KEYS if isinstance(first.get(k), str)), None)
     if ds_key is None:
+        if len(specs) == 1 and isinstance(source, dict):
+            return Advice("source_as_dataset", f"{_SOURCE_IS_ONE}. The object given as the source is a transform: "
+                          "name the dataset it reads as the source and send the object as the transform.")
         return Advice("source_as_dataset", explanation)
     ds = first[ds_key]
     body = {k: v for k, v in first.items() if k != ds_key}
@@ -643,6 +733,19 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
     if len(specs) > 1:
         explanation += f" {len(specs)} inline relations were given; materialize each one and refer to it by name."
     return Advice("source_as_dataset", explanation, rewrite=calls)
+
+
+def _transform_required(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """The call came without its transform: the step forms, and that an empty list is the identity."""
+    if not (isinstance(err.details, dict) and err.details.get("missing") == "transform"):
+        return None
+    return Advice(
+        "transform_required",
+        "transform is required: the steps that read the source, as a list such as [{\"filter\": \"amount > 100\"}, "
+        "{\"select\": [\"order_id\", \"amount\"]}] or one compact object such as {\"filter\": \"...\", \"group_by\": "
+        "[...], \"measures\": [...]}; a raw_query first step holds SQL over input. An empty list previews the source as "
+        "it is, or with materialize_result copies it under the new name.",
+    )
 
 
 _UNKNOWN_KEYS_RE = re.compile(r"Unknown key\(s\) \[(?P<keys>.*?)\]")
@@ -1688,6 +1791,7 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_aggregate_in_select, _TRANSFORM_TOOLS, False),
     (_expression_in_select, _TRANSFORM_TOOLS, False),
     (_inline_source, _TRANSFORM_TOOLS, False),
+    (_transform_required, _TRANSFORM_TOOLS, False),
     (_unknown_key, _TRANSFORM_TOOLS, False),
     (_temporal_as_text, _TRANSFORM_TOOLS, False),
     (_document_as_dataset, _DATASET_TOOLS + ("import_dataset",), False),

@@ -150,13 +150,15 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "substr left right concat (or ||) coalesce year month day date date_trunc strftime "
                              "is_null contains starts_with ends_with. Field names may be approximate; the response "
                              "lists how each was resolved, or returns needs_resolution with candidates. Transforms "
-                             "compute values; how they are rendered as text is export_result's business. A refused transform "
+                             "compute values; how they are rendered as text is export_result's business. `transform` is required; "
+                             "an empty list previews the source as it is. `source` names one dataset (id, name or description); "
+                             "a query, a join or a step object written there is refused with the request rewritten. A refused transform "
                              "comes back with `advice`: what the backend accepts instead and, when mechanical, a "
                              "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
                              "says where a filtered value does occur; a result with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],
-        transform: dict[str, Any] | list[Any] | str,
+        transform: dict[str, Any] | list[Any] | str | None = None,
         output_name: str | None = None,
         description: str | None = None,
         preview_limit: int = 20,
@@ -169,7 +171,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
     @server.tool(name="materialize_result", annotations=annotations("write"),
                  description="Persist the result of a semantic transform as a new managed dataset named `name`. "
                              "Creates the dataset, its version, lineage, provenance and audit records atomically. "
-                             "`transform` takes the same steps as transform_dataset; when the steps cannot express a "
+                             "`transform` is required and takes the same steps as transform_dataset; when the steps cannot express a "
                              "shape, a raw_query first step ({\"raw_query\": {\"sql\": \"SELECT ... FROM input\", "
                              "\"inputs\": {\"name\": \"dataset\"}}}, one read-only SELECT or WITH statement over "
                              "placeholders) is the fallback, and every dataset it binds is recorded as an input. "
@@ -177,8 +179,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "duplicate.")
     def materialize_result(
         source: str | dict[str, Any] | list[Any],
-        transform: dict[str, Any] | list[Any] | str,
         name: str,
+        transform: dict[str, Any] | list[Any] | str | None = None,
         description: str | None = None,
         explain: bool = False,
         idempotency_key: str | None = None,
