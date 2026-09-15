@@ -218,7 +218,8 @@ class TransformResolver:
         becomes several.
         """
         if not isinstance(step, dict):
-            raise InvalidTransformError(f"Each step must be an object, got {step!r}.", field="transform")
+            raise InvalidTransformError(f"Each step must be an object, got {step!r}.", field="transform",
+                                        details={"received": step})
         raw = pick(step, "type", "op", "operation")
         if raw is None:
             if len(step) == 1:
@@ -231,7 +232,7 @@ class TransformResolver:
         if step_type is None:
             raise InvalidTransformError(
                 f"Unknown step type {raw!r}.", field="transform",
-                details={"allowed_types": sorted(set(_STEP_TYPE_ALIASES.values()))},
+                details={"received": str(raw), "allowed_types": sorted(set(_STEP_TYPE_ALIASES.values()))},
             )
         body = {k: v for k, v in step.items() if k not in ("type", "op", "operation")}
         return [{"type": step_type, **body}]
@@ -259,8 +260,11 @@ class TransformResolver:
                 payload = {k: transform[k] for k in present}
             else:
                 if len(present) > 1:
+                    keys = sorted(present)
                     raise InvalidTransformError(
-                        f"Use only one of {sorted(present)} for the {step_type} step.", field="transform"
+                        f"Use only one of {keys} for the {step_type} step.", field="transform",
+                        details={"keys": keys, "step": step_type,
+                                 "values_equal": all(transform[k] == transform[keys[0]] for k in keys)},
                     )
                 (key,) = tuple(present)
                 payload = {key: transform[key]}
@@ -384,7 +388,8 @@ class TransformResolver:
         raw = pick(loose, "select", "fields", "columns")
         items = [raw] if isinstance(raw, (str, dict)) else raw
         if not isinstance(items, list) or not items:
-            raise InvalidTransformError("select needs a non-empty list of fields.", field=where)
+            raise InvalidTransformError("select needs a non-empty list of fields.", field=where,
+                                        details={"received": raw, "available": scope.names()})
         fields: list[ScopeField] = []
         aliases: list[str | None] = []
         for item in items:
@@ -789,7 +794,9 @@ class TransformResolver:
 
         raw_on = loose.get("on")
         if raw_on is None:
-            raise InvalidTransformError('join needs "on": either a shared field name, a list, or {"left_field": "right_field"}.', field=where)
+            shared = [f.name for f in scope.fields if f.name in right_scope.names()]
+            raise InvalidTransformError('join needs "on": either a shared field name, a list, or {"left_field": "right_field"}.',
+                                        field=where, details={"shared_fields": shared, "right": right.name})
         pairs: list[tuple[Any, Any]] = []
         if isinstance(raw_on, str):
             pairs.append((raw_on, raw_on))
