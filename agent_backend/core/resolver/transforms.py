@@ -161,12 +161,10 @@ class TransformResolver:
         for index, loose_step in enumerate(normalized):
             try:
                 produced, scope = self._resolve_step(loose_step, scope, index, context, notes, used)
-            except InvalidTransformError as err:
-                # A cast for a join's keys goes right before that join, which only the normalized steps locate:
-                # a compact object is several steps, and an earlier join may have the same on.
-                facts = err.details.get("join_key_types")
-                if isinstance(facts, dict):
-                    facts.update(steps=written, index=index)
+            except BackendError as err:
+                # Advice that rewrites the refused step needs it located among the normalized steps: a compact object
+                # is several steps, and an earlier step may look the same.
+                err.resolution = {"steps": written, "index": index}
                 raise
             steps.extend(produced)
 
