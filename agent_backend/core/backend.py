@@ -12,6 +12,7 @@ import datetime as dt
 import functools
 import inspect
 import json
+import math
 import os
 import re
 import stat
@@ -97,11 +98,18 @@ def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
 
+def _finite(value: Any) -> bool:
+    """A range bound worth reporting: present, and not an infinity or nan."""
+    return value is not None and not (isinstance(value, float) and not math.isfinite(value))
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (dt.datetime, dt.date)):
         return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)  # JSON has no inf or nan; the MCP layer would otherwise send null
     if isinstance(value, bytes):
         return value.hex()
     if isinstance(value, (list, tuple)):
@@ -289,8 +297,12 @@ class Backend:
             "count": len(artifacts),
         }
 
+    # Columns beyond which describe_dataset skips the per-column profile: one scan with four aggregates per column.
+    PROFILE_COLUMN_BOUND = 300
+
     @semantic_operation("describe_dataset")
-    def describe_dataset(self, dataset: Any, *, sample_rows: int = 5, principal: str | None = None) -> dict[str, Any]:
+    def describe_dataset(self, dataset: Any, *, sample_rows: int = 5, profile: bool = True,
+                         principal: str | None = None) -> dict[str, Any]:
         notes: list[ResolutionNote] = []
         try:
             ds = self.datasets.resolve(dataset, field="dataset", notes=notes)
@@ -305,6 +317,23 @@ class Backend:
         if sample_rows > 0 and version is not None:
             cols, rows = self.engine.sample(version.physical_table, min(sample_rows, 100))
             sample = {"columns": cols, "rows": _jsonable([list(r) for r in rows])}
+        schema = [self._column_summary(c) for c in ds.columns]
+        profiled: str | None = None
+        if profile and version is not None and len(ds.columns) <= self.PROFILE_COLUMN_BOUND:
+            # What the data holds, column by column: repetition (distinct against rows), gaps (non-null against
+            # rows) and the range, so a count of entities or a filter on a range needs no exploratory query.
+            ranged = [c.name for c in ds.columns if c.logical_type.is_numeric or c.logical_type in (LogicalType.DATE, LogicalType.TIMESTAMP)]
+            facts = self.engine.profile_columns(version.physical_table, [c.name for c in ds.columns], ranged=ranged)
+            for entry in schema:
+                column_facts = facts.get(entry["name"], {})
+                if not all(_finite(column_facts.get(k)) for k in ("min", "max")):
+                    column_facts = {k: v for k, v in column_facts.items() if k not in ("min", "max")}  # no finite range
+                entry.update(_jsonable(column_facts))
+            profiled = "non_null and distinct count every column's values; min and max are the range of numeric and temporal columns"
+        elif profile and version is not None:
+            profiled = f"skipped: {len(ds.columns)} columns, more than {self.PROFILE_COLUMN_BOUND}; aggregate counts the ones needed"
+        elif profile:
+            profiled = "skipped: the dataset has no physical version to scan"
         body = {
             "status": "success",
             "dataset": {
@@ -312,7 +341,7 @@ class Backend:
                 "physical_location": ds.physical_location,
                 "metadata": ds.metadata,
             },
-            "schema": [self._column_summary(c) for c in ds.columns],
+            "schema": schema,
             "row_count": version.row_count if version else None,
             "versions": [
                 {"version": v.version, "rows": v.row_count, "created_at": v.created_at.isoformat(), "operation_id": v.operation_id}
@@ -329,6 +358,8 @@ class Backend:
             body["source"] = source
         if sample is not None:
             body["sample"] = sample
+        if profiled is not None:
+            body["profile"] = profiled
         return self._with_notes(body, notes)
 
     @semantic_operation("search_datasets")
