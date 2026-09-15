@@ -753,7 +753,12 @@ def _transform_required(err: BackendError, tool: str, arguments: dict[str, Any])
 # functions the language lacks
 # ----------------------------------------------------------------------------
 
-_ONE_PER_GROUP = ("any_value", "first", "arbitrary", "any", "last")
+_ONE_PER_GROUP = ("any_value", "first", "arbitrary")
+# DuckDB aggregates an agent writes where a scalar is expected; a query over input cannot run them without a group.
+_AGGREGATE_NAMES = frozenset({"first", "last", "any_value", "arbitrary", "median", "mode", "quantile", "string_agg",
+                              "listagg", "group_concat", "list", "array_agg", "stddev", "stddev_samp", "stddev_pop",
+                              "variance", "var_samp", "var_pop", "bool_and", "bool_or", "sum", "avg", "count", "min",
+                              "max"})
 
 
 def _measure_objects(step: dict[str, Any]) -> list[dict[str, Any]]:
@@ -787,7 +792,7 @@ def _unknown_function(err: BackendError, tool: str, arguments: dict[str, Any]) -
     listed = ", ".join(allowed)
     steps = _steps(arguments.get("transform"))
     if "aggregate" in err.message:
-        if name.lower() in _ONE_PER_GROUP:
+        if name.lower() in _ONE_PER_GROUP and details.get("min_applies"):
             changed = False
             for step in steps:
                 for measure in _measure_objects(step):
@@ -803,19 +808,24 @@ def _unknown_function(err: BackendError, tool: str, arguments: dict[str, Any]) -
         return Advice("unknown_aggregate", f"{name} is not an aggregate here; the aggregates are {listed}. A raw_query "
                       f"first step runs any DuckDB aggregate: SELECT key, {name}(x) AS name FROM input GROUP BY key, "
                       "with input as the source; semantic steps may follow it.")
-    close = difflib.get_close_matches(name.lower(), [a for a in allowed if a != name.lower()], n=1, cutoff=0.8)
-    if close:
+    close = details.get("renamed")  # the resolver checked that the call resolves under this name
+    if isinstance(close, str):
         changed = False
         for step in steps:
             for path, text in _expression_texts(step):
-                renamed = _rename_call(text, name, close[0])
+                renamed = _rename_call(text, name, close)
                 if renamed is not None:
                     _set_path(step, path, renamed)
                     changed = True
         if changed:
-            return Advice("unknown_function", f"{name} is not a function here; {close[0]} is, as {signature(close[0])}. "
+            return Advice("unknown_function", f"{name} is not a function here; {close} is, as {signature(close)}. "
                           "The same request with that name:",
                           rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+    if name.lower() in _AGGREGATE_NAMES:
+        return Advice("unknown_function", f"{name} is an aggregate, not a function of one row: it needs a group. Put it "
+                      "in an aggregate step when it is sum, avg, min, max, count or count_distinct; otherwise a "
+                      f"raw_query first step runs it with GROUP BY, or as {name}(x) OVER (PARTITION BY key) to keep "
+                      "every row.")
     explanation = (f"{name} is not a function of semantic expressions; the functions are {listed}. A raw_query first "
                    "step runs any DuckDB function: one read-only SELECT in which input is the source, and other "
                    "datasets are bound by name under inputs; semantic steps may follow it.")

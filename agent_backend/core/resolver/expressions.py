@@ -27,6 +27,7 @@ from ..ir.typing import (
     binary_result_type,
     comparable,
     function_result_type,
+    renamed_function,
     literal_type,
     signature,
     unary_result_type,
@@ -111,7 +112,16 @@ class ExpressionResolver:
                     notes.append(ResolutionNote(field, f"{name}({args[1].logical_type}, {args[0].logical_type})",
                                                 signature(name), "arguments reordered to the function's signature"))
             validate_function_arguments(name, args)
-            return FunctionExpr(name=name, args=args, logical_type=function_result_type(name, [a.logical_type for a in args]))
+            types = [a.logical_type for a in args]
+            try:
+                return FunctionExpr(name=name, args=args, logical_type=function_result_type(name, types))
+            except InvalidTransformError as err:
+                if err.details.get("function") == name:
+                    # The nearest accepted name, only when this call resolves under it; advice rewrites to it.
+                    renamed = renamed_function(name, args, types)
+                    if renamed is not None:
+                        err.details["renamed"] = renamed
+                raise
         if "cast" in loose or "try_cast" in loose:
             spelling = "cast" if "cast" in loose else "try_cast"
             target = self._parse_type(loose.get("to") or loose.get("type"))
