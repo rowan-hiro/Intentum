@@ -575,6 +575,8 @@ def _aggregate_in_select(err: BackendError, tool: str, arguments: dict[str, Any]
 
 
 _LEFT_KEYS = ("left", "input", "from", "source", "dataset", "base")
+# The keys of an object the dataset resolver reads as one reference (datasets.py); such an object is not an inline body.
+_REFERENCE_KEYS = ("dataset_id", "id", "name", "dataset", "ref", "reference")
 _SOURCE_IS_ONE = "source names one dataset (id, name or description)"
 
 
@@ -614,23 +616,26 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
     if err.code == ErrorCode.INVALID_INTENT and isinstance(err.details.get("received"), (dict, list)):
         source = err.details["received"]
     steps = _steps(arguments.get("transform"))
+    if isinstance(source, dict) and source and set(source) <= set(_REFERENCE_KEYS):
+        return None  # a dataset reference the resolver accepts; the refusal is elsewhere in the request
+    reference = next((source[k] for k in _REFERENCE_KEYS if isinstance(source.get(k), str)), None) \
+        if isinstance(source, dict) else None
     if isinstance(source, dict) and any(k in source for k in _QUERY_KEYS):
-        # A query written as the source: its SQL reads the source as input, and the others under inputs.
+        # A query written as the source: its SQL reads the source as input, and the others under inputs. A reference
+        # key beside it names the source; step keys beside it stay as the compact object's other steps.
         sql, inputs = _query_parts(source)
         explanation = (f"{_SOURCE_IS_ONE}; a query is a raw_query first step of the transform. Its SQL reads the "
                        "source as input, and every other dataset by the name inputs binds it to.")
         if sql is None:
             return Advice("source_as_dataset", explanation)
-        dataset, bound = _query_source(inputs)
+        dataset, bound = (reference, inputs) if reference is not None else _query_source(inputs)
         if dataset is None:
             return Advice("source_as_dataset", explanation + " Name the dataset the SQL reads as the source and read "
                           "it as input in the SQL; a physical table name is not a placeholder.")
-        query = {"sql": sql}
-        if bound:
-            query["inputs"] = bound
+        body = {k: v for k, v in source.items() if k not in _REFERENCE_KEYS}
         return Advice("source_as_dataset", explanation + f" Here {dataset} is the source and the query is the first step.",
                       rewrite=[call(tool, **_call_arguments(tool, arguments, source=dataset,
-                                                            transform=[{"raw_query": query}] + steps))])
+                                                            transform=[_query_restated(body, sql, bound)] + steps))])
     if isinstance(source, dict) and "right" in source:
         # A join written as the source: the left side is the source, the join is the first step.
         left = next((source[k] for k in _LEFT_KEYS if isinstance(source.get(k), str)), None)
@@ -671,7 +676,8 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
             "key is not copied.",
             rewrite=[call(tool, **_call_arguments(tool, arguments, source=left, transform=steps))],
         )
-    if isinstance(source, dict) and source and not set(source) & (_STEP_KEYS | set(_DATASET_KEYS) | set(_LEFT_KEYS)):
+    if isinstance(source, dict) and source and not set(source) & (_STEP_KEYS | set(_DATASET_KEYS) | set(_LEFT_KEYS)
+                                                                  | set(_REFERENCE_KEYS)):
         values = list(source.values())
         if len(source) == 1 and isinstance(values[0], dict) and set(values[0]) & _STEP_KEYS:
             # {"dataset": {steps}}: the key is the source and the value its transform.

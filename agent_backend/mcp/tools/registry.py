@@ -171,7 +171,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
     @server.tool(name="materialize_result", annotations=annotations("write"),
                  description="Persist the result of a semantic transform as a new managed dataset named `name`. "
                              "Creates the dataset, its version, lineage, provenance and audit records atomically. "
-                             "`transform` takes the same steps as transform_dataset; when the steps cannot express a "
+                             "`transform` is required and takes the same steps as transform_dataset; when the steps cannot express a "
                              "shape, a raw_query first step ({\"raw_query\": {\"sql\": \"SELECT ... FROM input\", "
                              "\"inputs\": {\"name\": \"dataset\"}}}, one read-only SELECT or WITH statement over "
                              "placeholders) is the fallback, and every dataset it binds is recorded as an input. "
