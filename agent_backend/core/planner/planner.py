@@ -159,6 +159,6 @@ def _expr_text(expr) -> str:
         return f"{expr.name}({', '.join(_expr_text(a) for a in expr.args)})"
     if kind == "in":
         return f"({_expr_text(expr.expr)} {'not in' if expr.negated else 'in'} ({', '.join(_expr_text(v) for v in expr.values)}))"
-    if kind == "cast":
-        return f"cast({_expr_text(expr.expr)} as {expr.logical_type})"
+    if kind in ("cast", "try_cast"):
+        return f"{kind}({_expr_text(expr.expr)} as {expr.logical_type})"
     return "?"

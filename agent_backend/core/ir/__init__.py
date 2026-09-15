@@ -30,6 +30,7 @@ from .canonical import (
     SortStep,
     Step,
     TransformIR,
+    TryCastExpr,
     UnaryExpr,
 )
 

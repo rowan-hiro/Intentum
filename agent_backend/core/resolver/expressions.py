@@ -10,6 +10,7 @@ from ..errors import InvalidTransformError, TypeMismatchError
 from ..ir import (
     BinaryExpr,
     CastExpr,
+    TryCastExpr,
     ColumnExpr,
     Expr,
     FunctionExpr,
@@ -107,10 +108,12 @@ class ExpressionResolver:
                                                 signature(name), "arguments reordered to the function's signature"))
             validate_function_arguments(name, args)
             return FunctionExpr(name=name, args=args, logical_type=function_result_type(name, [a.logical_type for a in args]))
-        if "cast" in loose:
+        if "cast" in loose or "try_cast" in loose:
+            spelling = "cast" if "cast" in loose else "try_cast"
             target = self._parse_type(loose.get("to") or loose.get("type"))
-            inner = self.resolve(loose["cast"], scope, field=field, notes=notes)
-            return CastExpr(expr=inner, logical_type=target)
+            inner = self.resolve(loose[spelling], scope, field=field, notes=notes)
+            node = CastExpr if spelling == "cast" else TryCastExpr
+            return node(expr=inner, logical_type=target)
         if "op" in loose and ("left" in loose or "field" in loose or "column" in loose):
             return self._binary(loose, scope, field, notes)
         if ("field" in loose or "column" in loose) and "value" in loose:
