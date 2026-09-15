@@ -676,6 +676,126 @@ def test_a_join_written_as_the_source_becomes_a_join_step(backend, orders, tmp_p
     assert names(result) == ["order_no", "paid"]
 
 
+def test_a_call_without_its_transform_is_refused_and_never_taken_for_an_empty_one(backend, orders):
+    response = backend.transform_dataset("orders", None)
+    assert response["status"] == "error" and response["code"] == "INVALID_INTENT"
+    found = advice(response, "transform_required")
+    assert "empty list" in found["explanation"] and "rewrite" not in found
+    copied = backend.materialize_result("orders", None, "orders_copy")
+    assert copied["code"] == "INVALID_INTENT" and advice(copied, "transform_required")
+    assert backend.list_datasets()["count"] == 1  # nothing was copied under the name meant for a result
+    assert backend.transform_dataset("orders", [])["result"]["row_count"] == 12
+
+
+def test_a_query_written_as_the_source_becomes_a_raw_query_first_step(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    sql = "SELECT o.order_id, p.paid FROM o JOIN p ON o.order_id = p.order_no ORDER BY o.order_id"
+    # With the raw_query key and no transform, or as bare sql/inputs text: the first input is the source and stays bound.
+    keyed = backend.transform_dataset({"raw_query": {"sql": sql, "inputs": {"o": "orders", "p": "payments"}}}, None)
+    assert keyed["code"] == "INVALID_INTENT"
+    (rewrite,) = advice(keyed, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"] == {"source": "orders", "transform": [
+        {"raw_query": {"sql": sql, "inputs": {"o": "orders", "p": "payments"}}}]}
+    (result,) = run(backend, [rewrite])
+    assert result["used_raw_query"] and result["result"]["row_count"] == 3
+    # A binding named input is the source's, so it leaves the inputs; the later steps follow the query.
+    bare = backend.transform_dataset(
+        '{"sql": "SELECT input.order_id, p.paid FROM input JOIN p ON input.order_id = p.order_no", '
+        '"inputs": {"p": "payments", "input": "orders"}}', {"sort": "-order_id", "limit": 1})
+    (rewrite,) = advice(bare, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"]["source"] == "orders"
+    assert rewrite["arguments"]["transform"][0]["raw_query"]["inputs"] == {"p": "payments"}
+    assert rewrite["arguments"]["transform"][1:] == [{"sort": "-order_id", "limit": 1}]
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"][0][0] == 1003
+    # A query that binds nothing names no dataset: explained, not rewritten.
+    unbound = backend.transform_dataset({"raw_query": {"sql": "SELECT name FROM sqlite_master", "inputs": {}}}, None)
+    found = advice(unbound, "source_as_dataset")
+    assert "physical table name" in found["explanation"] and "rewrite" not in found
+
+
+def test_a_join_as_source_names_its_left_dataset_under_input_or_from(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    # The transform already joins the right dataset: only the source changes.
+    joined = backend.transform_dataset({"input": "orders", "right": "payments"},
+                                       {"join": {"right": "payments", "on": {"order_id": "order_no"}}, "select": ["order_id", "paid"]})
+    found = advice(joined, "source_as_dataset")
+    assert "already joins payments" in found["explanation"]
+    (rewrite,) = found["rewrite"]
+    assert rewrite["arguments"] == {"source": "orders", "transform": {
+        "join": {"right": "payments", "on": {"order_id": "order_no"}}, "select": ["order_id", "paid"]}}
+    (result,) = run(backend, [rewrite])
+    assert names(result) == ["order_id", "paid"] and result["result"]["row_count"] == 3
+    # Without the join in the transform and with the keys given, the join becomes the first step.
+    keyed = backend.transform_dataset({"from": "orders", "right": "payments", "on": ["order_id = order_no"], "how": "left"}, None)
+    (rewrite,) = advice(keyed, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"] == {"source": "orders", "transform": [
+        {"join": {"right": "payments", "on": {"order_id": "order_no"}, "how": "left"}}]}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 12
+    # Without keys there is nothing to rewrite: the join step shape, with on, is explained.
+    unkeyed = backend.transform_dataset({"input": "orders", "right": "payments"}, {"select": ["order_id"]})
+    found = advice(unkeyed, "source_as_dataset")
+    assert "needs the fields it joins on" in found["explanation"] and "rewrite" not in found
+    nameless = backend.transform_dataset({"right": "payments", "on": ["order_id = order_no"]}, None)
+    found = advice(nameless, "source_as_dataset")
+    assert "Name the left dataset" in found["explanation"] and "rewrite" not in found
+
+
+def test_a_dataset_keyed_to_its_steps_or_placeholders_keyed_to_datasets_are_split_into_source_and_transform(backend, orders, tmp_path):
+    payments(backend, tmp_path)
+    keyed = backend.transform_dataset({"orders": {"filter": "amount > 100", "select": ["order_id", "amount"]}}, [{"limit": 2}])
+    (rewrite,) = advice(keyed, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"] == {"source": "orders", "transform": [
+        {"filter": "amount > 100", "select": ["order_id", "amount"]}, {"limit": 2}]}
+    (result,) = run(backend, [rewrite])
+    assert names(result) == ["order_id", "amount"] and result["result"]["row_count"] == 2
+    placeholders = backend.materialize_result(
+        {"o": "orders", "p": "payments"},
+        [{"raw_query": "SELECT o.order_id, p.paid FROM o JOIN p ON o.order_id = p.order_no"}], "paid_orders")
+    (rewrite,) = advice(placeholders, "source_as_dataset")["rewrite"]
+    assert rewrite["tool"] == "materialize_result" and rewrite["arguments"]["source"] == "orders"
+    assert rewrite["arguments"]["transform"][0]["raw_query"]["inputs"] == {"o": "orders", "p": "payments"}
+    (result,) = run(backend, [rewrite])
+    assert result["status"] == "success" and result["dataset"]["name"] == "paid_orders"
+    # Placeholders without a query to bind them, a bare transform object, and rows: explained, not rewritten.
+    for source, transform, phrase in (
+        ({"o": "orders", "p": "payments"}, {"limit": 1}, "raw_query first step whose inputs"),
+        ({"join": {"right": "payments", "on": {"order_id": "order_no"}}, "select": ["order_id"]}, None, "is a transform"),
+        ({"config": {"code": "600859"}, "rows": [{"year": 1995, "amount": 1.5}]}, None, "Rows written inline"),
+    ):
+        found = advice(backend.transform_dataset(source, transform), "source_as_dataset")
+        assert phrase in found["explanation"] and "rewrite" not in found, found
+
+
+def test_a_source_object_the_resolver_accepts_is_not_taken_for_an_inline_body(backend, orders, tmp_path):
+    """{name}, {id} and the like are references; the refusal is elsewhere and the advice for it must not be masked."""
+    payments(backend, tmp_path)
+    for reference in ({"name": "orders"}, {"id": orders["id"]}, {"dataset": "orders"}):
+        missing = backend.transform_dataset(reference, None)
+        assert [a["kind"] for a in missing["advice"]] == ["transform_required"], missing
+        unknown = backend.transform_dataset(reference, {"select": ["nope"]})
+        assert [a["kind"] for a in unknown["advice"]] == ["field_not_in_scope"], unknown
+    # A reference key beside a join or a query still names the source of the rewrite.
+    joined = backend.transform_dataset({"dataset": "orders", "right": "payments", "on": {"order_id": "order_no"}},
+                                       {"select": ["order_id", "paid"]})
+    (rewrite,) = advice(joined, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"]["source"] == "orders" and rewrite["arguments"]["transform"][0]["join"]["right"] == "payments"
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["row_count"] == 3
+    named = backend.transform_dataset({"name": "orders", "sql": "SELECT count(*) AS n FROM input"}, None)
+    (rewrite,) = advice(named, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"] == {"source": "orders", "transform": [{"raw_query": {"sql": "SELECT count(*) AS n FROM input"}}]}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [[12]]
+    # Step keys written beside the query stay as the compact object's other steps.
+    limited = backend.transform_dataset({"sql": "SELECT order_id FROM o ORDER BY order_id", "inputs": {"o": "orders"}, "limit": 1}, None)
+    (rewrite,) = advice(limited, "source_as_dataset")["rewrite"]
+    assert rewrite["arguments"]["transform"] == [{"raw_query": {"sql": "SELECT order_id FROM o ORDER BY order_id", "inputs": {"o": "orders"}}, "limit": 1}]
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [[1001]]
+
+
 def test_an_unknown_document_is_pointed_at_the_one_that_exists(backend, tmp_path):
     root = tmp_path / "ws"
     (root / "doc").mkdir(parents=True)

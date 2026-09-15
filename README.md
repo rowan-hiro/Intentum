@@ -376,8 +376,12 @@ alias}`), an aggregate body under `group_by` or `derive` (the aggregate step),
 a measure without a field (`*` counts; one numeric field is filled in), an
 expression with an alias inside `select` (derive step), a field used before
 the step that creates it (one self-ordering object), a SQL `LIMIT` tail inside
-a filter (limit step), an inline relation or a join written as `source`
-(materialize it first, or the join as the first step), a JSON string where a
+a filter (limit step), a call without its `transform` (the step forms; an
+absent transform is never taken for an empty one), an inline relation, a
+query, a join or a step object written as `source` (materialize the relation
+first; the query or join as the first step with the dataset it reads as the
+source; a dataset name keyed to its steps, or placeholders keyed to datasets
+beside a `raw_query`, split into source and transform), a JSON string where a
 name belongs, an unknown key (nearest accepted key), a predicate that is not
 boolean, a literal of the wrong type in a comparison (re-typed when lossless),
 a qualified or right-key name after a join (unqualified, or the left key under
@@ -793,9 +797,10 @@ imports in ~2 s and the task's query runs through the semantic steps.
 8. **Protocol-level input errors**: the loose-shaped arguments of the
    transform tools (`source`, `transform`) are typed loosely at the MCP layer
    so that a JSON string or a relation written there reaches the backend and
-   is refused with advice; a wrong-typed scalar argument is still reported by
-   the MCP SDK with pydantic text, and mapping those to the structured error
-   shape is what remains.
+   is refused with advice, and `transform` is optional at the schema so that
+   its absence is refused by the backend with advice rather than by the SDK; a
+   wrong-typed scalar argument is still reported by the MCP SDK with pydantic
+   text, and mapping those to the structured error shape is what remains.
 9. **Reversibility as a property of each call**: on the data side regret is
    cheap. A transform creates a new dataset rather than replacing one,
    `delete_dataset` has `restore_dataset`, and a failed operation drops its
