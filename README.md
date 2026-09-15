@@ -166,7 +166,7 @@ Expressions may be strings (`"quantity * unit_price"`,
 `"amount > 100 and region in ['West', 'East']"`) or object trees; identifiers
 are always resolved against the current schema and functions come from an
 allowlist (`abs round floor ceil upper lower trim length substr substring left
-right concat coalesce year month day date date_trunc strftime is_null contains
+right concat coalesce year month day date date_trunc date_diff strftime is_null contains
 starts_with ends_with`; `||` is read as `concat`). `cast(x as type)` converts to
 `integer`, `float`, `string`, `boolean`, `date` or `timestamp`, and accepts SQL
 names such as `int`, `bigint`, `double`, `varchar`, `text`, `bool` and
@@ -391,7 +391,10 @@ it), a cast that meets a value it cannot convert (the same request with
 `try_cast`), SQL spellings with a direct equivalent (backtick names, `EXTRACT`,
 `ILIKE`), SQL that expressions do not have (`CASE`, a window function, a scalar
 subquery: the step as a `raw_query` first step when it is the first step and
-reads only the source), a string function on a date or
+reads only the source), a function the language lacks (the accepted name it was
+close to, otherwise the step as a `raw_query` first step, which runs any DuckDB
+function), an aggregate that picks one value per group (`min`), a subtraction
+between dates or timestamps (`date_diff`), a string function on a date or
 timestamp (how dates are computed, and that rendering belongs to export), a
 document, media file or unsupported format where a dataset is expected
 (`attach_metadata`, or that the host reads it, MADR 0009), a document name no

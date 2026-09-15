@@ -141,6 +141,24 @@ def test_date_and_date_trunc_give_typed_calendar_keys(backend, orders):
     assert bad["code"] == "INVALID_TRANSFORM" and bad["details"]["allowed_parts"] == ["day", "week", "month", "quarter", "year"]
 
 
+def test_date_diff_counts_units_between_dates_and_timestamps(backend, tmp_path):
+    path = write_csv(tmp_path / "stays.csv", "stay_id,admitted,discharged",
+                     ["1,2024-03-01 08:00:00,2024-03-04 17:30:00", "2,2024-03-02 09:00:00,2024-03-02 21:00:00"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    response = backend.transform_dataset("stays", {
+        "derive": {"nights": "date_diff('day', cast(admitted as date), cast(discharged as date))",
+                   "hours": "datediff('hour', admitted, discharged)"},
+        "select": ["stay_id", "nights", "hours"]})
+    assert rows(response) == [[1, 3, 81], [2, 0, 12]]
+    assert [c["type"] for c in response["result"]["columns"]] == ["integer", "integer", "integer"]
+    assert response["resolution"][0]["resolved_to"] == "date_diff"  # datediff is another dialect's spelling
+    bad = backend.transform_dataset("stays", {"derive": {"x": "date_diff('fortnight', admitted, discharged)"}})
+    assert bad["code"] == "INVALID_TRANSFORM" and bad["details"]["allowed_parts"][:3] == ["second", "minute", "hour"]
+    subtracted = backend.transform_dataset("stays", {"derive": {"x": "discharged - cast(admitted as date)"}})
+    assert subtracted["code"] == "TYPE_MISMATCH" and "date_diff('day', start, end)" in subtracted["hint"]
+    assert [a["kind"] for a in subtracted["advice"]] == ["temporal_difference"]
+
+
 def test_group_by_a_named_expression_derives_it_first(backend, orders):
     """The model tried to group by the expression text itself; a named expression is the shape that works."""
     response = backend.transform_dataset(
