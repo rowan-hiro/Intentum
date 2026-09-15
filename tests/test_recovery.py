@@ -809,6 +809,27 @@ def test_an_unknown_function_close_to_an_accepted_name_is_renamed(backend, order
     assert result["result"]["rows"] == [["Acme Corp"], ["Globex"]]
 
 
+def test_a_close_name_is_offered_only_when_the_call_resolves_under_it(backend, orders, tmp_path):
+    """strptime is not strftime, and isnull(x, y) is not is_null(x): such calls go to raw_query instead (from review)."""
+    path = write_csv(tmp_path / "events.csv", "id,seen", ["1,March 1 2024", "2,March 5 2024"])  # text, not a date
+    assert backend.import_dataset(str(path))["status"] == "success"
+    parsed = backend.transform_dataset("events", {"derive": {"d": "strptime(seen, '%B %d %Y')"}, "select": ["id", "d"]})
+    assert "renamed" not in parsed["details"]
+    (rewrite,) = advice(parsed, "unknown_function")["rewrite"]
+    assert rewrite["arguments"]["transform"][0] == {"raw_query": {"sql": "SELECT *, strptime(seen, '%B %d %Y') AS \"d\" FROM input"}}
+    (result,) = run(backend, [rewrite])
+    assert result["result"]["rows"] == [[1, "2024-03-01T00:00:00"], [2, "2024-03-05T00:00:00"]]
+    two = backend.transform_dataset("orders", {"derive": {"x": "isnull(customer, 'none')"}})
+    (rewrite,) = advice(two, "unknown_function")["rewrite"]
+    assert "renamed" not in two["details"] and "isnull(customer, 'none')" in rewrite["arguments"]["transform"][0]["raw_query"]["sql"]
+    # An aggregate where a scalar is expected is not sent as a query over input, which could not run it.
+    first = backend.transform_dataset("orders", {"derive": {"x": "first(customer)"}})
+    found = advice(first, "unknown_function")
+    assert "is an aggregate" in found["explanation"] and "rewrite" not in found
+    two_arg = backend.transform_dataset("orders", {"derive": {"x": "datediff(order_date, order_date)"}})
+    assert two_arg["code"] == "INVALID_TRANSFORM" and "date_diff('day', start, end)" in two_arg["message"]
+
+
 def test_an_unknown_function_in_the_first_step_becomes_a_raw_query_and_elsewhere_is_explained(backend, orders):
     derived = backend.transform_dataset("orders", [{"derive": {"initial": "regexp_extract(customer, '^[A-Z]')"}},
                                                    {"select": ["customer", "initial"]}, {"limit": 2}])
@@ -840,6 +861,14 @@ def test_an_aggregate_that_picks_one_value_per_group_becomes_min_and_others_are_
     median = backend.transform_dataset("orders", {"aggregate": {"group_by": ["region"], "measures": [{"function": "median", "field": "amount"}]}})
     found = advice(median, "unknown_aggregate")
     assert "median(x) AS name FROM input GROUP BY key" in found["explanation"] and "rewrite" not in found
+    # min is offered only where it applies: not on a boolean field, and any is a boolean aggregate, not one value.
+    flagged = backend.transform_dataset("orders", {"derive": {"west": "region = 'West'"}, "aggregate": {
+        "group_by": ["region"], "measures": [{"function": "any", "field": "west", "alias": "hit"}]}})
+    found = advice(flagged, "unknown_aggregate")
+    assert "rewrite" not in found and flagged["details"]["min_applies"] is False
+    boolean = backend.transform_dataset("orders", {"derive": {"west": "region = 'West'"}, "aggregate": {
+        "group_by": ["region"], "measures": [{"function": "any_value", "field": "west", "alias": "hit"}]}})
+    assert "rewrite" not in advice(boolean, "unknown_aggregate")
 
 
 def test_an_unknown_document_is_pointed_at_the_one_that_exists(backend, tmp_path):

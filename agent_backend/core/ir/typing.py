@@ -7,6 +7,7 @@ that disagrees with these rules is rejected.
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 from typing import Callable
 
@@ -163,6 +164,11 @@ def validate_function_arguments(name: str, args: list) -> None:
                 field="expression",
                 details={"allowed_parts": list(DATE_TRUNC_PARTS), "signature": signature(name)},
             )
+    if name == "date_diff" and len(args) == 2:
+        raise InvalidTransformError(
+            "date_diff takes the unit first: date_diff('day', start, end) counts the days from start to end.",
+            field="expression", details={"allowed_parts": list(DATE_DIFF_PARTS), "signature": signature(name)},
+        )
     if name == "date_diff" and args:
         part = args[0]
         if not isinstance(part, LiteralExpr) or not isinstance(part.value, str) or part.value.lower() not in DATE_DIFF_PARTS:
@@ -173,6 +179,28 @@ def validate_function_arguments(name: str, args: list) -> None:
                 field="expression",
                 details={"allowed_parts": list(DATE_DIFF_PARTS), "signature": signature(name)},
             )
+
+
+# Functions of the query engine whose names are close to an accepted one but mean something else; a call to one
+# is not a misspelling, and a raw_query runs it as written.
+NOT_A_MISSPELLING = frozenset({"strptime", "ltrim", "rtrim"})
+
+
+def renamed_function(name: str, args: list, arg_types: list[LogicalType]) -> str | None:
+    """The accepted function an unknown ``name`` was close to, when the call resolves under that name as written;
+    None otherwise, so that no rewrite names a function the arguments do not fit (``isnull(x, y)`` is not
+    ``is_null(x)``) or one that means something else (``strptime`` is not ``strftime``)."""
+    if name.lower() in NOT_A_MISSPELLING:
+        return None
+    close = difflib.get_close_matches(name.lower(), sorted(FUNCTIONS), n=1, cutoff=0.8)
+    if not close:
+        return None
+    try:
+        validate_function_arguments(close[0], args)
+        function_result_type(close[0], arg_types)
+    except (InvalidTransformError, TypeMismatchError):
+        return None
+    return close[0]
 
 
 def function_result_type(name: str, arg_types: list[LogicalType]) -> LogicalType:
