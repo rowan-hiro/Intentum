@@ -873,14 +873,12 @@ def _dataset_not_found(err: BackendError, tool: str, arguments: dict[str, Any]) 
         return None
     available = [str(d.get("name")) for d in details["available"]]
     candidates = [str(c.get("name")) for c in getattr(err, "candidates", None) or [] if isinstance(c, dict)]
-    argument = next((k for k in ("source", "dataset") if isinstance(arguments.get(k), str)), None)
-    reference = str(arguments.get(argument) or "") if argument else ""
-    if where != argument or not reference or re.search(r"\.\w{1,5}$", reference):
-        # The right side of a join, or a file or document name, which its own advice covers: the names are the facts.
-        argument = None
-        if re.search(r"\.\w{1,5}$", reference):
-            return None
-    explanation = (f"No dataset is named {reference or str(err.field)!r}. "
+    reference = str(details.get("reference") or "")
+    if re.search(r"\.\w{1,5}$", reference):
+        return None  # a file or document name, which its own advice covers
+    # The argument that carries the refused reference; the right side of a join is inside the transform.
+    argument = where if where in ("source", "dataset") and arguments.get(where) == reference else None
+    explanation = (f"No dataset is named {reference!r}. "
                    + (f"Close names: {', '.join(candidates)}. " if candidates else "")
                    + (f"Datasets here: {', '.join(available)}" + ("; " if len(available) >= 20 else ". ") if available
                       else "No dataset is imported yet; import_dataset or import_workspace loads one. ")
@@ -958,6 +956,9 @@ def _step_as_strings(err: BackendError, tool: str, arguments: dict[str, Any]) ->
         if isinstance(item, dict):
             steps.append(copy.deepcopy(item))
         elif isinstance(item, str) and item.lower() in _STEP_KEYS and items and not isinstance(items[0], dict):
+            if item.lower() in _JOIN_KEYS:
+                return Advice("step_as_strings", explanation + " A join is an object with the right dataset and the "
+                              "keys: {\"join\": {\"right\": \"other\", \"on\": {\"left_field\": \"right_field\"}}}.")
             steps.append({item.lower(): items.pop(0)})
         else:
             return Advice("step_as_strings", explanation)
@@ -1001,8 +1002,8 @@ def _unknown_step_type(err: BackendError, tool: str, arguments: dict[str, Any]) 
     if err.code != ErrorCode.INVALID_TRANSFORM or not isinstance(received, str) or not isinstance(allowed, list):
         return None
     listed = ", ".join(str(a) for a in allowed)
-    close = difflib.get_close_matches(received.lower(), [str(a) for a in allowed], n=1, cutoff=0.6)
-    if not close:
+    renamed = details.get("renamed")  # the resolver checked that the step's keys are ones the near type takes
+    if not isinstance(renamed, str):
         return Advice("unknown_step_type", f"{received!r} is not a step type; the steps are {listed}. A step may also be "
                       "written without a type, as {\"filter\": \"...\"} or {\"select\": [...]}.")
     steps = _steps(arguments.get("transform"))
@@ -1010,11 +1011,11 @@ def _unknown_step_type(err: BackendError, tool: str, arguments: dict[str, Any]) 
     for step in steps:
         for key in _TYPE_KEYS:
             if str(step.get(key, "")).lower() == received.lower():
-                step[key] = close[0]
+                step[key] = renamed
                 changed = True
     if not changed:
-        return Advice("unknown_step_type", f"{received!r} is not a step type; the nearest is {close[0]!r}. The steps are {listed}.")
-    return Advice("unknown_step_type", f"{received!r} is not a step type; the nearest is {close[0]!r}. The steps are {listed}. "
+        return Advice("unknown_step_type", f"{received!r} is not a step type; the nearest is {renamed!r}. The steps are {listed}.")
+    return Advice("unknown_step_type", f"{received!r} is not a step type; the nearest is {renamed!r}. The steps are {listed}. "
                   "The same request with it:",
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
 
@@ -1057,6 +1058,11 @@ def _duplicate_output_field(err: BackendError, tool: str, arguments: dict[str, A
         return Advice("duplicate_output_field", f"{name!r} would be produced twice; a result names each field once. "
                       "The same request naming it once:",
                       rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+    entries = [str(e) for e in details.get("entries") or []]
+    if "(derive)" not in str(err.field):
+        produced = f", by {' and '.join(repr(e) for e in entries)}" if len(entries) > 1 else " by a field and an alias, or by two aliases"
+        return Advice("duplicate_output_field", f"{name!r} would be produced twice{produced}; a result names each field "
+                      "once. Give one of them another alias, or leave it out.")
     return Advice("duplicate_output_field", f"{name!r} is already a field of the result; a derive adds a field, it does "
                   "not replace one. Give the derived field another name, or select or rename the fields so that the "
                   "name is free.")
@@ -1071,9 +1077,10 @@ def _literal_as_field(err: BackendError, tool: str, arguments: dict[str, Any]) -
     where = str(err.field)
     if isinstance(received, (int, float)) and not isinstance(received, bool):
         return Advice("literal_as_field", f"{where} names a field of the source, and {received!r} is a constant. A "
-                      "constant becomes a column through a derive step, {\"derive\": {\"name\": " + repr(received) + "}}, "
-                      "which an aggregate or a select may then use; a single constant answer is that derive after an "
-                      "aggregate, or a raw_query such as SELECT " + repr(received) + " AS name FROM input LIMIT 1.")
+                      "constant becomes a column through a derive step whose expression is the constant as text, "
+                      "{\"derive\": {\"total\": \"" + str(received) + "\"}}, which an aggregate or a select may then use; "
+                      "a single constant answer is that derive after an aggregate, or a raw_query such as SELECT "
+                      + str(received) + " AS total FROM input LIMIT 1.")
     return Advice("literal_as_field", f"{where} names a field of the source: a name, or {{\"field\": \"name\"}}; an "
                   "expression belongs in a derive step, and a constant in a derive too.")
 

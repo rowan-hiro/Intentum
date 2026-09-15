@@ -9,6 +9,7 @@ aggregate alias). Every lenient decision is recorded as a ``ResolutionNote``.
 from __future__ import annotations
 
 import copy
+import difflib
 import re
 from typing import Any
 
@@ -230,9 +231,14 @@ class TransformResolver:
             return self._implicit_steps(step)
         step_type = _STEP_TYPE_ALIASES.get(str(raw).lower())
         if step_type is None:
+            # The nearest step type, only when this step's keys are ones it takes; advice rewrites to it.
+            body_keys = {k for k in step if k not in ("type", "op", "operation")}
+            close = difflib.get_close_matches(str(raw).lower(), sorted(_STEP_TYPE_ALIASES), n=3, cutoff=0.8)
+            renamed = next((_STEP_TYPE_ALIASES[c] for c in close if body_keys <= _STEP_BODY_KEYS[_STEP_TYPE_ALIASES[c]]), None)
             raise InvalidTransformError(
                 f"Unknown step type {raw!r}.", field="transform",
-                details={"received": str(raw), "allowed_types": sorted(set(_STEP_TYPE_ALIASES.values()))},
+                details={"received": str(raw), "allowed_types": sorted(set(_STEP_TYPE_ALIASES.values())),
+                         **({"renamed": renamed} if renamed else {})},
             )
         body = {k: v for k, v in step.items() if k not in ("type", "op", "operation")}
         return [{"type": step_type, **body}]
@@ -423,7 +429,7 @@ class TransformResolver:
                                              aliases=field.aliases, semantic_role=field.semantic_role))
         if not mappings:
             return steps, selected
-        self._check_unique([f.name for f in renamed_fields], where)
+        self._check_unique([f.name for f in renamed_fields], where, written=items)
         final = selected.with_fields(renamed_fields)
         steps.append(RenameStep(mappings=mappings, output_schema=final.refs()))
         return steps, final

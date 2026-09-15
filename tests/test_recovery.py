@@ -880,6 +880,10 @@ def test_a_dataset_nothing_matches_is_advised_with_the_names_there_are(backend, 
     assert "Datasets here: orders, payments" in found["explanation"] and "rewrite" not in found
     described = backend.describe_dataset("sqlite_master")
     assert "list_datasets shows them all" in advice(described, "dataset_not_found")["explanation"]
+    # The right side of a join: the refused name, not the source's (from review).
+    joined = backend.transform_dataset("orders", {"join": {"right": "shipments", "on": {"order_id": "id"}}})
+    found = advice(joined, "dataset_not_found")
+    assert found["explanation"].startswith("No dataset is named 'shipments'") and "rewrite" not in found
     empty = Backend(tmp_path / "empty")
     try:
         nothing = empty.transform_dataset("orders", {"limit": 1})
@@ -928,6 +932,9 @@ def test_malformed_steps_are_rewritten_when_the_repair_is_mechanical(backend, or
     assert result["result"]["rows"] == [[10]]
     stray = backend.transform_dataset("orders", ["amount > 100"])
     assert "rewrite" not in advice(stray, "step_as_strings")
+    joined = backend.transform_dataset("orders", ["join", "payments"])  # a name alone is not a join
+    found = advice(joined, "step_as_strings")
+    assert "A join is an object with the right dataset and the keys" in found["explanation"] and "rewrite" not in found
     same = backend.transform_dataset("orders", {"filter": "amount > 100", "where": "amount > 100", "limit": 1})
     assert same["details"]["values_equal"] is True
     (rewrite,) = advice(same, "one_key_per_step")["rewrite"]
@@ -947,6 +954,10 @@ def test_malformed_steps_are_rewritten_when_the_repair_is_mechanical(backend, or
     assert result["result"]["row_count"] == 1
     far = backend.transform_dataset("orders", [{"type": "xyzzy", "filter": "amount > 100"}])
     assert "rewrite" not in advice(far, "unknown_step_type")
+    # A near type is offered only when the step's keys are ones it takes (from review).
+    for step in ({"type": "set", "filter": "amount > 100"}, {"type": "query", "sql": "SELECT 1"}):
+        near = backend.transform_dataset("orders", [step])
+        assert "renamed" not in near["details"] and "rewrite" not in advice(near, "unknown_step_type"), near
 
 
 def test_a_duplicate_output_field_is_named_once_and_a_derive_onto_a_name_is_explained(backend, orders):
@@ -962,13 +973,19 @@ def test_a_duplicate_output_field_is_named_once_and_a_derive_onto_a_name_is_expl
     derived = backend.transform_dataset("orders", {"derive": {"amount": "amount * 2"}})
     found = advice(derived, "duplicate_output_field")
     assert "a derive adds a field, it does not replace one" in found["explanation"] and "rewrite" not in found
+    aliased = backend.transform_dataset("orders", {"select": ["amount as region", "region"]})
+    found = advice(aliased, "duplicate_output_field")
+    assert "by 'amount as region' and 'region'" in found["explanation"] and "rewrite" not in found
 
 
 def test_a_constant_where_a_field_belongs_and_an_empty_select_are_explained(backend, orders):
     constant = backend.transform_dataset("orders", {"aggregate": {"group_by": [], "measures": [{"alias": "total", "fn": "sum", "of": 36}]}})
     assert constant["code"] == "INVALID_INTENT" and constant["details"]["received"] == 36
     found = advice(constant, "literal_as_field")
-    assert "36 is a constant" in found["explanation"] and "SELECT 36 AS name FROM input LIMIT 1" in found["explanation"]
+    assert "36 is a constant" in found["explanation"] and "SELECT 36 AS total FROM input LIMIT 1" in found["explanation"]
+    assert '{"derive": {"total": "36"}}' in found["explanation"]
+    taught = backend.transform_dataset("orders", {"derive": {"total": "36"}, "select": ["total"], "limit": 1})
+    assert taught["result"]["rows"] == [[36]]  # the shape the advice teaches runs
     empty = backend.transform_dataset("orders", {"select": []})
     found = advice(empty, "select_needs_fields")
     assert "The fields here are order_id, order_date" in found["explanation"]

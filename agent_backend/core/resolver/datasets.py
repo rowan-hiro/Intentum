@@ -87,7 +87,7 @@ class DatasetResolver:
                 f"No dataset matches {text!r}.",
                 field=field,
                 candidates=self._suggestions(text, active),
-                details={"available": [{"id": d.id, "name": d.name} for d in active[:20]]},
+                details={"reference": text, "available": [{"id": d.id, "name": d.name} for d in active[:20]]},
             )
 
         best, best_score = positive[0]
