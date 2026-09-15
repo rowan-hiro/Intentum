@@ -55,6 +55,9 @@ class BackendError(Exception):
         self.hint = hint
         # Teach on refusal (MADR 0010): what the backend accepts instead, attached by core/recovery.
         self.advice: list[Any] = []
+        # Where in the request, as the resolver normalized it, the refusal arose: {"steps": [...], "index": n}.
+        # Advice that rewrites one step reads it; it is not part of the response.
+        self.resolution: dict[str, Any] | None = None
 
     def to_response(self) -> dict[str, Any]:
         body: dict[str, Any] = {

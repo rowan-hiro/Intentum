@@ -288,10 +288,27 @@ def _like(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | N
 
 
 _EXTRACT_RE = re.compile(r"\bextract\s*\(\s*(year|month|day)\s+from\s+", re.IGNORECASE)
+_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+
+
+def _outside_literals(text: str, respell: Callable[[str], str | None]) -> str | None:
+    """Apply ``respell`` to an expression with its single-quoted literals held aside, so their text is kept as written."""
+    literals: list[str] = []
+
+    def hold(match: re.Match[str]) -> str:
+        literals.append(match.group(0))
+        return f"\x00{len(literals) - 1}\x00"
+
+    masked = respell(_STRING_LITERAL_RE.sub(hold, text))
+    return None if masked is None else re.sub(r"\x00(\d+)\x00", lambda m: literals[int(m.group(1))], masked)
 
 
 def _respelled(text: str) -> str | None:
     """SQL spellings with a direct equivalent here: backtick identifiers, and EXTRACT of a year, month or day."""
+    return _outside_literals(text, _respell_code)
+
+
+def _respell_code(text: str) -> str | None:
     out = re.sub(r'`"([^"`]+)"`', r'"\1"', text)
     out = re.sub(r"`([^`]+)`", lambda m: '"' + m.group(1).replace('"', '""') + '"', out)
     while (match := _EXTRACT_RE.search(out)) is not None:
@@ -313,7 +330,8 @@ def _sql_spelling(err: BackendError, tool: str, arguments: dict[str, Any]) -> Ad
     changed = False
     for step in steps:
         for path, text in _expression_texts(step):
-            if "`" not in text and not _EXTRACT_RE.search(text):
+            code = _STRING_LITERAL_RE.sub("''", text)
+            if "`" not in code and not _EXTRACT_RE.search(code):
                 continue
             respelled = _respelled(text)
             if respelled is None or respelled == text:
@@ -342,34 +360,50 @@ def _sql_in_expression(err: BackendError, tool: str, arguments: dict[str, Any]) 
     if err.code != ErrorCode.INVALID_TRANSFORM or "expression" not in err.details:
         return None
     text = str(err.details["expression"])
-    found = [name for name, pattern in _SQL_ONLY if pattern.search(text)]
-    if not found or re.search(r"\bin\s*\(\s*select\b", text, re.IGNORECASE):
+    code = _STRING_LITERAL_RE.sub("''", text)
+    found = [name for name, pattern in _SQL_ONLY if pattern.search(code)]
+    if not found or re.search(r"\bin\s*\(\s*select\b", code, re.IGNORECASE):
         return None  # IN (SELECT ...) is a semi_join; _subquery says so
     named = " and ".join(found)
     explanation = (f"{named[0].upper()}{named[1:]} is SQL that semantic expressions do not have. A raw_query first "
                    "step runs it: one read-only SELECT in which input is the source, and other datasets are bound by "
                    "name under inputs; semantic steps may follow it.")
-    steps = _steps(arguments.get("transform"))
-    first = steps[0] if steps else {}
-    tables = {name.strip('"').lower() for name in re.findall(r"\bfrom\s+(\"[^\"]+\"|[\w.]+)", text, re.IGNORECASE)}
+    tables = {name.strip('"').lower() for name in re.findall(r"\bfrom\s+(\"[^\"]+\"|[\w.]+)", code, re.IGNORECASE)}
     if tables - {"input"}:
         return Advice("sql_in_expression", explanation + " The subquery reads other datasets, which the query binds "
                                                           "under inputs by name.")
-    kind = str(first.get("type") or "").lower()
-    derive = first.get("derive") if isinstance(first.get("derive"), dict) else None
-    if kind == "filter" or (not kind and any(first.get(k) == text for k in ("filter", "where"))):
-        clause = "QUALIFY" if "a window function" in found else "WHERE"  # a window is filtered after it is computed
-        sql, drop = f"SELECT * FROM input {clause} {text}", {"type", "filter", "where", "predicate", "condition", "expression", "expr"}
-    elif kind == "derive" and first.get("expression") == text and isinstance(first.get("name"), str):
-        sql, drop = f'SELECT *, {text} AS "{first["name"]}" FROM input', set(first)
-    elif not kind and derive is not None and len(derive) == 1 and next(iter(derive.values())) == text:
-        sql, drop = f'SELECT *, {text} AS "{next(iter(derive))}" FROM input', {"derive"}
-    else:
-        return Advice("sql_in_expression", explanation + " Written in the transform's first filter or derive, it is "
-                                                          "rewritten as that query.")
-    steps[0] = {"raw_query": {"sql": sql}, **{k: v for k, v in first.items() if k not in drop}}
+    # Only the request's first step, as the backend normalized it, can become the query without reordering what
+    # runs before it; a filter or join ahead of it would otherwise run after it.
+    resolution = err.resolution or {}
+    steps, index = resolution.get("steps"), resolution.get("index")
+    query = _step_as_query(steps[0], text, found) if isinstance(steps, list) and steps and index == 0 else None
+    if query is None:
+        return Advice("sql_in_expression", explanation + " Written in the transform's first step, a filter or a "
+                                                          "derive, it is rewritten as that query.")
+    rewritten = [{"raw_query": {"sql": query}}, *copy.deepcopy(steps[1:])]
     return Advice("sql_in_expression", explanation + " The same request with that step as the query:",
-                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, transform=rewritten))])
+
+
+def _step_as_query(step: dict[str, Any], text: str, found: list[str]) -> str | None:
+    """A normalized filter or single derive whose expression is ``text``, as the equivalent query over input."""
+    kind = str(step.get("type") or "").lower()
+    body = next((step[k] for k in (kind, "compute") if isinstance(step.get(k), dict)), step)
+    if kind == "filter":
+        expression = next((v for k, v in {**step, **body}.items() if k in _FILTER_KEYS and isinstance(v, str)), None)
+        if expression != text:
+            return None
+        clause = "QUALIFY" if "a window function" in found else "WHERE"  # a window is filtered after it is computed
+        return f"SELECT * FROM input {clause} {text}"
+    if kind == "derive":
+        if isinstance(body.get("name"), str) and body.get("expression") == text:
+            name = body["name"]
+        elif len(body) == 1 and next(iter(body.values())) == text:
+            name = next(iter(body))
+        else:
+            return None
+        return f'SELECT *, {text} AS "{name}" FROM input'
+    return None
 
 
 _CAST_CALL_RE = re.compile(r"(?<![\w.])cast\s*\(", re.IGNORECASE)
@@ -386,9 +420,9 @@ def _cast_conversion(err: BackendError, tool: str, arguments: dict[str, Any]) ->
     changed = False
     for step in steps:
         for path, text in _expression_texts(step):
-            safe = _CAST_CALL_RE.sub("try_cast(", _POSTFIX_CAST_RE.sub(
-                lambda m: f"try_cast({m.group('operand')} as {m.group('type')})", text))
-            if safe == text or "::" in safe:
+            safe = _outside_literals(text, lambda code: _CAST_CALL_RE.sub("try_cast(", _POSTFIX_CAST_RE.sub(
+                lambda m: f"try_cast({m.group('operand')} as {m.group('type')})", code)))
+            if safe is None or safe == text or "::" in _STRING_LITERAL_RE.sub("", safe):
                 continue
             try:
                 parse_expression(safe)
@@ -1169,7 +1203,8 @@ def _join_key_types(err: BackendError, tool: str, arguments: dict[str, Any]) -> 
         return None
     left, right, target = facts["left"], facts["right"], facts["right_type"]
     cast = f"cast({_name_in_expression(left)} as {target})"
-    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), facts.get("steps"), facts.get("index")
+    resolution = err.resolution or {}
+    pairs, failed, steps, index = facts.get("pairs"), facts.get("failed"), resolution.get("steps"), resolution.get("index")
     located = (isinstance(steps, list) and isinstance(index, int) and 0 <= index < len(steps)
                and isinstance(pairs, list) and isinstance(failed, int)
                and all(isinstance(side, str) for pair in pairs for side in pair))
