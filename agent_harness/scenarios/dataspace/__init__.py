@@ -21,11 +21,17 @@ EVALUATOR = HERE / "evaluate.py"
 
 
 def benchmark_root(override: str | None = None) -> Path:
-    return Path(override or setting("DATASPACE_BENCHMARK", "$DATASPACE_BENCHMARK") or "").expanduser()
+    value = override or setting("DATASPACE_BENCHMARK")
+    if not value:
+        raise SystemExit("DATASPACE_BENCHMARK is not set (set it in the environment or in the repository .env)")
+    return Path(value).expanduser()
 
 
-def champion_root(override: str | None = None) -> Path:
-    return Path(override or setting("KDDCUP_CHAMPION", "$KDDCUP_CHAMPION") or "").expanduser()
+def champion_root(override: str | None = None) -> Path | None:
+    value = override or setting("KDDCUP_CHAMPION")
+    if not value:
+        return None
+    return Path(value).expanduser()
 
 
 def task_context(benchmark: Path, task: str) -> Path:

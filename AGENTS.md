@@ -56,7 +56,6 @@ perception extracts enters the backend only through `import_dataset` or
 | `README.md` | Detailed architecture, transform language, setup, MCP usage, examples, and next steps. |
 | `HANDOFF.md` | What a new agent reads, and in what order: documents, the last outcomes, the MADRs. |
 | `.inkan/` | Inkan sealed outcomes and decision records; follow the protocol below. |
-| `.seal/` | Frozen DriftSeal archive: `HISTORY.md` renders the 21 outcomes closed before the move to Inkan. Read-only history. |
 
 Runtime data belongs to the configured backend workspace: `metadata.sqlite`
 stores metadata, `analytics.duckdb` stores analytical tables, and `files/`

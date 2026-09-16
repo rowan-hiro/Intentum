@@ -151,7 +151,7 @@ reproduce the champion's preprocessing pipeline.
 | Setting | Champion | This harness for the new measurement |
 |---|---|---|
 | Visual model | `qwen3.5-35b-a3b` | `qwen/qwen3.5-35b-a3b`; same named model family, different serving system |
-| Gateway | `the champion's documented internal gateway` by default | Existing `the configured OpenAI-compatible gateway`; the reference address timed out during a 10 s `/models` connectivity check |
+| Gateway | The champion's documented internal gateway | The configured OpenAI-compatible gateway; the champion's documented address timed out during a 10 s `/models` connectivity check |
 | ASR weights | Offline `asr_models/medium`; `tiny` for the separate language probe | SHA256-verified `.cache/asr/champion/medium`; copied `tiny` remains available but unused |
 | ASR runtime | faster-whisper 1.2.1, local CPU/int8 | faster-whisper 1.2.1, local CPU/int8, four threads and one worker |
 | Decoding | Beam 5, VAD, word timestamps, no previous-text conditioning | Same; temperature fallback now explicitly `[0, 0.2, 0.4, 0.6, 0.8, 1.0]`, previously fixed at 0 |

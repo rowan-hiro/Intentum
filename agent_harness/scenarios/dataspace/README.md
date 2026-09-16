@@ -85,9 +85,9 @@ is 1920 instead of 1280. The full comparison, including the separate language
 probe, ASR prompting, normalization, slide selection and layout extraction
 that remain different, is in `../../perception/README.md`.
 
-The champion's default internal gateway timed out during a 10 s connectivity
+The champion's documented internal gateway timed out during a 10 s connectivity
 check. These runs used the configured `qwen/qwen3.5-35b-a3b` through
-`the configured OpenAI-compatible gateway`, with explicit user authorization to send
+the configured OpenAI-compatible gateway, with authorization to send
 public DataSpace data there. A fresh synthetic visual-code probe passed
 through this exact image/model path in 8.0 s. OpenCode was 1.18.26, image
 `intentum-opencode:1.18.26-media-bnw8`, id
@@ -170,8 +170,8 @@ frame tools. This check transcribed the video and imported the segments;
 it did **not** solve or rescore the task. The prior frame-only result below
 is unchanged.
 
-The user supplied existing weights under
-`the locally supplied champion ASR weights directory`.
+The user supplied existing weights from
+the locally supplied champion ASR weights directory.
 Both `medium` and `tiny` were copied to `.cache/asr/champion/`, with all four
 files per model SHA256-verified and the source directories untouched. The
 audio check used the copied `medium`; `tiny` was copied but not measured.
@@ -240,7 +240,7 @@ backend has no ASR dependency or recognition logic.
 
 One run passed the official evaluator: **242 rows, 3 columns**, and 1.0 from
 the champion comparison scorer. The same configured model,
-`qwen/qwen3.5-35b-a3b` through `the configured OpenAI-compatible gateway`, read the
+`qwen/qwen3.5-35b-a3b` through the configured OpenAI-compatible gateway, read the
 video images and drove the existing backend. No second model was introduced.
 
 The new `--video` option enables three harness MCP tools:
@@ -510,8 +510,8 @@ miss is luna's third run, which exported the treatments of another timestamp
 Conditions: source `c3205af`, image `intentum-opencode:1.18.26` rebuilt before
 the round, ID `sha256:1f9414f1b4ca0b218d5eab02a68f021ef8c24db6ad5b230f51a40c998f1bb7c6`,
 OpenCode 1.18.26, informed declaration framing, three sequential runs per task
-per tier with the runner's defaults and a 900 s timeout, through the same configured
-gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Since the
+per tier with the runner's defaults and a 900 s timeout, through the same
+configured gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Since the
 fifth round the backend gained the operation lock and the
 `derive_without_expression` detector (`c3205af`); prompt, framing, tool
 descriptions and runner are unchanged. Cost is computed from the recorded

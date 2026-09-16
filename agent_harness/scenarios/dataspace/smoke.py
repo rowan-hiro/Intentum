@@ -13,8 +13,8 @@ under runs/<task>/scripted/, a directory this layer owns; the model-driven
 layer writes under runs/<task>/agent/ and neither touches the other's.
 
 Settings (environment or the repository .env):
-    DATASPACE_BENCHMARK   benchmark package root (default $DATASPACE_BENCHMARK)
-    KDDCUP_CHAMPION       champion repo root, for the comparison scorer (default $KDDCUP_CHAMPION)
+    DATASPACE_BENCHMARK   required benchmark package root
+    KDDCUP_CHAMPION       optional champion repo root, for the comparison scorer
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from agent_harness.scenarios.dataspace.scoring import official_verdict, run_cham
 from agent_harness.scenarios.dataspace.scripted import SCRIPTS, run_script
 
 
-def run_task(task: str, benchmark: Path, champion: Path, out_root: Path | None) -> dict[str, Any]:
+def run_task(task: str, benchmark: Path, champion: Path | None, out_root: Path | None) -> dict[str, Any]:
     context_dir = task_context(benchmark, task)
     if not context_dir.is_dir():
         raise SystemExit(f"benchmark task not found: {context_dir}")

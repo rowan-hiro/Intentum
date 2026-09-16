@@ -34,8 +34,8 @@ Outcomes under Inkan (`inkan log` carries them), newest first:
   passes; `task_300` and `task_389` fail after substituting other tables for
   the requested data held in Markdown documents. All three read frames and
   transcribed speech. The local `.env` now enables video and champion medium
-  weights with the new image; the configured gateway remains in use because the
-  reference internal endpoint timed out. Read the newest DataSpace section
+  weights with the new image; the configured gateway remains in use because
+  the champion's documented internal endpoint timed out. Read the newest DataSpace section
   and the perception README comparison for evidence coverage and limits.
 - `2026-09-10-0911-ppn6` fixes the media review findings: frame reads use
   input seeking while preserving original PTS; audio bounds follow the
@@ -94,9 +94,8 @@ Outcomes under Inkan (`inkan log` carries them), newest first:
   the first claude-opus-5 round (`-0952-yjvm`: 3/3 and 3/3 where qwen had
   3/3 and 0/3).
 
-The outcomes named below closed under DriftSeal, before the repository moved
-to Inkan; `inkan log` does not carry them. Read them in `.seal/HISTORY.md`,
-which is the frozen rendering of that history.
+The outcomes named below closed before the repository moved to Inkan;
+`inkan log` does not carry them.
 
 - Outcome `2026-09-02-006` split the output contract in two (MADR 0012):
   `columns` is what the answer carries, `order_by` and the `one_per` keys are

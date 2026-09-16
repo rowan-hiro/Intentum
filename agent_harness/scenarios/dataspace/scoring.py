@@ -26,8 +26,10 @@ def run_official_evaluator(pred_root: Path, benchmark: Path, task: str, out_dir:
             "stderr": proc.stderr[-2000:], "summary": summary}
 
 
-def run_champion_scorer(pred_root: Path, benchmark: Path, task: str, champion: Path) -> dict[str, Any] | None:
+def run_champion_scorer(pred_root: Path, benchmark: Path, task: str, champion: Path | None) -> dict[str, Any] | None:
     """The champion repository's column-signature scorer, run in its own environment; None when absent."""
+    if champion is None:
+        return None
     scorer = champion / "src" / "data_agent_baseline" / "run_compare_to_gt.py"
     if not scorer.exists():
         return None

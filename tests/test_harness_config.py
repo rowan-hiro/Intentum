@@ -77,6 +77,15 @@ def test_bad_weights_fail_before_starting_or_replacing_a_run(configured_runner, 
     assert evidence.read_text() == "keep this run"
 
 
+def test_missing_benchmark_path_is_reported(monkeypatch):
+    monkeypatch.setattr(config, "load_env_file", lambda: {})
+    monkeypatch.delenv("DATASPACE_BENCHMARK", raising=False)
+    from agent_harness.scenarios.dataspace import benchmark_root
+
+    with pytest.raises(SystemExit, match="DATASPACE_BENCHMARK"):
+        benchmark_root()
+
+
 def test_invalid_media_toggle_is_reported(configured_runner, monkeypatch, capsys):
     monkeypatch.setenv("HARNESS_VIDEO", "treu")
     monkeypatch.setattr(sys, "argv", ["agent", "--check-config"])
