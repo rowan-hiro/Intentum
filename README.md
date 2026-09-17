@@ -1,5 +1,8 @@
 # Agent-ready backend
 
+Sealed outcomes in this repository are recorded with
+[Inkan](https://github.com/rowan-hiro/inkan).
+
 A prototype execution substrate that sits between a probabilistic AI agent and
 deterministic data systems. The agent expresses **intent**; the backend
 resolves it into a **canonical operation**, validates it, plans it, executes it
