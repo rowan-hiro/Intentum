@@ -833,3 +833,13 @@ imports in ~2 s and the task's query runs through the semantic steps.
    before any step runs, with compensation in the shape of MADR 0001 where
    the world does not allow atomicity. Whether to ask the user before
    committing is the host's policy (MADR 0008), not the backend's.
+
+## 8. License
+
+This repository is offered under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+Personal, research, educational, and other noncommercial use is permitted.
+Commercial use is not.
+
+`agent_harness/scenarios/dataspace/evaluate.py` is vendored from
+[HKUSTDial/DataSpace](https://github.com/HKUSTDial/DataSpace) and remains
+under its original MIT license.
