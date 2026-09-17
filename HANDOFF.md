@@ -34,8 +34,8 @@ Outcomes under Inkan (`inkan log` carries them), newest first:
   passes; `task_300` and `task_389` fail after substituting other tables for
   the requested data held in Markdown documents. All three read frames and
   transcribed speech. The local `.env` now enables video and champion medium
-  weights with the new image; the configured gateway remains in use because
-  the champion's documented internal endpoint timed out. Read the newest DataSpace section
+  weights with the new image; the Kilo gateway remains in use because the
+  reference internal endpoint timed out. Read the newest DataSpace section
   and the perception README comparison for evidence coverage and limits.
 - `2026-09-10-0911-ppn6` fixes the media review findings: frame reads use
   input seeking while preserving original PTS; audio bounds follow the
