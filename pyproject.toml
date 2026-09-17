@@ -3,6 +3,7 @@ name = "agent-backend"
 version = "0.1.0"
 description = "Agent-ready backend: a semantic, deterministic execution substrate between AI agents and data systems"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.0",
