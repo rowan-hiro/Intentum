@@ -87,7 +87,7 @@ that remain different, is in `../../perception/README.md`.
 
 The champion's documented internal gateway timed out during a 10 s connectivity
 check. These runs used the configured `qwen/qwen3.5-35b-a3b` through
-the configured OpenAI-compatible gateway, with authorization to send
+`https://api.kilo.ai/api/gateway`, with explicit user authorization to send
 public DataSpace data there. A fresh synthetic visual-code probe passed
 through this exact image/model path in 8.0 s. OpenCode was 1.18.26, image
 `intentum-opencode:1.18.26-media-bnw8`, id
@@ -240,7 +240,7 @@ backend has no ASR dependency or recognition logic.
 
 One run passed the official evaluator: **242 rows, 3 columns**, and 1.0 from
 the champion comparison scorer. The same configured model,
-`qwen/qwen3.5-35b-a3b` through the configured OpenAI-compatible gateway, read the
+`qwen/qwen3.5-35b-a3b` through `https://api.kilo.ai/api/gateway`, read the
 video images and drove the existing backend. No second model was introduced.
 
 The new `--video` option enables three harness MCP tools:
@@ -510,8 +510,8 @@ miss is luna's third run, which exported the treatments of another timestamp
 Conditions: source `c3205af`, image `intentum-opencode:1.18.26` rebuilt before
 the round, ID `sha256:1f9414f1b4ca0b218d5eab02a68f021ef8c24db6ad5b230f51a40c998f1bb7c6`,
 OpenCode 1.18.26, informed declaration framing, three sequential runs per task
-per tier with the runner's defaults and a 900 s timeout, through the same
-configured gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Since the
+per tier with the runner's defaults and a 900 s timeout, through the same Kilo
+gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Since the
 fifth round the backend gained the operation lock and the
 `derive_without_expression` detector (`c3205af`); prompt, framing, tool
 descriptions and runner are unchanged. Cost is computed from the recorded
@@ -661,7 +661,7 @@ Conditions: source `d7a7eb5`, image `intentum-opencode:1.18.26` rebuilt before
 the round, ID `sha256:ed49111a98657ac43d131acbcedcf00c25d09f6f59cd2bb1c9de794df72d7223`,
 OpenCode 1.18.26, informed declaration framing, three sequential runs per task
 per model with the runner's defaults and a 900 s timeout, all through the same
-configured gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Cost is
+Kilo gateway and provider block with only `DEFAULT_MODEL_NAME` changed. Cost is
 computed from the recorded tokens at the gateway's list prices on this day
 (qwen $0.1625 / $1.30 per million input / output; opus $5 / $25 with cache reads
 at $0.50; gpt-5.6-luna $0.20 / $1.20 with cache reads at $0.02), reasoning
@@ -862,7 +862,7 @@ since, `66f9a0f` and `4588056`, changed READMEs only), the same image
 `intentum-opencode:1.18.26` with the ID recorded in the third round
 (`sha256:191e4f56…`), OpenCode 1.18.26, informed declaration framing, three
 sequential runs per task with the runner's defaults and a 900 s timeout. The
-model reached the container through the same configured gateway and the same
+model reached the container through the same Kilo gateway and the same
 OpenAI-compatible provider block; only `DEFAULT_MODEL_NAME` differed, set in the
 environment of the two commands below. No backend, prompt, runner, host or
 evaluator code was changed. The third round, qwen on the same source, is the
@@ -1488,7 +1488,7 @@ round.
 ## 2026-09-02 · task_44 after the harness split, before advice
 
 The harness moved to `agent_harness/` with framing, scripts and scoring
-unchanged. The model is `qwen/qwen3.5-35b-a3b` through the configured gateway, which
+unchanged. The model is `qwen/qwen3.5-35b-a3b` through the Kilo gateway, which
 reports no cost, so the cost column is absent from here on. Three runs on
 `task_44`:
 
