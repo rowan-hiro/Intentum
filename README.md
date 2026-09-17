@@ -3,6 +3,8 @@
 Sealed outcomes in this repository are recorded with
 [Inkan](https://github.com/rowan-hiro/inkan).
 
+![Intentum: Semantic intent. Deterministic data operations.](docs/promo/intentum-hero.png)
+
 A prototype execution substrate that sits between a probabilistic AI agent and
 deterministic data systems. The agent expresses **intent**; the backend
 resolves it into a **canonical operation**, validates it, plans it, executes it
@@ -26,6 +28,15 @@ files and storage primitives directly.
 
 ## 1. Architecture
 
+![The agent harness connects through MCP tools to the Intentum backend, backed by DuckDB, SQLite, and managed files.](docs/promo/intentum-architecture.png)
+
+The successful materialized-transform path follows six stages:
+
+![Resolve, Canonical IR, Validate, Plan, Execute, and Commit, with refusal advice and metadata-commit failure compensation.](docs/promo/intentum-execution-flow.png)
+
+<details>
+<summary>Text pipeline and implementation details</summary>
+
 ```
 loose intent (MCP tool call)
    │  {"source": "yesterday's sales", "transform": {"group_by": ["region"], "metric": "revenue"}}
@@ -47,6 +58,8 @@ Commit       core/backend      one SQLite transaction: dataset + columns + versi
    ▼
 structured response            success | needs_resolution | error{code, message, hint, candidates, recoverable}
 ```
+
+</details>
 
 Key properties, all enforced in software rather than in prompts:
 
