@@ -7,8 +7,8 @@ to start.
    `CLAUDE.md` is a symlink to it.
 2. `README.md` — architecture. Sections 1 ("Output contracts", "Transform
    language", "Exporting an answer", "Failure semantics"), 2 (the two
-   packages and the boundary between them) and 7 ("What to implement next")
-   are the ones that matter.
+   packages and the boundary between them) and 7 ("Implementation status
+   and next steps") are the ones that matter.
 3. `agent_harness/scenarios/dataspace/README.md` — the validation
    measurements, newest first. The 2026-09-10 sections carry the audio check
    and first video-frame run on `task_312`, model rounds five to seven
@@ -146,8 +146,8 @@ MADRs, in reading order (`.inkan/decisions/`):
   the backend holds the export to it.
 - `0003` — the DataSpace sequence and, in its Decision History, what came
   next at each measurement.
-- `0002` — the deferred `raw_query` fallback, and why the subquery shape the
-  model reaches for is a semi-join, not that.
+- `0002` — the implemented read-only `raw_query` fallback, its sandbox and
+  deadline limits, and why membership queries use the semantic `semi_join` step.
 
 `0001`, `0005` and `0006` only matter if you touch commit semantics, export
 rendering or import-time temporal refinement.

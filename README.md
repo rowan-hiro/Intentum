@@ -40,7 +40,7 @@ Validate     core/validation   re-derives every type and schema with the shared 
    ▼
 Plan         core/planner      explicit, inspectable step list: Scan → HashAggregate → Materialize → RegisterLineage → Audit
    │
-Execute      core/execution    IR → SQL (internal IR only) → DuckDB; CREATE TABLE AS or preview query
+Execute      core/execution    canonical IR → DuckDB (compiled semantic steps or sandboxed raw_query); materialize or preview
    │
 Commit       core/backend      one SQLite transaction: dataset + columns + version + lineage + audit + operation + idempotency key
    │                           failure after execution ⇒ physical table dropped (compensation)
@@ -140,7 +140,8 @@ explicit list of steps always keeps the written order:
 ```
 
 Step types: `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`,
-`derive`, `join`, `semi_join`, and `raw_query`, the fallback described below.
+`derive`, `join`, `semi_join`, and [`raw_query`](#raw-query-fallback), the
+implemented SQL fallback.
 A step may also be written without `type` when its key names
 it, so `[{"filter": "amount > 100"}, {"sort": "-amount"}, {"limit": 3}]` is a
 pipeline and `{"aggregate": {"group_by": [...], "measures": [...]}}` is an
@@ -181,7 +182,10 @@ and reported as a resolution note; a type error names the signature it
 expected. There is no SQL passthrough in expressions; SQL enters only as a
 `raw_query` step.
 
-`raw_query` is the fallback for shapes the other steps cannot express: a
+### Raw query fallback
+
+`raw_query` is implemented as a step in `transform_dataset` and
+`materialize_result`. It handles shapes the other steps cannot express: a
 window over groups (the latest order per customer), every row tied at an
 extremum, a union of same-shaped datasets (MADR 0002). The semantic steps stay
 the primary language. Every response that used a `raw_query` carries
@@ -567,8 +571,9 @@ Claude Code: `claude mcp add agent-backend -- uv run --directory /abs/path/to/In
 `distinct` counts for every column, and `min` and `max` for numeric and temporal
 ones, from one scan of the current version, so repetition (a count of entities
 against a count of rows) and gaps show without an exploratory query;
-`profile=false` leaves it out, and a dataset wider than 300 columns is described
-without it and says so.
+`profile=false` leaves it out. A dataset wider than 300 columns or without a
+physical version is described without a profile and says why. Ranges are
+omitted when either bound is null or non-finite.
 
 Tools exposed (all semantic; no SQL tool, since read-only SQL enters only as the
 `raw_query` step of a transform, and no file or table primitives):
@@ -715,80 +720,50 @@ the canonical IR, the full execution plan and the generated SQL.
   replay of the recorded IR, `explain`, lineage and the operation record;
   the sandbox refusing file, network and setting access on its own, the
   deadline, the `--query-timeout` flag and the MCP surface.
+- `test_profile.py`: per-column non-null and distinct counts, finite numeric
+  and temporal ranges, profile opt-out, wide datasets, and JSON-safe
+  non-finite values.
 
 Each state-changing test finishes by checking `Backend.integrity_report()`,
 which cross-checks metadata versions, DuckDB tables, row counts, orphan tables
 and pending operations.
 
-## 7. What to implement next
+## 7. Implementation status and next steps
 
-The backend is being validated on the [DataSpace](https://github.com/BugMaker-Boyan/DataSpace)
-benchmark (410 heterogeneous task workspaces) against the KDD Cup 2026 champion
-pipeline as baseline; see `.inkan/decisions/0003-*` for the sequence. Unicode
-identifiers, `import_workspace` and `attach_metadata` are done; a real
-`task_10` workspace (8 csv, 8 sqlite tables, 1 wrapper json, knowledge.md)
-imports in ~2 s and the task's query runs through the semantic steps.
+### Implemented
 
-0. **DataSpace smoke tests** — four public-reference tasks (`task_10`,
-   `task_44`, `task_127`, `task_329`) run in both layers.
-   `python -m agent_harness.scenarios.dataspace.smoke --task all --check` (scripted agent, six or
-   seven MCP tool calls per task, each declaring its output contract first)
-   passes the official evaluator on all four; `python -m agent_harness.scenarios.dataspace.agent`
-   (qwen3.5-35b-a3b through the MCP tools, no SQL or dialect rules in the
-   prompt) passes 3/3 on `task_10` and `task_127`. The third measurement
-   (2026-08-30, `agent_harness/scenarios/dataspace/README.md`) re-ran `task_44` and
-   `task_329` after the output contract and the vocabulary the second
-   measurement asked for: the `strftime` refusals are gone, turns and tokens
-   fell on both tasks, and five of six runs again exported the correct values
-   with extra columns — this time columns the agent had *declared*, so the
-   contract check passed on a misread question, and the declarations came
-   late (turns 7–28) rather than fresh. The declaration-first experiment on
-   2026-08-31 moved declarations to turns 1–3 without changing the model's
-   mistaken answer shapes; the result confirms the trust boundary rather than
-   fixing the reading. Compound post-aggregate projection, measureless
-   grouping as distinct, and a lineage-preserving `semi_join` now cover the
-   three general vocabulary findings; the post-semi-join run on `task_44`
-   (2026-08-31) stayed 0/3: one run reached for `semi_join` on the wrong stay
-   identifier, one exported the right values with a declared helper column,
-   so the remaining gap is the model's reading and relationship choice, not
-   backend expressiveness. Most DataSpace workspaces also carry PDFs (384 of
-   410) or video (189); reading them is the harness's job
-   (`agent_harness/perception/`, MADR 0009). The first video-frame reader
-   passed one `task_312` run on 2026-09-10, but the agent skipped saving its
-   observation; the next gap is getting cited observations into the backend
-   before dependent operations. Offline audio transcription is now available
-   in the harness; its first audio-only check imported 12 speech segments
-   from the same video. The
-   2026-09-02 runs showed that refusals never named the accepted shape and that
-   silent failures (empty previews, an unexported correct preview) went
-   unremarked; `core/recovery` now answers both with structured advice and
-   rewrites (MADR 0010), and the harness reports refusals without advice and
-   the repair rate beside the pass rate, so convergence is measured rather than
-   read off task by task. With advice in place the model-driven layer
-   exported the correct `task_44` values in five of six runs and scored its
-   first official pass on that task (1/3 on 2026-09-02), the passing run
-   having declared its output after seeing the data rather than first. The
-   runner therefore has two framings, `--declaration fresh` (declare before
-   exploring) and `--declaration informed` (declare once a preview shows the
-   answer rows), measured against each other in the DataSpace README: on
-   twelve runs the informed declarations named the gold shape three times out
-   of six against one for fresh, and passes went from 1/6 to 3/6, so
-   `informed` is the default. The runner now hands the loop to OpenCode in a
-   container by default (`--host opencode`, MADR 0011): the model sees only
-   the backend's MCP tools, nothing of the machine reaches its prompt, and the
-   same record and metrics come out of its event stream. Measured against the
-   in-process loop on the same day, the host changed no verdict on `task_44`
-   (2/3 under both) and cost 0/3 against 1/3 on `task_329`, within noise at
-   three runs; the with-and-without-backend comparison on one host is the next
-   experiment. Rounds five to seven (2026-09-10) put eight models of two
-   families on the same prompt and tooling after the advice gap was closed;
-   the two-family table and what separates the models (one reading in the
-   declaration step, not the language or the price) are in the DataSpace
-   README. The validated read-only `raw_query` fallback step of MADR 0002 is
-   implemented for the long tail; nothing measured so far has needed it, and
-   responses flag `used_raw_query` so the next measurements count when the
-   semantic steps fall short. DataSpace is a validation scenario, not the goal
-   (MADR 0004).
+These capabilities are available in the current code:
+
+| Area | Available now |
+|---|---|
+| Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
+| Semantic transforms | `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`, `derive`, `join`, and `semi_join`; grouping without measures returns distinct groups, and compact transforms handle post-aggregate projection. |
+| [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
+| [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |
+| [Recovery advice](#failure-semantics) | Structured advice on refusals, mechanical tool-call rewrites, and advice for empty results or results matching the declared contract. |
+| Dataset profiles | `describe_dataset` returns non-null/distinct counts and finite numeric/temporal ranges, with explicit opt-out and scan limits. |
+| Operation lifecycle | Materialization, publish, soft delete/restore, metadata updates, provenance, audit, failure compensation and idempotent replay. Calls sharing one `Backend` instance are serialized. |
+| Agent harness | Containerized OpenCode host plus the in-process control loop; optional timestamped video frames, offline speech transcription and importable observations. Perception stays in `agent_harness`, outside the backend and wheel. |
+
+### Validation and remaining experiments
+
+[DataSpace](https://github.com/BugMaker-Boyan/DataSpace) is a validation
+scenario, not the product (MADR 0004). The scripted smoke runner and
+model-driven runner are implemented. Their dated measurements, model and
+gateway settings, pass rates and failure analyses live in the
+[DataSpace README](agent_harness/scenarios/dataspace/README.md); those results
+apply to the recorded runs, not every model or all 410 tasks.
+
+The [perception README](agent_harness/perception/README.md) documents the
+available media tools, their validation and the remaining differences from
+the champion's preprocessing. Further harness work includes document reading,
+getting cited observations imported before dependent operations, and a
+controlled comparison with and without the backend on the same host.
+`raw_query` is already available; future measurements should use
+`used_raw_query` to identify recurring gaps in the semantic vocabulary.
+
+### Remaining backend work
+
 1. **Dataset versioning on write**: `replace_dataset` / re-import creating
    version N+1 with the previous table retained; the schema for versions is in
    place, only the operation is missing.
@@ -806,21 +781,13 @@ imports in ~2 s and the task's query runs through the semantic steps.
    after a `needs_resolution` round-trip so the same reference resolves next time.
 6. **Richer semantic layer**: user-defined metrics (`revenue := sum(amount)`),
    column-level lineage, unit/currency metadata used by the type rules.
-7. **Concurrency**: within one process, semantic operations are serialized on
-   the backend's re-entrant lock, because an agent may send several tool
-   calls in one step and the MCP server runs them on worker threads while the
-   backend holds one SQLite connection and one DuckDB connection (the first
-   model that called tools in parallel, `gpt-5.6-luna` on 2026-09-10, hit an
-   `InterfaceError` before this). The SQLite store uses `BEGIN IMMEDIATE` and
-   DuckDB runs single-process; multi-writer deployments need a server-side
-   queue or PostgreSQL advisory locks around materialization.
-8. **Protocol-level input errors**: the loose-shaped arguments of the
-   transform tools (`source`, `transform`) are typed loosely at the MCP layer
-   so that a JSON string or a relation written there reaches the backend and
-   is refused with advice, and `transform` is optional at the schema so that
-   its absence is refused by the backend with advice rather than by the SDK; a
-   wrong-typed scalar argument is still reported by the MCP SDK with pydantic
-   text, and mapping those to the structured error shape is what remains.
+7. **Multi-writer concurrency**: calls on one backend instance are already
+   serialized; multi-writer deployments still need coordination around
+   materialization, such as a server-side queue or PostgreSQL advisory locks.
+8. **Protocol-level input errors**: loose transform arguments already reach
+   backend validation and recovery advice. Wrong-typed scalar arguments still
+   produce MCP SDK pydantic errors; mapping those to the backend's structured
+   error shape remains to be done.
 9. **Reversibility as a property of each call**: on the data side regret is
    cheap. A transform creates a new dataset rather than replacing one,
    `delete_dataset` has `restore_dataset`, and a failed operation drops its
