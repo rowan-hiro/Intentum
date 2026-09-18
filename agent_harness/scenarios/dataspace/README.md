@@ -735,7 +735,7 @@ What the refusals were, and what happened after them:
   the backend shares one SQLite connection opened with `check_same_thread`
   off and no lock around it. This is the first model in the measurements
   that calls tools in parallel, and it exposes a concurrency defect in the
-  server, not in the language; root README §7 item 7 names multi-writer
+  server, not in the language; root README §7 item 12 names multi-writer
   deployments, and this is the single-process case. The run recovered on
   its own (the same call succeeded a step later).
 - gpt-5.6-luna on `task_44` filtered `treatment` on a wrong stay id

@@ -90,7 +90,7 @@ Outcomes under Inkan (`inkan log` carries them), newest first:
 - The 2026-09-09 outcomes measured MADR 0012 (`-0711-905x`, `-0748-cy16`,
   `-0834-7ms3`, with `-0738-rz35` answering a name given as both carried and
   organizing and `-0822-br58` letting agents review a declaration),
-  recorded reversibility as README section 7 item 9 (`-0900-srhn`), and ran
+  recorded reversibility in README section 7, now item 6 (`-0900-srhn`), and ran
   the first claude-opus-5 round (`-0952-yjvm`: 3/3 and 3/3 where qwen had
   3/3 and 0/3).
 

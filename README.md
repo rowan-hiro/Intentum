@@ -1,30 +1,131 @@
-# Agent-ready backend
+# Intentum
 
 Sealed outcomes in this repository are recorded with
 [Inkan](https://github.com/rowan-hiro/inkan).
 
 ![Intentum: Semantic intent. Deterministic data operations.](docs/promo/intentum-hero.png)
 
-A prototype execution substrate that sits between a probabilistic AI agent and
-deterministic data systems. The agent expresses **intent**; the backend
-resolves it into a **canonical operation**, validates it, plans it, executes it
-deterministically, commits it atomically, and returns a structured result.
+**An intent runtime for AI agents.** Agents declare intent. Intentum compiles
+it, checks it, executes it once, and keeps the record.
 
-> Agent expresses intent. Backend owns correctness.
+> Agent expresses intent. Intentum owns correctness.
 
-What the backend owns is consistency, not the truth of the task: it never sees
-the question the agent is answering, so it takes the agent's *fresh* output —
-how it read the requirement, what it just computed — as given, and holds the
-agent to everything it later reproduces from memory. An export is checked
-against the output contract declared at the start; a replayed request against
-its recorded fingerprint. The failure this exists to catch is *knew but did
-not do*; *did not know* belongs to the model and the agent framework
-(`.inkan/decisions/0004`, `0007`, `0008`).
+An agent is probabilistic; the systems it acts on are not. Intentum is the
+layer between the two. The agent never touches SQL, files, identifiers or
+storage: it sends a loose intent through a small set of MCP tools, and the
+runtime resolves it into a canonical operation, validates it, plans it,
+executes it deterministically, commits it atomically and returns a structured
+result. What comes back is not only the result but the record: how every
+fuzzy reference was resolved, what was executed, and what the agent had
+declared it was going to deliver.
+
+This component was first called an agent-ready backend, and the Python
+package is still `agent_backend`; the text below says "the backend" wherever
+the runtime's process stands opposite the agent harness. The category name
+changed because a backend waits to be called, and this one refuses, teaches,
+holds the agent to its word and undoes its own work. Inkan, which this
+repository uses for its own work, rests on the same idea one level up: what
+the work is meant to deliver is written down before it starts, and what was
+delivered is declared against it at the end. Intentum is that idea at the
+tool-call boundary.
+
+## What a database behind an MCP server does not do
+
+Put DuckDB behind an MCP server and an agent can run SQL. Intentum is built
+so that four things hold that a SQL tool cannot give.
+
+### A closed language, taught on refusal
+
+The tools expose no SQL and no file or table primitives. A transform is
+written in a small step vocabulary (`select`, `filter`, `aggregate`, `sort`,
+`limit`, `rename`, `derive`, `join`, `semi_join`), with one read-only
+`raw_query` step as the long-tail fallback, sandboxed, version-bound and
+recorded like any other step (MADR 0002). What an agent may write is an open
+set; what the runtime accepts is small and closed. So every refusal is mapped
+onto the nearest accepted shape and answered with three things: what was
+read, what is accepted at that point, and, when the mapping is mechanical,
+the agent's own request rewritten as the tool calls to send as-is
+(MADR 0010). Two silent failures on *successful* responses get the same
+treatment: an empty result whose filter literal occurs nowhere in the
+filtered column, and a result that already fits the declared deliverable.
+Convergence is measured rather than assumed: the harness reports refusals
+without advice and the repair rate beside the pass rate.
+
+### The deliverable is declared before the work, and the export is held to it
+
+`declare_output` records the shape of the answer while the requirement is in
+front of the agent: the columns the file carries, the row cardinality, and
+what it is organized by (MADR 0007, 0012). `export_result` checks the dataset
+against that contract before anything is read or written, refuses a mismatch
+with the declared and the actual shape and the transform that repairs it, and
+records a match with its evidence. The declaration is made at turn one; the
+export is attempted twenty turns later; the check runs outside the agent's
+context.
+
+### Fresh output is trusted; recalled output is checked
+
+The runtime never sees the task, so it cannot judge the agent's first reading
+of anything. It can judge consistency, because it keeps the record. The
+agent's fresh output, produced while the subject is in front of it, is
+accepted as given. Anything the agent re-enters from earlier turns, a shape, a
+value, a request, is verified against the runtime's own records before it
+takes effect: an export against the declared contract, a replayed request
+against its recorded fingerprint, a re-declaration against the open one. A
+change the runtime cannot verify, such as an amended contract, needs a stated
+reason and is recorded with the shape before and after (MADR 0008). The
+design rule that follows: the agent's context is not a store. Anything that
+must survive turns lives in the runtime and is used by reference, a dataset,
+a version, a contract, an operation.
+
+### Every operation is an intent record
+
+An operation row is written `pending` before any work, updated with the
+canonical IR and the plan before execution, and finalized in the same
+transaction as the dataset, its columns, its version, its lineage edges and
+its audit event. A replay of the same request returns the recorded response;
+a failure after execution drops the physical table (MADR 0001). Provenance
+reads back as the intent that was sent, the IR it became and the plan that
+ran, so a reviewer reads what the agent meant rather than the SQL it would
+have written.
+
+## What it does not do
+
+What the runtime owns is consistency, not the truth of the task. It never
+sees the question the agent is answering, so it takes the agent's reading of
+the requirement, and what it just computed, as given, and holds the agent to
+everything it later reproduces from memory. A wrong first reading is enforced
+as faithfully as a right one. The failure this exists to catch is *knew but
+did not do*; *did not know* belongs to the model and the agent framework
+(MADR 0004, 0007, 0008).
+
+## The hypothesis and what the measurements say
 
 Research hypothesis under test: a general-purpose agent interacts with a
-structured data system more reliably through a small semantic intent interface
-plus a deterministic backend than by manipulating SQL, JSON, Markdown, metadata
-files and storage primitives directly.
+structured data system more reliably through a small semantic intent
+interface plus a deterministic runtime than by manipulating SQL, JSON,
+Markdown, metadata files and storage primitives directly.
+
+The recorded DataSpace rounds, dated and with their model and gateway
+settings in the
+[DataSpace README](agent_harness/scenarios/dataspace/README.md), say this
+much so far: the language is used equally well by every model measured,
+refusals are advised and taken, and the failure that remains is a reading
+made in the declaration step, at every price. Those results apply to the
+recorded runs, not to every model or every task. The controlled comparison
+with and without the runtime on the same host is the experiment that would
+attribute the passes to the runtime rather than to the model, and it has not
+been run.
+
+## Data is the first domain
+
+The pipeline, the output contract, the trust model, teach-on-refusal,
+idempotency, lineage, audit and compensation are not ideas about data; their
+implementations here are shaped by the first domain. What is about data is
+the step vocabulary, the expression language, the import formats and DuckDB.
+Benchmarks such as DataSpace validate the runtime and do not define it
+(MADR 0004); the same record sets the test for what comes next: a second
+scenario, in another domain with another agent, needs no core changes.
+Section 7 names the candidate.
 
 ## 1. Architecture
 
@@ -771,37 +872,65 @@ The [perception README](agent_harness/perception/README.md) documents the
 available media tools, their validation and the remaining differences from
 the champion's preprocessing. Further harness work includes document reading,
 getting cited observations imported before dependent operations, and a
-controlled comparison with and without the backend on the same host.
-`raw_query` is already available; future measurements should use
-`used_raw_query` to identify recurring gaps in the semantic vocabulary.
+controlled comparison with and without the backend on the same host, the
+experiment that would attribute the recorded passes to the backend rather
+than to the model. `raw_query` is already available; future measurements
+should use `used_raw_query` to identify recurring gaps in the semantic
+vocabulary.
 
-### Remaining backend work
+### Next, within data analysis: from running the query to checking the answer
 
-1. **Dataset versioning on write**: `replace_dataset` / re-import creating
-   version N+1 with the previous table retained; the schema for versions is in
-   place, only the operation is missing.
-2. **Time-travel and lineage-aware reads**: `describe_dataset(version=…)`,
-   downstream impact reports before delete/replace.
-3. **Promote recurring raw_query shapes to steps**: ad-hoc analysis that does
-   not fit the step vocabulary now runs as a `raw_query` (MADR 0002); a shape
-   that recurs under `used_raw_query` (latest row per group, a tie-aware
-   extremum, a union) is the candidate for a semantic step with the
-   expression language's own validation.
-4. **Storage backends**: PostgreSQL `MetadataStore`, Parquet-on-object-storage
-   for versions; the protocols are in place, the SQLite/DuckDB code is the only
-   implementation.
-5. **Resolver learning from feedback**: persist chosen candidates as aliases
-   after a `needs_resolution` round-trip so the same reference resolves next time.
-6. **Richer semantic layer**: user-defined metrics (`revenue := sum(amount)`),
-   column-level lineage, unit/currency metadata used by the type rules.
-7. **Multi-writer concurrency**: calls on one backend instance are already
-   serialized; multi-writer deployments still need coordination around
-   materialization, such as a server-side queue or PostgreSQL advisory locks.
-8. **Protocol-level input errors**: loose transform arguments already reach
-   backend validation and recovery advice. Wrong-typed scalar arguments still
-   produce MCP SDK pydantic errors; mapping those to the backend's structured
-   error shape remains to be done.
-9. **Reversibility as a property of each call**: on the data side regret is
+The measurements say the language is no longer where the runs fail. What is
+left on the data domain gives the backend more to check without letting it
+read the task: it holds the data facts and the agent's declarations, and those
+are enough to name more of the errors that enter silently.
+
+1. **Silent-failure signals on successful responses.** The two signals that
+   exist, `value_not_found` and `matches_contract` / `near_contract`, come
+   from one rule: the backend reports its own data facts and never reads the
+   task. The next signals are the mistakes an agent makes without noticing
+   and the backend can see: a join that multiplies the left rows (the row
+   count before and after, and the duplicated key), a join key that matches a
+   small share of the left rows, a `one_per` key that is not unique in the
+   result, a measure that adds a column to one whose declared unit differs
+   (`attach_metadata` already records units), and a well-typed filter that
+   keeps nothing although its literal does occur in the column. Each is a
+   fact about the workspace, attached to a successful response, never a
+   judgement about the task.
+2. **Contracts from shape to values.** `declare_output` records what the
+   answer carries and what it is organized by. The same declaration can carry
+   checks about values, written fresh while the requirement is in front of the
+   agent and verified at export by the machinery that checks the shape: a
+   column that is never null, a value inside a range, a total that reconciles
+   with a source column, a row count that relates to a source in a stated way.
+   A failed check is a `CONTRACT_MISMATCH` with the evidence. The backend
+   still never reads the task; it holds the agent to what the agent wrote
+   down.
+3. **Semantic contracts from the human side.** The semantic layer is the
+   human's declaration, as the output contract is the agent's.
+   `attach_metadata` already ingests descriptions and units from a knowledge
+   document. Metric definitions (`revenue := sum(amount)`) would make it a
+   contract: the agent references `revenue` and the backend expands it, and
+   an aggregate that computes revenue differently is refused with the
+   definition as advice. Units used by the type rules and column-level
+   lineage belong to the same layer.
+4. **Provenance to the value.** `get_provenance` returns the operation and
+   the inputs that produced a dataset. Column-level lineage, reads of an
+   earlier version (`describe_dataset(version=…)`) and a downstream impact
+   report before a delete or replace lead to the question a reviewer asks,
+   how this number came about, answered as the intent, the step and the
+   source rows it came from.
+5. **Resume by reference.** The agent's context is not a store (MADR 0008),
+   so a fresh agent, or the same one after its context was reset, should be
+   able to ask the workspace what is declared, what is done and what is still
+   open, in the terms the backend holds them: the open contract, the
+   operations and their status, the datasets they produced. Today that state
+   is spread over `get_output_contract`, `list_datasets` and `get_operation`;
+   one call that returns the handoff is the remaining piece.
+
+### Next, beyond data: the same substrate for a second domain
+
+6. **Reversibility as a property of each call.** On the data side regret is
    cheap. A transform creates a new dataset rather than replacing one,
    `delete_dataset` has `restore_dataset`, and a failed operation drops its
    own table. The one call that cannot be undone is `export_result` with
@@ -816,6 +945,42 @@ controlled comparison with and without the backend on the same host.
    before any step runs, with compensation in the shape of MADR 0001 where
    the world does not allow atomicity. Whether to ask the user before
    committing is the host's policy (MADR 0008), not the backend's.
+7. **A domain protocol.** The pipeline, the contracts, the trust model,
+   teach-on-refusal, idempotency, audit and compensation do not depend on the
+   data domain; the step vocabulary, the expression language, the import
+   formats and DuckDB do. The generalization is a protocol a domain
+   implements: a resolver (loose references to identifiers), a closed IR, a
+   validator, an executor and an undo, with the shared machinery doing the
+   rest. The first candidate is an outbox of side effects, messages and
+   calendar entries: small, stateful, with a clear undo where one exists and a
+   clear commit where none does, which is what the write-ahead operation
+   record and the gated commit of item 6 are for. Whether the shared machinery
+   comes out without changing what the data domain does is the check
+   MADR 0004 sets, and the second domain's measurements come from its own
+   scenario under `agent_harness`.
+
+### Groundwork
+
+8. **Dataset versioning on write**: `replace_dataset` / re-import creating
+   version N+1 with the previous table retained; the schema for versions is in
+   place, only the operation is missing.
+9. **Promote recurring raw_query shapes to steps**: ad-hoc analysis that does
+   not fit the step vocabulary now runs as a `raw_query` (MADR 0002); a shape
+   that recurs under `used_raw_query` (latest row per group, a tie-aware
+   extremum, a union) is the candidate for a semantic step with the
+   expression language's own validation.
+10. **Storage backends**: PostgreSQL `MetadataStore`, Parquet-on-object-storage
+    for versions; the protocols are in place, the SQLite/DuckDB code is the only
+    implementation.
+11. **Resolver learning from feedback**: persist chosen candidates as aliases
+    after a `needs_resolution` round-trip so the same reference resolves next time.
+12. **Multi-writer concurrency**: calls on one backend instance are already
+    serialized; multi-writer deployments still need coordination around
+    materialization, such as a server-side queue or PostgreSQL advisory locks.
+13. **Protocol-level input errors**: loose transform arguments already reach
+    backend validation and recovery advice. Wrong-typed scalar arguments still
+    produce MCP SDK pydantic errors; mapping those to the backend's structured
+    error shape remains to be done.
 
 ## 8. License
 
