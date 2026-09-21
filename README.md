@@ -360,7 +360,13 @@ recoverable `EXECUTION_FAILED` with advice. It bounds what DuckDB interrupts,
 which is execution: DuckDB evaluates some expressions while binding a
 statement (a `COLUMNS` lambda, for one) without checking for interrupts, so a
 binding can outlast the deadline and is stopped as soon as it returns, before
-anything runs.
+anything runs. The deadline guards each sandbox step that binds or runs the
+statement on its own clock, every description and then the run, so a statement
+whose steps each return in time can take several deadlines in total. Where it
+is stopped follows from that: a binding that overruns is refused as it
+returns, at the first description and before a sandbox is opened; a statement
+whose bindings return in time is interrupted while it runs. Both are the same
+recoverable refusal to the agent.
 
 ### Exporting an answer
 
@@ -832,8 +838,12 @@ the canonical IR, the full execution plan and the generated SQL.
   steps; every refusal class with its advice, and each rewrite sent back;
   the `DESCRIBE`d output schema, the preview limit, idempotent replay and
   replay of the recorded IR, `explain`, lineage and the operation record;
-  the sandbox refusing file, network and setting access on its own, the
-  deadline, the `--query-timeout` flag and the MCP surface.
+  the sandbox refusing file, network and setting access on its own; the
+  deadline on a long execution, on a binding that outlasts it (stopped as its
+  first binding returns, with no sandbox opened) and on each sandbox step once
+  it has passed, the binding tests' deadline calibrated below what one binding
+  of their statement takes on the fastest machine measured; the
+  `--query-timeout` flag and the MCP surface.
 - `test_profile.py`: per-column non-null and distinct counts, finite numeric
   and temporal ranges, profile opt-out, wide datasets, and JSON-safe
   non-finite values.
