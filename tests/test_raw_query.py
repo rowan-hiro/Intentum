@@ -567,19 +567,39 @@ def test_a_long_raw_query_is_stopped_at_the_server_deadline(tmp_path, clock):
 # so this statement outlasts a deadline while binding and is stopped as soon as the binding returns.
 BINDING_BOMB = "SELECT COLUMNS(c -> list_sum(range(30000000)) > 0) FROM input"
 
+# The deadline the bomb is meant to outlast. One binding of the bomb over eight columns takes about a quarter of a
+# second on the fastest machine it was measured on (Apple M5, DuckDB 1.5.5), and a healthy statement goes through
+# all of its sandbox steps in under twenty milliseconds there, so the deadline sits between the two with room on
+# both sides. At the 0.5 seconds the execution test above uses, the binding returns inside the deadline on that
+# machine: nothing is refused while describing, and the statement is stopped later, as an interrupted execution.
+BINDING_DEADLINE = 0.05
 
-def test_a_binding_that_outlasts_the_deadline_is_stopped_when_it_returns(tmp_path, clock):
-    backend = Backend(tmp_path / "workspace", clock=clock, query_timeout=0.5)
+
+def recording(calls, name, function):
+    def wrapper(*args, **kwargs):
+        calls.append(name)
+        return function(*args, **kwargs)
+    return wrapper
+
+
+def test_a_binding_that_outlasts_the_deadline_is_stopped_when_it_returns(tmp_path, clock, monkeypatch):
+    backend = Backend(tmp_path / "workspace", clock=clock, query_timeout=BINDING_DEADLINE)
     try:
         assert backend.import_dataset(str(ORDERS_CSV))["status"] == "success"
+        reached = []
+        for step in ("describe_query", "session"):
+            monkeypatch.setattr(backend.queries, step, recording(reached, step, getattr(backend.queries, step)))
         started = time.monotonic()
         response = backend.transform_dataset("orders", {"raw_query": BINDING_BOMB})
         elapsed = time.monotonic() - started
         assert response["status"] == "error" and response["code"] == "EXECUTION_FAILED", response
         assert response["recoverable"] is True
-        assert response["details"]["raw_query"] == {"refused": "deadline", "timeout_seconds": 0.5}
+        assert response["details"]["raw_query"] == {"refused": "deadline", "timeout_seconds": BINDING_DEADLINE}
         # The documented limit: binding ignores the interrupts, so it overran the deadline before it was stopped.
-        assert elapsed > 0.5
+        assert elapsed > BINDING_DEADLINE
+        # Where it was stopped: as the first binding returned. The statement was not described a second time and no
+        # sandbox was opened for it, so this is the binding's refusal and not an interrupted execution.
+        assert reached == ["describe_query"]
         assert rows(backend.transform_dataset("orders", {"raw_query": "SELECT count(*) AS n FROM input"})) == [[12]]
         assert not sandboxes_left(backend)
     finally:
@@ -588,7 +608,7 @@ def test_a_binding_that_outlasts_the_deadline_is_stopped_when_it_returns(tmp_pat
 
 def test_nothing_runs_after_the_deadline_has_passed(backend, shop):
     """Describing for validation, describing over the inputs and running all stop once the deadline has passed."""
-    sandbox = QuerySandbox(backend.engine, timeout=0.5)
+    sandbox = QuerySandbox(backend.engine, timeout=BINDING_DEADLINE)
     relations = {"input": [(f"c{i}", "INTEGER") for i in range(8)]}
     steps = [lambda: sandbox.describe_query(BINDING_BOMB, relations)]
     with sandbox.session({"input": "ds_1_v1"}) as session:
@@ -596,7 +616,7 @@ def test_nothing_runs_after_the_deadline_has_passed(backend, shop):
         for step in steps:
             with pytest.raises(ExecutionFailedError) as info:
                 step()
-            assert info.value.details["raw_query"] == {"refused": "deadline", "timeout_seconds": 0.5}
+            assert info.value.details["raw_query"] == {"refused": "deadline", "timeout_seconds": BINDING_DEADLINE}
         assert session.describe("SELECT count(*) AS n FROM input") == [("n", "BIGINT", LogicalType.INTEGER)]
     assert not sandboxes_left(backend)
     assert backend.engine.list_tables() == ["ds_1_v1", "ds_2_v1", "ds_3_v1"]
