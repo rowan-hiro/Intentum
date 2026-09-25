@@ -547,11 +547,15 @@ scope is explained with the scope and never rewritten from a look-alike name.
 A detector that cannot rewrite still explains. Every rewrite is executed in its
 test and must succeed.
 
-Two silent failures get the same treatment on *successful* responses: an empty
-result whose filter literal is absent from the filtered column says where in
-the workspace that literal does occur (`value_not_found`), and a result that
-already has, or mechanically reshapes to, the open output contract says so with
-the next call (`matches_contract`, `near_contract`). A `one_per` contract is
+Three silent failures get the same treatment on *successful* responses: an
+empty result whose filter literal is absent from the filtered column says where
+in the workspace that literal does occur (`value_not_found`); a text column of
+numbers ordered against a quoted number (`weight > '100000000'`), which compares
+as text, says how many of its values fall on the other side as numbers and
+rewrites the comparison with `try_cast` (`numbers_compared_as_text`; a column
+holding any non-number, or one where text and numbers agree, stays silent); and
+a result that already has, or mechanically reshapes to, the open output contract
+says so with the next call (`matches_contract`, `near_contract`). A `one_per` contract is
 said to match only after the result's distinct keys are counted, as
 `export_result` counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
@@ -895,10 +899,11 @@ left on the data domain gives the backend more to check without letting it
 read the task: it holds the data facts and the agent's declarations, and those
 are enough to name more of the errors that enter silently.
 
-1. **Silent-failure signals on successful responses.** The two signals that
-   exist, `value_not_found` and `matches_contract` / `near_contract`, come
-   from one rule: the backend reports its own data facts and never reads the
-   task. The next signals are the mistakes an agent makes without noticing
+1. **Silent-failure signals on successful responses.** The signals that
+   exist, `value_not_found`, `numbers_compared_as_text` and
+   `matches_contract` / `near_contract`, come from one rule: the backend
+   reports its own data facts and never reads the task. The next signals are
+   the mistakes an agent makes without noticing
    and the backend can see: a join that multiplies the left rows (the row
    count before and after, and the duplicated key), a join key that matches a
    small share of the left rows, a `one_per` key that is not unique in the

@@ -253,6 +253,58 @@ def test_an_empty_result_whose_values_all_occur_is_reported_as_a_combination(bac
     assert "'South' occurs in orders.region" in found["explanation"] and "'Acme Corp' occurs in orders.customer" in found["explanation"]
 
 
+def lots(backend, tmp_path: Path, weights=("99999999", "100000000", "250000000", " "), name="lots"):
+    """Weights read from a document arrive as text; a blank is a missing value, not a word."""
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps([{"lot": chr(65 + i), "weight": w} for i, w in enumerate(weights)]), encoding="utf-8")
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_numbers_stored_as_text_ordered_against_a_quoted_number_are_said_to_compare_as_text(backend, tmp_path):
+    lots(backend, tmp_path)
+    response = backend.transform_dataset("lots", {"filter": "weight > '100000000'", "select": ["lot", "weight"]})
+    assert response["status"] == "success"
+    assert [row[0] for row in response["result"]["rows"]] == ["A", "C"]  # '99999999' > '100000000' as text
+    found = advice(response, "numbers_compared_as_text")
+    assert "lots.weight holds numbers stored as text" in found["explanation"]
+    assert "1 of its values falls on the other side" in found["explanation"] and "'99999999'" in found["explanation"]
+    (transform,) = found["rewrite"]
+    assert transform["arguments"]["transform"] == {"filter": "try_cast(weight as double) > 100000000",
+                                                   "select": ["lot", "weight"]}
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [["C", "250000000"]] and "advice" not in result
+
+
+def test_a_quoted_number_on_the_left_and_a_comparison_in_a_derive_are_rewritten_in_place(backend, tmp_path):
+    lots(backend, tmp_path)
+    flipped = backend.transform_dataset("lots", [{"filter": "'100000000' < weight"}, {"select": ["lot"]}])
+    rewrite = advice(flipped, "numbers_compared_as_text")["rewrite"]
+    assert rewrite[0]["arguments"]["transform"] == [{"filter": "100000000 < try_cast(weight as double)"}, {"select": ["lot"]}]
+    assert run(backend, rewrite)[0]["result"]["rows"] == [["C"]]
+
+    derived = backend.materialize_result("lots", {"derive": {"heavy": "weight >= '100000000'"}}, "heavy_lots")
+    assert derived["status"] == "success"
+    (call,) = advice(derived, "numbers_compared_as_text")["rewrite"]
+    assert call["tool"] == "materialize_result" and call["arguments"]["name"] == "heavy_lots_numeric"
+    assert call["arguments"]["transform"] == {"derive": {"heavy": "try_cast(weight as double) >= 100000000"}}
+    run(backend, [call])
+    rows = backend.transform_dataset("heavy_lots_numeric", {"select": ["lot", "heavy"], "sort": "lot"})["result"]["rows"]
+    assert rows == [["A", False], ["B", True], ["C", True], ["D", None]]
+
+
+def test_text_comparisons_that_numbers_would_not_change_or_that_hold_codes_stay_silent(backend, orders, tmp_path):
+    lots(backend, tmp_path)
+    agreeing = backend.transform_dataset("lots", {"filter": "weight > '1'"})
+    assert agreeing["result"]["row_count"] == 3 and "numbers_compared_as_text" not in kinds(agreeing)
+
+    lots(backend, tmp_path, weights=("99", "100", "A10"), name="bins")
+    coded = backend.transform_dataset("bins", {"filter": "weight > '100'"})
+    assert coded["status"] == "success" and "numbers_compared_as_text" not in kinds(coded)
+
+    numeric = backend.transform_dataset("orders", {"filter": "amount > 100"})
+    assert "numbers_compared_as_text" not in kinds(numeric)
+
+
 def test_a_non_empty_result_carries_no_empty_result_advice(backend, orders):
     response = backend.transform_dataset("orders", {"filter": "region = 'East'"})
     assert response["result"]["row_count"] > 0 and "advice" not in response

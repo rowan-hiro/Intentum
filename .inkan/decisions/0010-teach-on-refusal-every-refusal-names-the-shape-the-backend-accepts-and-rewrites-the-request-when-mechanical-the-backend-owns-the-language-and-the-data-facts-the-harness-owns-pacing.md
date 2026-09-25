@@ -75,3 +75,9 @@ Two implementation rules added to the decision. Dispatch is the operation bounda
 Status: accepted -> accepted
 
 Follow-up in the same outcome: the inline-join rewrite now selects a right-side key from the left one, since the joined scope never copies it, so the replay's eighteenth rewrite succeeds as sent: 21 of 21 advised, 18 of 18 rewrites succeed.
+
+### 2026-09-25T16:28:40.667Z, outcome 2026-09-25-1625-x9k8
+
+Status: accepted -> accepted
+
+A third silent-failure signal on successful responses, numbers_compared_as_text: a filter or derive that orders a source text column against a quoted number compares as text, so '99999999' > '100000000'. The backend says so when every non-blank value of the column parses as a number and at least one of them falls on the other side of the comparison as a number, counted in one scan of the column; the agent's request is rewritten to compare try_cast(field as double) with the unquoted number when the comparison is found as written. A column holding any non-number, and a comparison that text and numbers agree on, stay silent. The rule is the Decision's: the backend reports its own data facts and never reads the task. Recorded in Intentum-DataSpace's GAPS.md as G25.

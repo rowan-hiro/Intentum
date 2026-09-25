@@ -4,10 +4,11 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Two
+rewrites the agent's own request into tool calls it can send as-is. Three
 signals on successful responses get the same treatment: an empty result whose
-filter literal is absent from the filtered column, and a result that already
-has (or mechanically reshapes to) the declared output shape.
+filter literal is absent from the filtered column, a text column of numbers
+ordered against a quoted number (it compares as text), and a result that
+already has (or mechanically reshapes to) the declared output shape.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -27,7 +28,8 @@ from typing import Any, Callable
 
 from ..contracts import repair_transform, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
-from ..ir import BinaryExpr, CastExpr, ColumnExpr, FilterStep, InExpr, LiteralExpr, TransformIR
+from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
+                  TransformIR, TryCastExpr, UnaryExpr)
 from ..ir.expression_parser import parse_expression
 from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
@@ -2317,6 +2319,113 @@ def advise_empty_result(
                   "The result is empty. " + "; ".join(absent + present)
                   + ". A value that lives in another column is usually a different identifier: relate the datasets "
                     "through the column that holds it, rather than filtering this one by it.")
+
+
+_NUMBER_TEXT_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_FLIPPED = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
+_WRITTEN_COMPARISON_RE = re.compile(
+    r"""(?P<col>"(?:[^"]|"")+"|[^\W\d][\w.]*)\s*(?P<op><=|>=|<|>)\s*'(?P<lit>[^']*)'"""
+    r"""|'(?P<rlit>[^']*)'\s*(?P<rop><=|>=|<|>)\s*(?P<rcol>"(?:[^"]|"")+"|[^\W\d][\w.]*)""")
+
+
+def _text_comparisons(ir: TransformIR) -> list[tuple[ColumnExpr, str, str]]:
+    """``(column, op, text)`` for each ordering comparison of a source text column with a quoted number in the
+    filters and derives, written column first: ``'5' < x`` is ``x > '5'``."""
+    found: list[tuple[ColumnExpr, str, str]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, BinaryExpr):
+            if node.op in _FLIPPED:
+                for column, other, op in ((node.left, node.right, node.op), (node.right, node.left, _FLIPPED[node.op])):
+                    if (isinstance(column, ColumnExpr) and column.logical_type == LogicalType.STRING
+                            and column.field.column_id and isinstance(other, LiteralExpr)
+                            and isinstance(other.value, str) and _NUMBER_TEXT_RE.fullmatch(other.value.strip())):
+                        found.append((column, op, other.value))
+            walk(node.left)
+            walk(node.right)
+        elif isinstance(node, UnaryExpr):
+            walk(node.operand)
+        elif isinstance(node, FunctionExpr):
+            for arg in node.args:
+                walk(arg)
+        elif isinstance(node, (CastExpr, TryCastExpr, InExpr)):
+            walk(node.expr)
+
+    for step in ir.steps:
+        if isinstance(step, FilterStep):
+            walk(step.predicate)
+        elif isinstance(step, DeriveStep):
+            walk(step.expression)
+    return found[:4]
+
+
+def _compared_as_numbers(text: str, field: str, op: str, literal: str) -> tuple[str, int]:
+    """``text`` with each written ``field op 'literal'`` comparing ``try_cast(field as double)`` with the number."""
+    count = 0
+
+    def names_field(written: str) -> bool:
+        return normalize(_bare(written).strip('"').replace('""', '"')) == normalize(field)
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal count
+        if match.group("col") is not None:
+            if names_field(match.group("col")) and match.group("op") == op and match.group("lit") == literal:
+                count += 1
+                return f"try_cast({match.group('col')} as double) {op} {literal.strip()}"
+        elif names_field(match.group("rcol")) and _FLIPPED[match.group("rop")] == op and match.group("rlit") == literal:
+            count += 1
+            return f"{literal.strip()} {match.group('rop')} try_cast({match.group('rcol')} as double)"
+        return match.group(0)
+
+    return _WRITTEN_COMPARISON_RE.sub(replace, text), count
+
+
+def advise_text_comparison(
+    ir: TransformIR,
+    *,
+    used: list[Dataset],
+    compare: Callable[[Dataset, Column, str, str], tuple[int, int, str | None]],
+    tool: str,
+    arguments: dict[str, Any],
+) -> Advice | None:
+    """A text column holding numbers, ordered against a quoted number, compares as text: '99' sorts after '100'.
+
+    Said only when every non-blank value of the column is a number and some of them fall on the other side of the
+    comparison as numbers; a column of codes, or a comparison that text and numbers agree on, stays silent.
+    """
+    by_column: dict[str, tuple[Dataset, Column]] = {c.id: (d, c) for d in used for c in d.columns}
+    findings: list[tuple[str, str, str]] = []
+    facts: list[str] = []
+    for column, op, literal in _text_comparisons(ir):
+        if column.field.column_id not in by_column:
+            continue
+        dataset, source = by_column[column.field.column_id]
+        unparsed, differ, example = compare(dataset, source, op, literal)
+        if unparsed or not differ:
+            continue
+        findings.append((column.field.name, op, literal))
+        facts.append(f"{dataset.name}.{source.name} holds numbers stored as text, so {column.field.name} {op} "
+                     f"'{literal}' compared them as text: {differ} of its values {'falls' if differ == 1 else 'fall'} "
+                     f"on the other side of it as numbers, e.g. '{example}'")
+    if not findings:
+        return None
+    explanation = "; ".join(facts) + ". Comparing try_cast(field as double) with the unquoted number compares numbers"
+    steps = _steps(arguments.get("transform"))
+    matched: set[int] = set()
+    for step in steps:
+        for path, text in _expression_texts(step):
+            for index, (field, op, literal) in enumerate(findings):
+                text, count = _compared_as_numbers(text, field, op, literal)
+                if count:
+                    matched.add(index)
+                    _set_path(step, path, text)
+    if len(matched) < len(findings) or tool not in _TRANSFORM_TOOLS:
+        return Advice("numbers_compared_as_text", explanation + ".")
+    overrides: dict[str, Any] = {"transform": _rebuild(arguments.get("transform"), steps)}
+    if tool == "materialize_result" and isinstance(arguments.get("name"), str):
+        overrides["name"] = slugify(f"{arguments['name']}_numeric")  # the first result keeps its name
+    return Advice("numbers_compared_as_text", explanation + "; the same request compared that way:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

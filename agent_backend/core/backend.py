@@ -33,7 +33,7 @@ from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
-from .recovery import Advice, advise_contract, advise_empty_result, advise_error, call as tool_call
+from .recovery import Advice, advise_contract, advise_empty_result, advise_error, advise_text_comparison, call as tool_call
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
@@ -935,7 +935,8 @@ class Backend:
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
                           distinct_keys: int | None = None) -> list[Advice]:
-        """Advice on a successful transform: an empty result explained, or a result that fits the contract."""
+        """Advice on a successful transform: an empty result explained, numbers compared as text, or a result
+        that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -943,6 +944,10 @@ class Backend:
                                             occurs=self._column_contains)
                 if found is not None:
                     advice.append(found)
+            found = advise_text_comparison(ir, used=used, compare=self._compare_text_as_number, tool=tool,
+                                           arguments=arguments)
+            if found is not None:
+                advice.append(found)
             contract = self.store.latest_contract()
             if contract is not None:
                 found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,
@@ -956,6 +961,12 @@ class Backend:
     def _column_contains(self, dataset: Dataset, column: Column, value: Any) -> bool:
         version = self.store.get_version(dataset.id, dataset.version)
         return version is not None and self.engine.column_contains(version.physical_table, column.name, value)
+
+    def _compare_text_as_number(self, dataset: Dataset, column: Column, op: str, text: str) -> tuple[int, int, str | None]:
+        version = self.store.get_version(dataset.id, dataset.version)
+        if version is None:
+            return 0, 0, None
+        return self.engine.compare_text_as_number(version.physical_table, column.name, op, text)
 
     def _commit_materialization(
         self,
