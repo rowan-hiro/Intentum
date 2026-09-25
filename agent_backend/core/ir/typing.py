@@ -90,6 +90,10 @@ FUNCTIONS: dict[str, FunctionSpec] = {
         FunctionSpec("substring", (_str, _count, _count_opt), _string),
         FunctionSpec("left", (_str, _count), _string),
         FunctionSpec("right", (_str, _count), _string),
+        # Cleaning a value read as text (markup, units, separators) before it is cast; every occurrence is
+        # replaced, so regexp_replace passes DuckDB's 'g' option, without which only the first match would be.
+        FunctionSpec("replace", (_str, _str, _str), _string),
+        FunctionSpec("regexp_replace", (_str, _str, _str), _string, sql="regexp_replace({0}, {1}, {2}, 'g')"),
         FunctionSpec("concat", (_any, _any), _string, variadic=True),
         FunctionSpec("coalesce", (_any, _any), _same, variadic=True),
         FunctionSpec("year", (_tmp,), _int),
@@ -152,8 +156,29 @@ def arguments_are_swapped(name: str, arg_types: list[LogicalType]) -> bool:
     return not _fits(spec, arg_types) and _fits(spec, arg_types[::-1])
 
 
+REGEXP_OPTIONS = frozenset("gic")
+
+
+def regexp_options(args: list) -> str | None:
+    """The letters of a fourth, options argument to regexp_replace that the call can do without: ``g`` is how every
+    call already replaces, ``c`` (case-sensitive) is the default and ``i`` becomes ``(?i)`` in a literal pattern.
+    None when there is no such argument or it cannot be folded away."""
+    if len(args) != 4 or not isinstance(args[3], LiteralExpr) or not isinstance(args[3].value, str):
+        return None
+    letters = args[3].value.lower()
+    if not set(letters) <= REGEXP_OPTIONS or ("i" in letters and not isinstance(args[1], LiteralExpr)):
+        return None
+    return letters
+
+
 def validate_function_arguments(name: str, args: list) -> None:
     """Checks on argument *values* the type rules cannot express (a calendar unit must be one we know)."""
+    if name == "regexp_replace" and len(args) > 3:
+        raise InvalidTransformError(
+            "regexp_replace(text, pattern, replacement) replaces every match and takes no options argument; for a "
+            "case-insensitive match, start a pattern with (?i).",
+            field="expression", details={"signature": signature(name)},
+        )
     if name == "date_trunc" and args:
         part = args[0]
         if not isinstance(part, LiteralExpr) or not isinstance(part.value, str) or part.value.lower() not in DATE_TRUNC_PARTS:

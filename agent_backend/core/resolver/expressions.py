@@ -29,6 +29,7 @@ from ..ir.typing import (
     function_result_type,
     renamed_function,
     literal_type,
+    regexp_options,
     signature,
     unary_result_type,
     validate_function_arguments,
@@ -111,6 +112,17 @@ class ExpressionResolver:
                 if notes is not None:
                     notes.append(ResolutionNote(field, f"{name}({args[1].logical_type}, {args[0].logical_type})",
                                                 signature(name), "arguments reordered to the function's signature"))
+            letters = regexp_options(args) if name == "regexp_replace" else None
+            if letters is not None:
+                # SQL's options argument, folded into the one form the IR keeps: every match is replaced anyway.
+                pattern = args[1]
+                if "i" in letters and not str(pattern.value).startswith("(?i)"):
+                    args[1] = LiteralExpr(value=f"(?i){pattern.value}", logical_type=LogicalType.STRING)
+                args = args[:3]
+                if notes is not None:
+                    notes.append(ResolutionNote(field, f"regexp_replace(..., '{letters}')", signature(name),
+                                                "every match is replaced without options"
+                                                + ("; (?i) makes the pattern case-insensitive" if "i" in letters else "")))
             validate_function_arguments(name, args)
             types = [a.logical_type for a in args]
             try:

@@ -284,8 +284,13 @@ Expressions may be strings (`"quantity * unit_price"`,
 `"amount > 100 and region in ['West', 'East']"`) or object trees; identifiers
 are always resolved against the current schema and functions come from an
 allowlist (`abs round floor ceil upper lower trim length substr substring left
-right concat coalesce year month day date date_trunc date_diff strftime is_null contains
-starts_with ends_with`; `||` is read as `concat`). `cast(x as type)` converts to
+right replace regexp_replace concat coalesce year month day date date_trunc date_diff strftime
+is_null contains starts_with ends_with`; `||` is read as `concat`). `replace` and
+`regexp_replace(text, pattern, replacement)` clean a value read as text (markup,
+units, thousands separators) before it is cast; each replaces every occurrence,
+and SQL's options argument to `regexp_replace` is folded away (`g` is implied,
+`i` becomes `(?i)`). Rendering an answer as text stays with export (MADR 0005).
+`cast(x as type)` converts to
 `integer`, `float`, `string`, `boolean`, `date` or `timestamp`, and accepts SQL
 names such as `int`, `bigint`, `double`, `varchar`, `text`, `bool` and
 `datetime`; a value that does not convert fails the transform. `x::type` is the
