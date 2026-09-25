@@ -471,6 +471,15 @@ def test_a_query_that_never_reads_its_source_gets_the_dataset_it_reads_as_source
     assert result["source"]["name"] == "customers"
 
 
+def test_a_query_that_reads_no_dataset_is_pointed_at_rows_written_inline(backend, shop):
+    response = backend.transform_dataset("orders", {"raw_query": "SELECT * FROM (VALUES ('b', 2)) t(name, v)"})
+    assert refused(response) == "source_unused"
+    found = advice(response, "raw_query_source_unused")
+    assert "import_dataset(rows=" in found["explanation"] and "rewrite" not in found
+    imported = backend.import_dataset(rows=[{"name": "b", "v": 2}], name="answer")
+    assert imported["status"] == "success" and imported["dataset"]["rows"] == 1
+
+
 def test_a_placeholder_written_as_a_parameter_loses_its_dollar(backend, shop):
     response = backend.transform_dataset("orders", {"raw_query": "SELECT count(*) AS n FROM $input WHERE note = '$input'"})
     assert refused(response) == "parse"

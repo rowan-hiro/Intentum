@@ -195,6 +195,37 @@ def _run_operation(self: "Backend", fn, signature: inspect.Signature, action: st
         _CURRENT_CALL.reset(token)
 
 
+_ROWS_SHAPE = ('rows is a list of objects, one per row, such as [{"region": "West", "total": 12.5}], given with a '
+               "name; each value is text, a number, a boolean or null, and a column a row leaves out is null there.")
+
+
+def _inline_records(rows: Any) -> list[dict[str, Any]]:
+    """Rows written inline as records that all carry every column, in the order the columns first appear."""
+    if isinstance(rows, str) and rows.strip()[:1] == "[":
+        try:
+            rows = json.loads(rows)
+        except ValueError:
+            pass
+    if not isinstance(rows, list) or not rows:
+        raise InvalidIntentError("rows must be a non-empty list of objects, one per row.", field="rows",
+                                 hint=_ROWS_SHAPE, details={"received": type(rows).__name__})
+    columns: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or not row:
+            raise InvalidIntentError(f"Row {index + 1} is not an object of column values.", field=f"rows[{index}]",
+                                     hint=_ROWS_SHAPE, details={"received": row})
+        for key, value in row.items():
+            if isinstance(value, (dict, list)) or (value is not None and not isinstance(value, (str, int, float, bool))):
+                raise InvalidIntentError(f"Row {index + 1} gives {key!r} a {type(value).__name__}; a row holds one "
+                                         "value per column.", field=f"rows[{index}].{key}", hint=_ROWS_SHAPE)
+            if isinstance(value, float) and not math.isfinite(value):
+                raise InvalidIntentError(f"Row {index + 1} gives {key!r} {value}, which is not a finite number.",
+                                         field=f"rows[{index}].{key}", hint=_ROWS_SHAPE)
+            if str(key) not in columns:
+                columns.append(str(key))
+    return [{column: row.get(column) for column in columns} for row in rows]
+
+
 def _path_facts(path: Path) -> dict[str, Any]:
     """Where a path that does not exist was looked for: the directory it resolved against, and what the nearest
     existing directory above it holds, so the caller can see the spelling or the root it meant."""
@@ -460,8 +491,9 @@ class Backend:
     @semantic_operation("import_dataset")
     def import_dataset(
         self,
-        path: str,
+        path: str | None = None,
         *,
+        rows: Any = None,
         name: str | None = None,
         description: str | None = None,
         format: str | None = None,
@@ -471,6 +503,10 @@ class Backend:
         idempotency_key: str | None = None,
         principal: str | None = None,
     ) -> dict[str, Any]:
+        if rows is not None or path is None:
+            return self._import_rows(path, rows, name=name, description=description, format=format, table=table,
+                                     schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key,
+                                     principal=principal)
         source = Path(str(path)).expanduser()
         if not source.is_file():
             raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True,
@@ -519,6 +555,42 @@ class Backend:
         )
         intent = _jsonable({"path": path, "name": name, "description": description, "format": format, "table": table,
                             "schema_hints": schema_hints, "aliases": aliases})
+        return self._import_source(spec, intent, idempotency_key, principal)
+
+    def _import_rows(self, path: str | None, rows: Any, *, name: str | None, description: str | None,
+                     format: str | None, table: str | None, schema_hints: dict[str, Any] | None,
+                     aliases: list[str] | None, idempotency_key: str | None, principal: str | None) -> dict[str, Any]:
+        """Rows the agent read or computed outside the backend, entered as a dataset (MADR 0008, 0009).
+
+        They are the agent's fresh output, accepted as given; kept as a content-addressed JSON source, they are
+        imported exactly as a file is, so the dataset has an artifact, provenance and replay like any other.
+        """
+        if path is not None:
+            raise InvalidIntentError("Give path, a file to import, or rows written inline, not both.", field="rows",
+                                     hint=_ROWS_SHAPE)
+        if rows is None:
+            raise InvalidIntentError("import_dataset needs path, a file to import, or rows written inline with a name.",
+                                     field="path", hint=_ROWS_SHAPE)
+        if not name or not str(name).strip():
+            raise InvalidIntentError("Rows written inline need a name for the dataset they become.", field="name",
+                                     hint=_ROWS_SHAPE)
+        if format not in (None, "json") or table is not None:
+            raise InvalidIntentError("format and table describe a file; rows written inline take neither.",
+                                     field="format" if format not in (None, "json") else "table")
+        records = _inline_records(rows)
+        artifact = self._register_artifact(self.workspace.write_rows(records), ArtifactKind.JSON,
+                                           name="rows written inline", metadata={"origin": "inline_rows"})
+        spec = _ImportSpec(
+            artifact=artifact,
+            source=TableSource(path=Path(artifact.managed_path or artifact.path), format="json"),
+            name=slugify(name),
+            description=description or "",
+            hints=self._normalize_hints(schema_hints),
+            aliases=[str(a) for a in (aliases or [])],
+        )
+        intent = _jsonable({"rows": {"count": len(records), "columns": list(records[0]), "artifact_id": artifact.id},
+                            "name": name, "description": description, "schema_hints": schema_hints,
+                            "aliases": aliases})
         return self._import_source(spec, intent, idempotency_key, principal)
 
     @semantic_operation("import_workspace")
@@ -726,8 +798,10 @@ class Backend:
                     }
                     if spec.aliases:
                         metadata["aliases"] = list(spec.aliases)
-                    original = spec.locator or Path(spec.artifact.name).stem
-                    if original != spec.name and original not in metadata.get("aliases", []):
+                    # A file's own name stays findable; rows written inline have none, so they add no alias.
+                    inline = (spec.artifact.metadata or {}).get("origin") == "inline_rows"
+                    original = spec.locator or (None if inline else Path(spec.artifact.name).stem)
+                    if original and original != spec.name and original not in metadata.get("aliases", []):
                         metadata.setdefault("aliases", []).append(original)
                     dataset = Dataset(
                         id=dataset_id, name=spec.name, description=spec.description, status=DatasetStatus.ACTIVE,
@@ -1997,7 +2071,8 @@ class Backend:
             return kind
         return ARTIFACT_KINDS.get(path.suffix.lower(), ArtifactKind.OTHER)
 
-    def _register_artifact(self, path: Path, kind: ArtifactKind, relative_to: Path | None = None) -> Artifact:
+    def _register_artifact(self, path: Path, kind: ArtifactKind, relative_to: Path | None = None, *,
+                           name: str | None = None, metadata: dict[str, Any] | None = None) -> Artifact:
         """Register a file once (by path + content hash); tabular files get a managed copy."""
         resolved = path.resolve()
         content_hash = self.workspace.content_hash(resolved)
@@ -2008,13 +2083,13 @@ class Backend:
         artifact = Artifact(
             id=self.store.allocate_id("art"),
             kind=kind,
-            name=str(resolved.relative_to(relative_to.resolve())) if relative_to else resolved.name,
+            name=name or (str(resolved.relative_to(relative_to.resolve())) if relative_to else resolved.name),
             path=str(resolved),
             managed_path=str(managed) if managed else None,
             content_hash=content_hash,
             size_bytes=resolved.stat().st_size,
             created_at=self.clock(),
-            metadata={},
+            metadata=dict(metadata or {}),
         )
         with self.store.transaction():
             self.store.insert_artifact(artifact)

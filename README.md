@@ -627,6 +627,13 @@ names no scenario; `tests/test_boundary.py` checks both. Reading a PDF, a
 video or an audio track is the harness's job: a reader is a tool beside the
 backend's, and what it extracts enters the backend through `import_dataset`
 or `attach_metadata`, as a fresh agent output with provenance (MADR 0009).
+`import_dataset` takes a file's `path`, or `rows` written inline with a `name`
+(a list of objects, one per row): values the agent read from a document, an
+image or a video, or a literal answer, are kept as a content-addressed JSON
+source in the workspace and imported exactly as a file is, with an artifact
+marked as inline rows, type inference, provenance and replay. They are the
+agent's fresh output, accepted as given (MADR 0008); a `raw_query` that only
+writes out `VALUES` is refused and pointed here.
 
 The first perception reader is available with the DataSpace runner's `--video`
 option (OpenCode only). FFmpeg inspects videos and returns actual PNG frames at
@@ -720,6 +727,12 @@ Tools exposed (all semantic; no SQL tool, since read-only SQL enters only as the
 {"name": "import_dataset", "arguments": {"path": "/data/orders.csv", "description": "Shop orders"}}
 // → {"status": "success", "operation_id": "op_1", "dataset": {"id": "ds_1", "name": "orders", "rows": 12, ...},
 //    "source": {"artifact_id": "art_1", "name": "orders.csv", "kind": "csv", "locator": null}}
+
+// enter rows the agent read elsewhere (a table in a PDF, a figure on a video frame) as a dataset
+{"name": "import_dataset", "arguments": {"rows": [{"region": "West", "target": 1200}, {"region": "East", "target": 950}],
+                                         "name": "targets", "description": "read from the plan PDF, page 3"}}
+// → {"status": "success", "dataset": {"id": "ds_2", "name": "targets", "rows": 2, ...},
+//    "source": {"artifact_id": "art_2", "name": "rows written inline", "kind": "json", "locator": null}}
 
 // import a whole task workspace (csv + json + every table of every sqlite; docs/media become artifacts)
 {"name": "import_workspace", "arguments": {"path": "/data/task_10/context"}}
@@ -870,7 +883,7 @@ These capabilities are available in the current code:
 
 | Area | Available now |
 |---|---|
-| Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
+| Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, rows written inline (`import_dataset(rows=...)`), `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
 | Semantic transforms | `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`, `derive`, `join`, and `semi_join`; grouping without measures returns distinct groups, and compact transforms handle post-aggregate projection. |
 | [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
 | [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |

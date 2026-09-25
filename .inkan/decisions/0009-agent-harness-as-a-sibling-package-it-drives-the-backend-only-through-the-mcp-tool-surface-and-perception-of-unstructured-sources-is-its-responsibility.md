@@ -66,3 +66,9 @@ The restricted host now needs a video reader. Outcome 2026-09-10-0707-x3nb adds 
 Status: accepted -> accepted
 
 Outcome 2026-09-10-0735-sd88 extends harness perception to offline speech transcription. FFmpeg extracts bounded, timestamp-aligned clips; a separately configured local Whisper worker supplies attributed transcript segments. The host imports the segment JSON through the public MCP surface, and frame or segment evidence can support explicitly revised observations. No backend logic or wheel dependency changed. User-supplied medium and tiny weights were copied and verified; the medium model drove the audio check.
+
+### 2026-09-25T16:42:44.230Z, outcome 2026-09-25-1637-r4xp
+
+Status: accepted -> accepted
+
+import_dataset now takes rows written inline, a list of objects given with a name, in place of a path, so what the agent reads from a document, an image or a video, or a literal answer it holds, still enters the backend through import_dataset as this record requires. The rows are kept as a content-addressed JSON source in the workspace, registered as an artifact marked as inline rows, and imported through the same path as a file: type inference, temporal refinement, provenance, audit and replay. Set aside: a separate tool for rows, which would have been a third entry point beside import_dataset and attach_metadata; and letting a raw_query write out VALUES without reading its source, which MADR 0002 refuses so that every query result derives from a bound dataset. That refusal now points at rows written inline. Recorded in Intentum-DataSpace's GAPS.md as G4.

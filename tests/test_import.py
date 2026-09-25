@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from tests.conftest import ORDERS_CSV, write_csv
@@ -147,3 +148,53 @@ def test_refinement_needs_every_value_to_be_a_valid_iso_date(backend, tmp_path: 
     # 'day' is inferred by the csv reader itself; 'almost' holds 2002-02-31, which is no date
     assert types["day"] == "date" and types["almost"] == "string"
     assert types["empty"] in ("string", "unknown")
+
+
+# -- rows written inline (the agent's own reading, MADR 0008 and 0009) ---------
+
+READINGS = [{"station": "Pier 4", "reading": 12, "taken": "2026-05-01", "ok": True},
+            {"station": "Dock 7", "reading": 7.5, "taken": "2026-05-02"},
+            {"station": "Gate 1", "reading": None, "taken": "2026-05-03", "ok": False, "note": "sensor off"}]
+
+
+def test_rows_written_inline_are_imported_as_a_file_would_be(backend):
+    response = backend.import_dataset(rows=READINGS, name="Tide readings", description="read off a harbour chart")
+    assert response["status"] == "success"
+    assert response["dataset"]["name"] == "tide_readings" and response["dataset"]["rows"] == 3
+    assert [(c["name"], c["type"]) for c in response["schema"]] == [
+        ("station", "string"), ("reading", "float"), ("taken", "date"), ("ok", "boolean"), ("note", "string")]
+    assert response["source"]["name"] == "rows written inline" and response["source"]["kind"] == "json"
+    rows = backend.transform_dataset("tide_readings", {"select": ["station", "ok", "note"], "sort": "station"})
+    assert rows["result"]["rows"] == [["Dock 7", None, None], ["Gate 1", False, "sensor off"], ["Pier 4", True, None]]
+
+    provenance = backend.get_provenance("tide_readings")
+    assert provenance["dataset"]["source"] == "rows written inline" and provenance["dataset"]["aliases"] == []
+    intent = provenance["produced_by"]["original_intent"]
+    assert intent["rows"]["count"] == 3 and intent["rows"]["columns"] == ["station", "reading", "taken", "ok", "note"]
+    artifact = backend.store.get_artifact(intent["rows"]["artifact_id"])
+    assert artifact.metadata == {"origin": "inline_rows"}
+    assert Path(artifact.managed_path).read_text(encoding="utf-8").startswith('[{"station":"Pier 4","reading":12,')
+
+    replay = backend.import_dataset(rows=READINGS, name="Tide readings", description="read off a harbour chart")
+    assert replay["operation_id"] == response["operation_id"] and replay["dataset"]["id"] == response["dataset"]["id"]
+    text = backend.import_dataset(rows=json.dumps(READINGS[:1]), name="first reading")
+    assert text["status"] == "success" and text["dataset"]["rows"] == 1
+
+
+def test_rows_written_inline_are_refused_with_the_shape_they_take(backend):
+    cases = [
+        ({}, "path", "needs path"),
+        ({"rows": READINGS}, "name", "need a name"),
+        ({"rows": [], "name": "x"}, "rows", "non-empty list"),
+        ({"rows": ["Pier 4", 12], "name": "x"}, "rows[0]", "not an object"),
+        ({"rows": [{"station": {"id": 4}}], "name": "x"}, "rows[0].station", "one value per column"),
+        ({"rows": [{"reading": float("nan")}], "name": "x"}, "rows[0].reading", "not a finite number"),
+        ({"path": str(ORDERS_CSV), "rows": READINGS, "name": "x"}, "rows", "not both"),
+        ({"rows": READINGS, "name": "x", "table": "t"}, "table", "take neither"),
+    ]
+    for arguments, field, message in cases:
+        response = backend.import_dataset(**arguments)
+        assert response["status"] == "error" and response["code"] == "INVALID_INTENT", arguments
+        assert response["field"] == field and message in response["message"], response
+        assert field == "table" or response["hint"].startswith("rows is a list of objects")
+    assert backend.list_datasets()["datasets"] == []

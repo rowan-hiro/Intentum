@@ -63,9 +63,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "keyed by column name with description/aliases/semantic_role/type/unit. Text columns "
                              "whose values are all ISO dates or timestamps become date/timestamp columns; a `type` "
                              "hint overrides that. Safe to retry: identical content and name replays the original "
-                             "result.")
+                             "result. Instead of `path`, `rows` (a list of objects, one per row, values text, numbers, "
+                             "booleans or null) with a `name` enters values you read or computed outside the backend, "
+                             "from a document, an image, a video or your own reasoning, as a dataset with the same "
+                             "provenance as a file; a literal answer is entered this way, not written into a query.")
     def import_dataset(
-        path: str,
+        path: str | None = None,
+        rows: list[dict[str, Any]] | None = None,
         name: str | None = None,
         description: str | None = None,
         table: str | None = None,
@@ -73,7 +77,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         aliases: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        return backend.import_dataset(path, name=name, description=description, table=table,
+        return backend.import_dataset(path, rows=rows, name=name, description=description, table=table,
                                       schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key)
 
     @server.tool(name="import_workspace", annotations=annotations("write"),

@@ -40,6 +40,8 @@ def run(backend, rewrite):
             response = backend.export_result(args.pop("dataset"), args.pop("path"), **args)
         elif tool == "attach_metadata":
             response = backend.attach_metadata(args.pop("source"), **args)
+        elif tool == "import_dataset":
+            response = backend.import_dataset(**args)
         else:
             raise AssertionError(f"unexpected tool in rewrite: {tool}")
         assert response["status"] == "success", response
@@ -209,6 +211,23 @@ def test_an_inline_relation_as_source_is_materialized_first(backend, orders):
     assert transform["arguments"] == {"source": "orders_subset", "transform": {"sort": "-amount", "limit": 2}}
     _, result = run(backend, found["rewrite"])
     assert result["result"]["row_count"] == 2 and names(result) == ["order_id", "customer", "amount"]
+
+
+def test_rows_written_as_the_source_are_imported_first(backend, orders):
+    readings = [{"station": "Pier 4", "reading": 12}, {"station": "Dock 7", "reading": 7.5}]
+    response = backend.transform_dataset(readings, {"filter": "reading > 8", "select": ["station"]})
+    assert response["status"] == "error"
+    found = advice(response, "source_as_dataset")
+    assert "import_dataset(rows=[...], name=...)" in found["explanation"]
+    imported, transform = found["rewrite"]
+    assert imported == {"tool": "import_dataset", "arguments": {"rows": readings, "name": "inline_rows"}}
+    assert transform["arguments"] == {"source": "inline_rows", "transform": {"filter": "reading > 8", "select": ["station"]}}
+    _, result = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [["Pier 4"]]
+
+    one = backend.transform_dataset({"station": "Gate 1", "reading": 3}, {"select": ["station"]})
+    found = advice(one, "source_as_dataset")
+    assert "import_dataset(rows=[{...}, ...], name=...)" in found["explanation"] and "rewrite" not in found
 
 
 def test_an_unknown_key_is_mapped_to_the_nearest_accepted_one(backend, orders):

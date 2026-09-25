@@ -735,6 +735,16 @@ def _query_source(inputs: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     return first, dict(inputs)
 
 
+_INLINE_ROWS = "inline_rows"
+
+
+def _is_row(item: Any) -> bool:
+    """An object of column values: flat, and naming no dataset, reference or step (those are inline relations)."""
+    return (isinstance(item, dict) and bool(item)
+            and all(v is None or isinstance(v, (str, int, float, bool)) for v in item.values())
+            and not set(item) & (_STEP_KEYS | set(_DATASET_KEYS) | set(_LEFT_KEYS) | set(_REFERENCE_KEYS)))
+
+
 def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """A relation written inline as the source is a dataset to materialize first, or a step of the transform."""
     source = arguments.get("source")
@@ -829,6 +839,13 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
                           "reads are bound under its inputs.",
                           rewrite=[call(tool, **_call_arguments(tool, arguments, source=dataset,
                                                                 transform=_rebuild(arguments.get("transform"), steps)))])
+    if isinstance(source, list) and source and all(_is_row(s) for s in source):
+        # Rows written inline: import_dataset makes them a dataset, which the transform then reads by name.
+        return Advice("source_as_dataset", f"{_SOURCE_IS_ONE} the backend manages. Rows written inline become one "
+                      "through import_dataset(rows=[...], name=...), which keeps them with their provenance; the "
+                      "transform then reads that name.",
+                      rewrite=[call("import_dataset", rows=source, name=_INLINE_ROWS),
+                               call(tool, **_call_arguments(tool, arguments, source=_INLINE_ROWS))])
     if isinstance(source, list):
         specs = [s for s in source if isinstance(s, dict)]
     elif isinstance(source, dict) and set(source) & _STEP_KEYS:
@@ -836,7 +853,8 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
     elif isinstance(source, dict):
         # Rows or a configuration written inline: nothing here names a dataset.
         return Advice("source_as_dataset", f"{_SOURCE_IS_ONE} the backend manages. Rows written inline are not "
-                      "a source; a query over the source computes them.")
+                      "a source: import_dataset(rows=[{...}, ...], name=...) makes them a dataset, and a query over "
+                      "a dataset computes the rest.")
     else:
         return None
     explanation = (
@@ -2226,6 +2244,10 @@ def _raw_query(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advic
         if used and found is not None and used[0] in inputs:
             return Advice(kind, text + f" The same request with {used[0]}'s dataset as the source is below.",
                           rewrite=resend(source=inputs[used[0]]))
+        if not used:
+            text += (" A query that reads no dataset at all only writes out values it holds (VALUES, literals); such "
+                     "rows enter as a dataset through import_dataset(rows=[{...}, ...], name=...), which the next "
+                     "transform reads by name.")
         return Advice(kind, text)
     if refused == "input_not_found":
         available = [str(d.get("name")) for d in err.details.get("available") or [] if isinstance(d, dict)]
