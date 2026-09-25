@@ -25,7 +25,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_PYTHON_PREFERENCE=only-managed \
     UV_LINK_MODE=copy
 WORKDIR /repo
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY agent_backend ./agent_backend
 RUN uv python install 3.12 \
     && uv sync --frozen --no-dev --group perception \
