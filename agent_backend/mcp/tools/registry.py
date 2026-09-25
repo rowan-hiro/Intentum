@@ -157,7 +157,9 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "a query, a join or a step object written there is refused with the request rewritten. A refused transform "
                              "comes back with `advice`: what the backend accepts instead and, when mechanical, a "
                              "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
-                             "says where a filtered value does occur; a result with the declared output shape says so.")
+                             "says where a filtered value does occur; a text column of numbers ordered against a quoted "
+                             "number, which compares as text, is named with the comparison rewritten to try_cast; a result "
+                             "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],
         transform: dict[str, Any] | list[Any] | str | None = None,
