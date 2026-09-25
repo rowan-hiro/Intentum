@@ -30,7 +30,7 @@ from ..contracts import repair_transform, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
 from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
                   TransformIR, TryCastExpr, UnaryExpr)
-from ..ir.expression_parser import parse_expression
+from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
@@ -306,50 +306,177 @@ def _outside_literals(text: str, respell: Callable[[str], str | None]) -> str | 
     return None if masked is None else re.sub(r"\x00(\d+)\x00", lambda m: literals[int(m.group(1))], masked)
 
 
+_EPOCH_RE = re.compile(r"\bextract\s*\(\s*epoch\s+from\s+", re.IGNORECASE)
+_BETWEEN_RE = re.compile(r"\bbetween\b", re.IGNORECASE)
+_EPOCH_START = "cast('1970-01-01' as timestamp)"
+
+
 def _respelled(text: str) -> str | None:
-    """SQL spellings with a direct equivalent here: backtick identifiers, and EXTRACT of a year, month or day."""
-    return _outside_literals(text, _respell_code)
+    """SQL spellings with a direct equivalent here: backtick identifiers, EXTRACT of a year, month, day or epoch,
+    and BETWEEN."""
+    code = _outside_literals(text, _respell_code)
+    return None if code is None else _between_respelled(code)
+
+
+def _closing(text: str, start: int) -> int | None:
+    """The index just past the parenthesis that closes one opened before ``start``."""
+    depth, end = 1, start
+    while end < len(text) and depth:
+        depth += {"(": 1, ")": -1}.get(text[end], 0)
+        end += 1
+    return None if depth else end
+
+
+def _unwrapped(code: str) -> str:
+    code = code.strip()
+    while code.startswith("(") and _closing(code, 1) == len(code):
+        code = code[1:-1].strip()
+    return code
+
+
+def _difference(code: str) -> tuple[str, str] | None:
+    """``(a, b)`` when ``code``, outer parentheses aside, is one subtraction ``a - b`` and nothing else."""
+    code = _unwrapped(code)
+    depth, minus = 0, []
+    for index, char in enumerate(code):
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if depth == 0 and char in "+*/%|":
+            return None
+        if depth == 0 and char == "-" and code[:index].rstrip()[-1:] not in ("", "(", ",", "-", "+", "*", "/"):
+            minus.append(index)
+    if len(minus) != 1:
+        return None
+    return code[:minus[0]].strip(), code[minus[0] + 1:].strip()
+
+
+def _top_level_arithmetic(code: str) -> bool:
+    depth = 0
+    for char in _unwrapped(code):
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if depth == 0 and char in "+-*/%":
+            return True
+    return False
 
 
 def _respell_code(text: str) -> str | None:
     out = re.sub(r'`"([^"`]+)"`', r'"\1"', text)
     out = re.sub(r"`([^`]+)`", lambda m: '"' + m.group(1).replace('"', '""') + '"', out)
     while (match := _EXTRACT_RE.search(out)) is not None:
-        depth, end = 1, match.end()
-        while end < len(out) and depth:
-            depth += {"(": 1, ")": -1}.get(out[end], 0)
-            end += 1
-        if depth:
+        end = _closing(out, match.end())
+        if end is None:
             return None
         out = out[:match.start()] + f"{match.group(1).lower()}({out[match.end():end - 1].strip()})" + out[end:]
+    while (match := _EPOCH_RE.search(out)) is not None:
+        # Seconds since 1970, or between two instants: date_diff counts whole seconds either way.
+        end = _closing(out, match.end())
+        if end is None:
+            return None
+        inner = out[match.end():end - 1].strip()
+        pair = _difference(inner)
+        if pair is None and _top_level_arithmetic(inner):
+            return None  # arithmetic on instants that is not one subtraction has no seconds to count
+        seconds = f"date_diff('second', {pair[1]}, {pair[0]})" if pair else f"date_diff('second', {_EPOCH_START}, {inner})"
+        out = out[:match.start()] + seconds + out[end:]
     return out
 
 
+_ENDS_OPERAND = {"and", "or", "not", "in", "is"}
+_COMPARISON_TOKENS = {"=", "==", "!=", "<>", "<", "<=", ">", ">=", ","}
+
+
+def _operand_start(tokens: list[tuple[str, str, int, int]], end: int) -> int:
+    """The first token of the operand that ends just before token ``end``."""
+    index, depth = end - 1, 0
+    while index >= 0:
+        kind, text = tokens[index][:2]
+        if kind == "op" and text in (")", "]"):
+            depth += 1
+        elif kind == "op" and text in ("(", "["):
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ((kind == "kw" and text in _ENDS_OPERAND) or (kind == "op" and text in _COMPARISON_TOKENS)):
+            break
+        index -= 1
+    return index + 1
+
+
+def _operand_end(tokens: list[tuple[str, str, int, int]], start: int) -> int:
+    """The token just past the operand that starts at token ``start``."""
+    index, depth = start, 0
+    while index < len(tokens):
+        kind, text = tokens[index][:2]
+        if kind == "op" and text in ("(", "["):
+            depth += 1
+        elif kind == "op" and text in (")", "]"):
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ((kind == "kw" and text in ("and", "or")) or (kind == "op" and text in _COMPARISON_TOKENS)):
+            break
+        index += 1
+    return index
+
+
+def _between_respelled(text: str) -> str | None:
+    """``x between a and b`` is ``(x >= a and x <= b)``; ``x not between a and b`` is ``(x < a or x > b)``."""
+    while _BETWEEN_RE.search(_STRING_LITERAL_RE.sub("''", text)):
+        try:
+            tokens = token_spans(text)
+        except BackendError:
+            return None
+        at = next((i for i, t in enumerate(tokens) if t[0] == "ident" and t[1].lower() == "between"), None)
+        if at is None:
+            return text
+        negated = at > 0 and tokens[at - 1][:2] == ("kw", "not")
+        left_end = at - 1 if negated else at
+        left_start = _operand_start(tokens, left_end)
+        low_end = _operand_end(tokens, at + 1)
+        if left_start >= left_end or low_end == at + 1 or low_end >= len(tokens) or tokens[low_end][:2] != ("kw", "and"):
+            return None
+        high_end = _operand_end(tokens, low_end + 1)
+        if high_end == low_end + 1:
+            return None
+        x = text[tokens[left_start][2]:tokens[left_end - 1][3]]
+        low = text[tokens[at + 1][2]:tokens[low_end - 1][3]]
+        high = text[tokens[low_end + 1][2]:tokens[high_end - 1][3]]
+        spelled = f"({x} < {low} or {x} > {high})" if negated else f"({x} >= {low} and {x} <= {high})"
+        text = text[:tokens[left_start][2]] + spelled + text[tokens[high_end - 1][3]:]
+    return text
+
+
 def _sql_spelling(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
-    """Backtick identifiers and EXTRACT(part FROM x) have direct spellings here: "name" and year(x), month(x), day(x)."""
+    """Backtick identifiers, EXTRACT(part FROM x) and BETWEEN have direct spellings here: "name", year(x), month(x),
+    day(x) or date_diff('second', ...), and a pair of comparisons."""
     if err.code != ErrorCode.INVALID_TRANSFORM or "expression" not in err.details:
         return None
     steps = _steps(arguments.get("transform"))
-    changed = False
+    changed = unspelled = False
     for step in steps:
         for path, text in _expression_texts(step):
             code = _STRING_LITERAL_RE.sub("''", text)
-            if "`" not in code and not _EXTRACT_RE.search(code):
+            if not ("`" in code or _EXTRACT_RE.search(code) or _EPOCH_RE.search(code) or _BETWEEN_RE.search(code)):
                 continue
             respelled = _respelled(text)
             if respelled is None or respelled == text:
+                unspelled = True
                 continue
             try:
                 parse_expression(respelled)
             except BackendError:
+                unspelled = True
                 continue
             _set_path(step, path, respelled)
             changed = True
-    if not changed:
+    if not (changed or unspelled):
         return None
-    return Advice("sql_spelling",
-                  "This language quotes names with double quotes, not backticks, and writes EXTRACT(YEAR FROM x) as "
-                  "year(x) (likewise month and day). The same request respelled:",
+    explanation = ("This language quotes names with double quotes, not backticks; writes EXTRACT(YEAR FROM x) as "
+                   "year(x) (likewise month and day); writes x BETWEEN a AND b as x >= a and x <= b; and counts the "
+                   "seconds of EXTRACT(EPOCH FROM ...) with date_diff('second', start, end), in whole seconds, from "
+                   f"{_EPOCH_START} for an instant.")
+    if unspelled:
+        return Advice("sql_spelling", explanation)
+    return Advice("sql_spelling", explanation + " The same request respelled:",
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
 
 

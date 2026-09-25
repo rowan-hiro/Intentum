@@ -515,8 +515,9 @@ a qualified or right-key name after a join (unqualified, or the left key under
 that name, naming any fuzzy match that hid it), join keys whose types do not
 compare (a derive casting the left key to the right key's type, then the join on
 it), a cast that meets a value it cannot convert (the same request with
-`try_cast`), SQL spellings with a direct equivalent (backtick names, `EXTRACT`,
-`ILIKE`), SQL that expressions do not have (`CASE`, a window function, a scalar
+`try_cast`), SQL spellings with a direct equivalent (backtick names, `EXTRACT`
+of a date part, `EXTRACT(EPOCH ...)` as `date_diff('second', ...)`, `BETWEEN`
+as two comparisons, `ILIKE`), SQL that expressions do not have (`CASE`, a window function, a scalar
 subquery: the step as a `raw_query` first step when it is the first step and
 reads only the source), a function the language lacks (the accepted name it was
 close to, otherwise the step as a `raw_query` first step, which runs any DuckDB

@@ -1174,6 +1174,46 @@ def test_backtick_names_and_extract_are_respelled(backend, orders):
     assert sorted(result["result"]["rows"]) == [[1006], [1010]]
 
 
+def test_between_is_respelled_as_a_pair_of_comparisons(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "amount BETWEEN 100 AND 500 and region != 'x between y'",
+                                                    "select": ["order_id"], "sort": "order_id"})
+    found = advice(response, "sql_spelling")
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == (
+        "(amount >= 100 and amount <= 500) and region != 'x between y'")
+    (result,) = run(backend, found["rewrite"])
+    assert [row[0] for row in result["result"]["rows"]] == [1001, 1002, 1004, 1005, 1007, 1008, 1009, 1011, 1012]
+
+    negated = backend.transform_dataset("orders", {"filter": "quantity * unit_price not between 100 and 500",
+                                                   "select": ["order_id"], "sort": "order_id"})
+    rewrite = advice(negated, "sql_spelling")["rewrite"]
+    assert rewrite[0]["arguments"]["transform"]["filter"] == (
+        "(quantity * unit_price < 100 or quantity * unit_price > 500)")
+    assert [row[0] for row in run(backend, rewrite)[0]["result"]["rows"]] == [1003, 1006, 1010]
+
+
+def test_extract_epoch_is_counted_in_seconds_with_date_diff(backend, tmp_path):
+    path = write_csv(tmp_path / "jobs.csv", "job,started,finished",
+                     ["build,2026-09-01 10:00:00,2026-09-01 10:01:30", "deploy,2026-09-01 11:00:00,2026-09-01 12:00:00"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    response = backend.transform_dataset("jobs", {"derive": {"seconds": "EXTRACT(EPOCH FROM (finished - started))",
+                                                             "at": "extract(epoch from started)"},
+                                                  "select": ["job", "seconds", "at"]})
+    found = advice(response, "sql_spelling")
+    assert found["rewrite"][0]["arguments"]["transform"]["derive"] == {
+        "seconds": "date_diff('second', started, finished)",
+        "at": "date_diff('second', cast('1970-01-01' as timestamp), started)"}
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [["build", 90, 1788256800], ["deploy", 3600, 1788260400]]
+
+
+def test_a_between_or_epoch_with_no_mechanical_respelling_is_explained(backend, orders):
+    unfinished = advice(backend.transform_dataset("orders", {"filter": "amount between 100"}), "sql_spelling")
+    assert "x >= a and x <= b" in unfinished["explanation"] and "rewrite" not in unfinished
+    summed = advice(backend.transform_dataset("orders", {"derive": {"s": "extract(epoch from order_date - order_date + order_date)"}}),
+                    "sql_spelling")
+    assert "date_diff('second', start, end)" in summed["explanation"] and "rewrite" not in summed
+
+
 def test_ilike_and_like_on_a_function_result_become_contains(backend, orders):
     response = backend.transform_dataset("orders", {"filter": "region = 'West' AND (LOWER(customer) LIKE '%acme%' OR customer ILIKE '%UMBRELLA%')",
                                                     "select": ["order_id", "customer"]})
