@@ -63,9 +63,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "keyed by column name with description/aliases/semantic_role/type/unit. Text columns "
                              "whose values are all ISO dates or timestamps become date/timestamp columns; a `type` "
                              "hint overrides that. Safe to retry: identical content and name replays the original "
-                             "result.")
+                             "result. Instead of `path`, `rows` (a list of objects, one per row, values text, numbers, "
+                             "booleans or null) with a `name` enters values you read or computed outside the backend, "
+                             "from a document, an image, a video or your own reasoning, as a dataset with the same "
+                             "provenance as a file; a literal answer is entered this way, not written into a query.")
     def import_dataset(
-        path: str,
+        path: str | None = None,
+        rows: list[dict[str, Any]] | None = None,
         name: str | None = None,
         description: str | None = None,
         table: str | None = None,
@@ -73,7 +77,7 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         aliases: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        return backend.import_dataset(path, name=name, description=description, table=table,
+        return backend.import_dataset(path, rows=rows, name=name, description=description, table=table,
                                       schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key)
 
     @server.tool(name="import_workspace", annotations=annotations("write"),
@@ -150,14 +154,18 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "int, double and varchar also work; x::type is the same cast) and try_cast(x as type), which "
                              "yields null where cast would fail, and the functions abs round floor ceil upper lower trim length "
                              "substr left right concat (or ||) coalesce year month day date date_trunc date_diff(unit, start, end) strftime "
-                             "is_null contains starts_with ends_with. Field names may be approximate; the response "
+                             "is_null contains starts_with ends_with, and replace(text, from, to) and regexp_replace(text, "
+                             "pattern, replacement), which replace every occurrence to clean a value read as text before a "
+                             "cast. Field names may be approximate; the response "
                              "lists how each was resolved, or returns needs_resolution with candidates. Transforms "
                              "compute values; how they are rendered as text is export_result's business. `transform` is required; "
                              "an empty list previews the source as it is. `source` names one dataset (id, name or description); "
                              "a query, a join or a step object written there is refused with the request rewritten. A refused transform "
                              "comes back with `advice`: what the backend accepts instead and, when mechanical, a "
                              "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
-                             "says where a filtered value does occur; a result with the declared output shape says so.")
+                             "says where a filtered value does occur; a text column of numbers ordered against a quoted "
+                             "number, which compares as text, is named with the comparison rewritten to try_cast; a result "
+                             "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],
         transform: dict[str, Any] | list[Any] | str | None = None,

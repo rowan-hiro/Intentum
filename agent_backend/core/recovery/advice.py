@@ -4,10 +4,11 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Two
+rewrites the agent's own request into tool calls it can send as-is. Three
 signals on successful responses get the same treatment: an empty result whose
-filter literal is absent from the filtered column, and a result that already
-has (or mechanically reshapes to) the declared output shape.
+filter literal is absent from the filtered column, a text column of numbers
+ordered against a quoted number (it compares as text), and a result that
+already has (or mechanically reshapes to) the declared output shape.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -27,8 +28,9 @@ from typing import Any, Callable
 
 from ..contracts import repair_transform, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
-from ..ir import BinaryExpr, CastExpr, ColumnExpr, FilterStep, InExpr, LiteralExpr, TransformIR
-from ..ir.expression_parser import parse_expression
+from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
+                  TransformIR, TryCastExpr, UnaryExpr)
+from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
@@ -304,50 +306,177 @@ def _outside_literals(text: str, respell: Callable[[str], str | None]) -> str | 
     return None if masked is None else re.sub(r"\x00(\d+)\x00", lambda m: literals[int(m.group(1))], masked)
 
 
+_EPOCH_RE = re.compile(r"\bextract\s*\(\s*epoch\s+from\s+", re.IGNORECASE)
+_BETWEEN_RE = re.compile(r"\bbetween\b", re.IGNORECASE)
+_EPOCH_START = "cast('1970-01-01' as timestamp)"
+
+
 def _respelled(text: str) -> str | None:
-    """SQL spellings with a direct equivalent here: backtick identifiers, and EXTRACT of a year, month or day."""
-    return _outside_literals(text, _respell_code)
+    """SQL spellings with a direct equivalent here: backtick identifiers, EXTRACT of a year, month, day or epoch,
+    and BETWEEN."""
+    code = _outside_literals(text, _respell_code)
+    return None if code is None else _between_respelled(code)
+
+
+def _closing(text: str, start: int) -> int | None:
+    """The index just past the parenthesis that closes one opened before ``start``."""
+    depth, end = 1, start
+    while end < len(text) and depth:
+        depth += {"(": 1, ")": -1}.get(text[end], 0)
+        end += 1
+    return None if depth else end
+
+
+def _unwrapped(code: str) -> str:
+    code = code.strip()
+    while code.startswith("(") and _closing(code, 1) == len(code):
+        code = code[1:-1].strip()
+    return code
+
+
+def _difference(code: str) -> tuple[str, str] | None:
+    """``(a, b)`` when ``code``, outer parentheses aside, is one subtraction ``a - b`` and nothing else."""
+    code = _unwrapped(code)
+    depth, minus = 0, []
+    for index, char in enumerate(code):
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if depth == 0 and char in "+*/%|":
+            return None
+        if depth == 0 and char == "-" and code[:index].rstrip()[-1:] not in ("", "(", ",", "-", "+", "*", "/"):
+            minus.append(index)
+    if len(minus) != 1:
+        return None
+    return code[:minus[0]].strip(), code[minus[0] + 1:].strip()
+
+
+def _top_level_arithmetic(code: str) -> bool:
+    depth = 0
+    for char in _unwrapped(code):
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if depth == 0 and char in "+-*/%":
+            return True
+    return False
 
 
 def _respell_code(text: str) -> str | None:
     out = re.sub(r'`"([^"`]+)"`', r'"\1"', text)
     out = re.sub(r"`([^`]+)`", lambda m: '"' + m.group(1).replace('"', '""') + '"', out)
     while (match := _EXTRACT_RE.search(out)) is not None:
-        depth, end = 1, match.end()
-        while end < len(out) and depth:
-            depth += {"(": 1, ")": -1}.get(out[end], 0)
-            end += 1
-        if depth:
+        end = _closing(out, match.end())
+        if end is None:
             return None
         out = out[:match.start()] + f"{match.group(1).lower()}({out[match.end():end - 1].strip()})" + out[end:]
+    while (match := _EPOCH_RE.search(out)) is not None:
+        # Seconds since 1970, or between two instants: date_diff counts whole seconds either way.
+        end = _closing(out, match.end())
+        if end is None:
+            return None
+        inner = out[match.end():end - 1].strip()
+        pair = _difference(inner)
+        if pair is None and _top_level_arithmetic(inner):
+            return None  # arithmetic on instants that is not one subtraction has no seconds to count
+        seconds = f"date_diff('second', {pair[1]}, {pair[0]})" if pair else f"date_diff('second', {_EPOCH_START}, {inner})"
+        out = out[:match.start()] + seconds + out[end:]
     return out
 
 
+_ENDS_OPERAND = {"and", "or", "not", "in", "is"}
+_COMPARISON_TOKENS = {"=", "==", "!=", "<>", "<", "<=", ">", ">=", ","}
+
+
+def _operand_start(tokens: list[tuple[str, str, int, int]], end: int) -> int:
+    """The first token of the operand that ends just before token ``end``."""
+    index, depth = end - 1, 0
+    while index >= 0:
+        kind, text = tokens[index][:2]
+        if kind == "op" and text in (")", "]"):
+            depth += 1
+        elif kind == "op" and text in ("(", "["):
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ((kind == "kw" and text in _ENDS_OPERAND) or (kind == "op" and text in _COMPARISON_TOKENS)):
+            break
+        index -= 1
+    return index + 1
+
+
+def _operand_end(tokens: list[tuple[str, str, int, int]], start: int) -> int:
+    """The token just past the operand that starts at token ``start``."""
+    index, depth = start, 0
+    while index < len(tokens):
+        kind, text = tokens[index][:2]
+        if kind == "op" and text in ("(", "["):
+            depth += 1
+        elif kind == "op" and text in (")", "]"):
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ((kind == "kw" and text in ("and", "or")) or (kind == "op" and text in _COMPARISON_TOKENS)):
+            break
+        index += 1
+    return index
+
+
+def _between_respelled(text: str) -> str | None:
+    """``x between a and b`` is ``(x >= a and x <= b)``; ``x not between a and b`` is ``(x < a or x > b)``."""
+    while _BETWEEN_RE.search(_STRING_LITERAL_RE.sub("''", text)):
+        try:
+            tokens = token_spans(text)
+        except BackendError:
+            return None
+        at = next((i for i, t in enumerate(tokens) if t[0] == "ident" and t[1].lower() == "between"), None)
+        if at is None:
+            return text
+        negated = at > 0 and tokens[at - 1][:2] == ("kw", "not")
+        left_end = at - 1 if negated else at
+        left_start = _operand_start(tokens, left_end)
+        low_end = _operand_end(tokens, at + 1)
+        if left_start >= left_end or low_end == at + 1 or low_end >= len(tokens) or tokens[low_end][:2] != ("kw", "and"):
+            return None
+        high_end = _operand_end(tokens, low_end + 1)
+        if high_end == low_end + 1:
+            return None
+        x = text[tokens[left_start][2]:tokens[left_end - 1][3]]
+        low = text[tokens[at + 1][2]:tokens[low_end - 1][3]]
+        high = text[tokens[low_end + 1][2]:tokens[high_end - 1][3]]
+        spelled = f"({x} < {low} or {x} > {high})" if negated else f"({x} >= {low} and {x} <= {high})"
+        text = text[:tokens[left_start][2]] + spelled + text[tokens[high_end - 1][3]:]
+    return text
+
+
 def _sql_spelling(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
-    """Backtick identifiers and EXTRACT(part FROM x) have direct spellings here: "name" and year(x), month(x), day(x)."""
+    """Backtick identifiers, EXTRACT(part FROM x) and BETWEEN have direct spellings here: "name", year(x), month(x),
+    day(x) or date_diff('second', ...), and a pair of comparisons."""
     if err.code != ErrorCode.INVALID_TRANSFORM or "expression" not in err.details:
         return None
     steps = _steps(arguments.get("transform"))
-    changed = False
+    changed = unspelled = False
     for step in steps:
         for path, text in _expression_texts(step):
             code = _STRING_LITERAL_RE.sub("''", text)
-            if "`" not in code and not _EXTRACT_RE.search(code):
+            if not ("`" in code or _EXTRACT_RE.search(code) or _EPOCH_RE.search(code) or _BETWEEN_RE.search(code)):
                 continue
             respelled = _respelled(text)
             if respelled is None or respelled == text:
+                unspelled = True
                 continue
             try:
                 parse_expression(respelled)
             except BackendError:
+                unspelled = True
                 continue
             _set_path(step, path, respelled)
             changed = True
-    if not changed:
+    if not (changed or unspelled):
         return None
-    return Advice("sql_spelling",
-                  "This language quotes names with double quotes, not backticks, and writes EXTRACT(YEAR FROM x) as "
-                  "year(x) (likewise month and day). The same request respelled:",
+    explanation = ("This language quotes names with double quotes, not backticks; writes EXTRACT(YEAR FROM x) as "
+                   "year(x) (likewise month and day); writes x BETWEEN a AND b as x >= a and x <= b; and counts the "
+                   "seconds of EXTRACT(EPOCH FROM ...) with date_diff('second', start, end), in whole seconds, from "
+                   f"{_EPOCH_START} for an instant.")
+    if unspelled:
+        return Advice("sql_spelling", explanation)
+    return Advice("sql_spelling", explanation + " The same request respelled:",
                   rewrite=[call(tool, **_call_arguments(tool, arguments, transform=_rebuild(arguments.get("transform"), steps)))])
 
 
@@ -606,6 +735,16 @@ def _query_source(inputs: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
     return first, dict(inputs)
 
 
+_INLINE_ROWS = "inline_rows"
+
+
+def _is_row(item: Any) -> bool:
+    """An object of column values: flat, and naming no dataset, reference or step (those are inline relations)."""
+    return (isinstance(item, dict) and bool(item)
+            and all(v is None or isinstance(v, (str, int, float, bool)) for v in item.values())
+            and not set(item) & (_STEP_KEYS | set(_DATASET_KEYS) | set(_LEFT_KEYS) | set(_REFERENCE_KEYS)))
+
+
 def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """A relation written inline as the source is a dataset to materialize first, or a step of the transform."""
     source = arguments.get("source")
@@ -700,6 +839,13 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
                           "reads are bound under its inputs.",
                           rewrite=[call(tool, **_call_arguments(tool, arguments, source=dataset,
                                                                 transform=_rebuild(arguments.get("transform"), steps)))])
+    if isinstance(source, list) and source and all(_is_row(s) for s in source):
+        # Rows written inline: import_dataset makes them a dataset, which the transform then reads by name.
+        return Advice("source_as_dataset", f"{_SOURCE_IS_ONE} the backend manages. Rows written inline become one "
+                      "through import_dataset(rows=[...], name=...), which keeps them with their provenance; the "
+                      "transform then reads that name.",
+                      rewrite=[call("import_dataset", rows=source, name=_INLINE_ROWS),
+                               call(tool, **_call_arguments(tool, arguments, source=_INLINE_ROWS))])
     if isinstance(source, list):
         specs = [s for s in source if isinstance(s, dict)]
     elif isinstance(source, dict) and set(source) & _STEP_KEYS:
@@ -707,7 +853,8 @@ def _inline_source(err: BackendError, tool: str, arguments: dict[str, Any]) -> A
     elif isinstance(source, dict):
         # Rows or a configuration written inline: nothing here names a dataset.
         return Advice("source_as_dataset", f"{_SOURCE_IS_ONE} the backend manages. Rows written inline are not "
-                      "a source; a query over the source computes them.")
+                      "a source: import_dataset(rows=[{...}, ...], name=...) makes them a dataset, and a query over "
+                      "a dataset computes the rest.")
     else:
         return None
     explanation = (
@@ -2097,6 +2244,10 @@ def _raw_query(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advic
         if used and found is not None and used[0] in inputs:
             return Advice(kind, text + f" The same request with {used[0]}'s dataset as the source is below.",
                           rewrite=resend(source=inputs[used[0]]))
+        if not used:
+            text += (" A query that reads no dataset at all only writes out values it holds (VALUES, literals); such "
+                     "rows enter as a dataset through import_dataset(rows=[{...}, ...], name=...), which the next "
+                     "transform reads by name.")
         return Advice(kind, text)
     if refused == "input_not_found":
         available = [str(d.get("name")) for d in err.details.get("available") or [] if isinstance(d, dict)]
@@ -2317,6 +2468,113 @@ def advise_empty_result(
                   "The result is empty. " + "; ".join(absent + present)
                   + ". A value that lives in another column is usually a different identifier: relate the datasets "
                     "through the column that holds it, rather than filtering this one by it.")
+
+
+_NUMBER_TEXT_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_FLIPPED = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
+_WRITTEN_COMPARISON_RE = re.compile(
+    r"""(?P<col>"(?:[^"]|"")+"|[^\W\d][\w.]*)\s*(?P<op><=|>=|<|>)\s*'(?P<lit>[^']*)'"""
+    r"""|'(?P<rlit>[^']*)'\s*(?P<rop><=|>=|<|>)\s*(?P<rcol>"(?:[^"]|"")+"|[^\W\d][\w.]*)""")
+
+
+def _text_comparisons(ir: TransformIR) -> list[tuple[ColumnExpr, str, str]]:
+    """``(column, op, text)`` for each ordering comparison of a source text column with a quoted number in the
+    filters and derives, written column first: ``'5' < x`` is ``x > '5'``."""
+    found: list[tuple[ColumnExpr, str, str]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, BinaryExpr):
+            if node.op in _FLIPPED:
+                for column, other, op in ((node.left, node.right, node.op), (node.right, node.left, _FLIPPED[node.op])):
+                    if (isinstance(column, ColumnExpr) and column.logical_type == LogicalType.STRING
+                            and column.field.column_id and isinstance(other, LiteralExpr)
+                            and isinstance(other.value, str) and _NUMBER_TEXT_RE.fullmatch(other.value.strip())):
+                        found.append((column, op, other.value))
+            walk(node.left)
+            walk(node.right)
+        elif isinstance(node, UnaryExpr):
+            walk(node.operand)
+        elif isinstance(node, FunctionExpr):
+            for arg in node.args:
+                walk(arg)
+        elif isinstance(node, (CastExpr, TryCastExpr, InExpr)):
+            walk(node.expr)
+
+    for step in ir.steps:
+        if isinstance(step, FilterStep):
+            walk(step.predicate)
+        elif isinstance(step, DeriveStep):
+            walk(step.expression)
+    return found[:4]
+
+
+def _compared_as_numbers(text: str, field: str, op: str, literal: str) -> tuple[str, int]:
+    """``text`` with each written ``field op 'literal'`` comparing ``try_cast(field as double)`` with the number."""
+    count = 0
+
+    def names_field(written: str) -> bool:
+        return normalize(_bare(written).strip('"').replace('""', '"')) == normalize(field)
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal count
+        if match.group("col") is not None:
+            if names_field(match.group("col")) and match.group("op") == op and match.group("lit") == literal:
+                count += 1
+                return f"try_cast({match.group('col')} as double) {op} {literal.strip()}"
+        elif names_field(match.group("rcol")) and _FLIPPED[match.group("rop")] == op and match.group("rlit") == literal:
+            count += 1
+            return f"{literal.strip()} {match.group('rop')} try_cast({match.group('rcol')} as double)"
+        return match.group(0)
+
+    return _WRITTEN_COMPARISON_RE.sub(replace, text), count
+
+
+def advise_text_comparison(
+    ir: TransformIR,
+    *,
+    used: list[Dataset],
+    compare: Callable[[Dataset, Column, str, str], tuple[int, int, str | None]],
+    tool: str,
+    arguments: dict[str, Any],
+) -> Advice | None:
+    """A text column holding numbers, ordered against a quoted number, compares as text: '99' sorts after '100'.
+
+    Said only when every non-blank value of the column is a number and some of them fall on the other side of the
+    comparison as numbers; a column of codes, or a comparison that text and numbers agree on, stays silent.
+    """
+    by_column: dict[str, tuple[Dataset, Column]] = {c.id: (d, c) for d in used for c in d.columns}
+    findings: list[tuple[str, str, str]] = []
+    facts: list[str] = []
+    for column, op, literal in _text_comparisons(ir):
+        if column.field.column_id not in by_column:
+            continue
+        dataset, source = by_column[column.field.column_id]
+        unparsed, differ, example = compare(dataset, source, op, literal)
+        if unparsed or not differ:
+            continue
+        findings.append((column.field.name, op, literal))
+        facts.append(f"{dataset.name}.{source.name} holds numbers stored as text, so {column.field.name} {op} "
+                     f"'{literal}' compared them as text: {differ} of its values {'falls' if differ == 1 else 'fall'} "
+                     f"on the other side of it as numbers, e.g. '{example}'")
+    if not findings:
+        return None
+    explanation = "; ".join(facts) + ". Comparing try_cast(field as double) with the unquoted number compares numbers"
+    steps = _steps(arguments.get("transform"))
+    matched: set[int] = set()
+    for step in steps:
+        for path, text in _expression_texts(step):
+            for index, (field, op, literal) in enumerate(findings):
+                text, count = _compared_as_numbers(text, field, op, literal)
+                if count:
+                    matched.add(index)
+                    _set_path(step, path, text)
+    if len(matched) < len(findings) or tool not in _TRANSFORM_TOOLS:
+        return Advice("numbers_compared_as_text", explanation + ".")
+    overrides: dict[str, Any] = {"transform": _rebuild(arguments.get("transform"), steps)}
+    if tool == "materialize_result" and isinstance(arguments.get("name"), str):
+        overrides["name"] = slugify(f"{arguments['name']}_numeric")  # the first result keeps its name
+    return Advice("numbers_compared_as_text", explanation + "; the same request compared that way:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

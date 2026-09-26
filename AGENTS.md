@@ -41,7 +41,7 @@ perception extracts enters the backend only through `import_dataset` or
 | `agent_backend/core/audit/` | Record and retrieve audit events for entities and operations. |
 | `agent_backend/storage/metadata/` | `MetadataStore` protocol and SQLite implementation. |
 | `agent_backend/storage/duckdb/` | `AnalyticsEngine` protocol and DuckDB implementation, plus the sandbox raw_query statements are parsed, described and run in (`sandbox.py`). |
-| `agent_backend/storage/files/` | Managed workspace paths and imported source-file copies. |
+| `agent_backend/storage/files/` | Managed workspace paths, imported source-file copies, and rows written inline kept as JSON sources. |
 | `agent_backend/mcp/server/main.py` | MCP server creation and the `agent-backend-mcp` CLI entry point over stdio. |
 | `agent_backend/mcp/tools/registry.py` | Semantic MCP tool definitions that delegate to `Backend`. |
 | `tests/` | pytest coverage for imports, resolution, transforms, lifecycle, idempotency, failures, MCP, end-to-end flows, and the harness/backend boundary. |

@@ -62,3 +62,9 @@ The deferred reference-by-record consequence is implemented as semi_join: the ri
 Status: Accepted → Accepted
 
 Unaffected by the timing experiment: a declaration is the agent's fresh output when it is made, at turn 1 or turn 24, and later exports are verified against it either way. The experiment moved when the fresh output is produced, not how it is trusted.
+
+### 2026-09-25T16:42:44.326Z, outcome 2026-09-25-1637-r4xp
+
+Status: accepted -> accepted
+
+Rows the agent writes inline to import_dataset are its fresh output and are accepted as given: the backend checks their shape (objects of text, numbers, booleans or null) and nothing about their truth. From the moment they are imported they are a dataset with an artifact and an operation record, so later turns point at the dataset by name instead of retyping the values, as the design consequence here asks.

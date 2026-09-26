@@ -265,6 +265,12 @@ class ExpressionParser:
         return target.text
 
 
+def token_spans(text: str) -> list[tuple[str, str, int, int]]:
+    """Each token of an expression as ``(kind, text, start, end)``, for advice that respells it; keywords are
+    lower-cased, string and quoted-name tokens keep their quotes."""
+    return [(t.kind, t.text, t.pos, t.pos + len(t.text)) for t in _tokenize(text) if t.kind != "eof"]
+
+
 def parse_expression(text: str) -> dict[str, Any]:
     """Parse an expression string into a loose expression tree."""
     if not text or not text.strip():

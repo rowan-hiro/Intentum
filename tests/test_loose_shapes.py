@@ -4,6 +4,8 @@ Each test here corresponds to a shape observed in the qwen3.5-35b-a3b runs of
 2026-08-28 (agent_harness/scenarios/dataspace/README.md) that the resolver used to refuse.
 """
 
+import json
+
 from tests.conftest import write_csv
 
 
@@ -157,6 +159,50 @@ def test_date_diff_counts_units_between_dates_and_timestamps(backend, tmp_path):
     subtracted = backend.transform_dataset("stays", {"derive": {"x": "discharged - cast(admitted as date)"}})
     assert subtracted["code"] == "TYPE_MISMATCH" and "date_diff('day', start, end)" in subtracted["hint"]
     assert [a["kind"] for a in subtracted["advice"]] == ["temporal_difference"]
+
+
+def holdings(backend, tmp_path):
+    """Figures copied out of a document keep their markup, units and thousands separators."""
+    path = tmp_path / "holdings.json"
+    path.write_text(json.dumps([{"holder": "North Fund", "shares": "**18,713,981** 股", "note": "Rated A-B-C"},
+                                {"holder": "Harbor Trust", "shares": "1,234,567", "note": "rated a-b"}],
+                               ensure_ascii=False), encoding="utf-8")
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_replace_and_regexp_replace_clean_every_occurrence_before_a_cast(backend, tmp_path):
+    holdings(backend, tmp_path)
+    response = backend.transform_dataset("holdings", {
+        "derive": {"shares_n": "try_cast(regexp_replace(shares, '[^0-9.]', '') as bigint)",
+                   "no_commas": "replace(shares, ',', '')"},
+        "select": ["holder", "shares_n", "no_commas"]})
+    assert rows(response) == [["North Fund", 18713981, "**18713981** 股"], ["Harbor Trust", 1234567, "1234567"]]
+    assert [c["type"] for c in response["result"]["columns"]] == ["string", "integer", "string"]
+    dashes = backend.transform_dataset("holdings", {"derive": {"x": "regexp_replace(note, '-', '+')"}, "select": ["x"]})
+    assert rows(dashes) == [["Rated A+B+C"], ["rated a+b"]]  # every match, where DuckDB alone replaces the first
+    wrong = backend.transform_dataset("holdings", {"derive": {"x": "replace(shares, 1, '')"}})
+    assert wrong["code"] == "TYPE_MISMATCH" and wrong["details"]["signature"] == "replace(string, string, string)"
+
+
+def test_regexp_replace_options_fold_into_the_three_argument_form(backend, tmp_path):
+    holdings(backend, tmp_path)
+    folded = backend.transform_dataset("holdings", {"derive": {"x": "regexp_replace(note, 'rated', 'Grade', 'gi')"},
+                                                    "select": ["x"]})
+    assert rows(folded) == [["Grade A-B-C"], ["Grade a-b"]]
+    assert folded["resolution"][0]["reason"] == "every match is replaced without options; (?i) makes the pattern case-insensitive"
+    ir = backend.get_operation(folded["operation_id"])["canonical_ir"]
+    args = ir["steps"][0]["expression"]["args"]
+    assert len(args) == 3 and args[1]["value"] == "(?i)rated"
+    other = backend.transform_dataset("holdings", {"derive": {"x": "regexp_replace(note, '-', '+', 'm')"}})
+    assert other["code"] == "INVALID_TRANSFORM" and "(?i)" in other["message"]
+    assert other["details"]["signature"] == "regexp_replace(string, string, string)"
+
+
+def test_a_pattern_the_engine_rejects_fails_the_transform_with_a_structured_error(backend, tmp_path):
+    holdings(backend, tmp_path)
+    response = backend.transform_dataset("holdings", {"derive": {"x": "regexp_replace(note, '(', '')"}})
+    assert response["status"] == "error" and response["code"] == "EXECUTION_FAILED"
+    assert "missing )" in response["message"]
 
 
 def test_group_by_a_named_expression_derives_it_first(backend, orders):

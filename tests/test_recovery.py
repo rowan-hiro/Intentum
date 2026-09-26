@@ -40,6 +40,8 @@ def run(backend, rewrite):
             response = backend.export_result(args.pop("dataset"), args.pop("path"), **args)
         elif tool == "attach_metadata":
             response = backend.attach_metadata(args.pop("source"), **args)
+        elif tool == "import_dataset":
+            response = backend.import_dataset(**args)
         else:
             raise AssertionError(f"unexpected tool in rewrite: {tool}")
         assert response["status"] == "success", response
@@ -211,6 +213,23 @@ def test_an_inline_relation_as_source_is_materialized_first(backend, orders):
     assert result["result"]["row_count"] == 2 and names(result) == ["order_id", "customer", "amount"]
 
 
+def test_rows_written_as_the_source_are_imported_first(backend, orders):
+    readings = [{"station": "Pier 4", "reading": 12}, {"station": "Dock 7", "reading": 7.5}]
+    response = backend.transform_dataset(readings, {"filter": "reading > 8", "select": ["station"]})
+    assert response["status"] == "error"
+    found = advice(response, "source_as_dataset")
+    assert "import_dataset(rows=[...], name=...)" in found["explanation"]
+    imported, transform = found["rewrite"]
+    assert imported == {"tool": "import_dataset", "arguments": {"rows": readings, "name": "inline_rows"}}
+    assert transform["arguments"] == {"source": "inline_rows", "transform": {"filter": "reading > 8", "select": ["station"]}}
+    _, result = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [["Pier 4"]]
+
+    one = backend.transform_dataset({"station": "Gate 1", "reading": 3}, {"select": ["station"]})
+    found = advice(one, "source_as_dataset")
+    assert "import_dataset(rows=[{...}, ...], name=...)" in found["explanation"] and "rewrite" not in found
+
+
 def test_an_unknown_key_is_mapped_to_the_nearest_accepted_one(backend, orders):
     response = backend.transform_dataset("orders", {"filter": "amount > 100", "sortby": "-amount", "limit": 2})
     assert response["code"] == "INVALID_INTENT"
@@ -251,6 +270,58 @@ def test_an_empty_result_whose_values_all_occur_is_reported_as_a_combination(bac
     assert response["result"]["row_count"] == 0
     found = advice(response, "no_matching_rows")
     assert "'South' occurs in orders.region" in found["explanation"] and "'Acme Corp' occurs in orders.customer" in found["explanation"]
+
+
+def lots(backend, tmp_path: Path, weights=("99999999", "100000000", "250000000", " "), name="lots"):
+    """Weights read from a document arrive as text; a blank is a missing value, not a word."""
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps([{"lot": chr(65 + i), "weight": w} for i, w in enumerate(weights)]), encoding="utf-8")
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_numbers_stored_as_text_ordered_against_a_quoted_number_are_said_to_compare_as_text(backend, tmp_path):
+    lots(backend, tmp_path)
+    response = backend.transform_dataset("lots", {"filter": "weight > '100000000'", "select": ["lot", "weight"]})
+    assert response["status"] == "success"
+    assert [row[0] for row in response["result"]["rows"]] == ["A", "C"]  # '99999999' > '100000000' as text
+    found = advice(response, "numbers_compared_as_text")
+    assert "lots.weight holds numbers stored as text" in found["explanation"]
+    assert "1 of its values falls on the other side" in found["explanation"] and "'99999999'" in found["explanation"]
+    (transform,) = found["rewrite"]
+    assert transform["arguments"]["transform"] == {"filter": "try_cast(weight as double) > 100000000",
+                                                   "select": ["lot", "weight"]}
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [["C", "250000000"]] and "advice" not in result
+
+
+def test_a_quoted_number_on_the_left_and_a_comparison_in_a_derive_are_rewritten_in_place(backend, tmp_path):
+    lots(backend, tmp_path)
+    flipped = backend.transform_dataset("lots", [{"filter": "'100000000' < weight"}, {"select": ["lot"]}])
+    rewrite = advice(flipped, "numbers_compared_as_text")["rewrite"]
+    assert rewrite[0]["arguments"]["transform"] == [{"filter": "100000000 < try_cast(weight as double)"}, {"select": ["lot"]}]
+    assert run(backend, rewrite)[0]["result"]["rows"] == [["C"]]
+
+    derived = backend.materialize_result("lots", {"derive": {"heavy": "weight >= '100000000'"}}, "heavy_lots")
+    assert derived["status"] == "success"
+    (call,) = advice(derived, "numbers_compared_as_text")["rewrite"]
+    assert call["tool"] == "materialize_result" and call["arguments"]["name"] == "heavy_lots_numeric"
+    assert call["arguments"]["transform"] == {"derive": {"heavy": "try_cast(weight as double) >= 100000000"}}
+    run(backend, [call])
+    rows = backend.transform_dataset("heavy_lots_numeric", {"select": ["lot", "heavy"], "sort": "lot"})["result"]["rows"]
+    assert rows == [["A", False], ["B", True], ["C", True], ["D", None]]
+
+
+def test_text_comparisons_that_numbers_would_not_change_or_that_hold_codes_stay_silent(backend, orders, tmp_path):
+    lots(backend, tmp_path)
+    agreeing = backend.transform_dataset("lots", {"filter": "weight > '1'"})
+    assert agreeing["result"]["row_count"] == 3 and "numbers_compared_as_text" not in kinds(agreeing)
+
+    lots(backend, tmp_path, weights=("99", "100", "A10"), name="bins")
+    coded = backend.transform_dataset("bins", {"filter": "weight > '100'"})
+    assert coded["status"] == "success" and "numbers_compared_as_text" not in kinds(coded)
+
+    numeric = backend.transform_dataset("orders", {"filter": "amount > 100"})
+    assert "numbers_compared_as_text" not in kinds(numeric)
 
 
 def test_a_non_empty_result_carries_no_empty_result_advice(backend, orders):
@@ -1120,6 +1191,46 @@ def test_backtick_names_and_extract_are_respelled(backend, orders):
     assert found["rewrite"][0]["arguments"]["transform"]["filter"] == '"amount" > 500 AND day(order_date) = 26'
     (result,) = run(backend, found["rewrite"])
     assert sorted(result["result"]["rows"]) == [[1006], [1010]]
+
+
+def test_between_is_respelled_as_a_pair_of_comparisons(backend, orders):
+    response = backend.transform_dataset("orders", {"filter": "amount BETWEEN 100 AND 500 and region != 'x between y'",
+                                                    "select": ["order_id"], "sort": "order_id"})
+    found = advice(response, "sql_spelling")
+    assert found["rewrite"][0]["arguments"]["transform"]["filter"] == (
+        "(amount >= 100 and amount <= 500) and region != 'x between y'")
+    (result,) = run(backend, found["rewrite"])
+    assert [row[0] for row in result["result"]["rows"]] == [1001, 1002, 1004, 1005, 1007, 1008, 1009, 1011, 1012]
+
+    negated = backend.transform_dataset("orders", {"filter": "quantity * unit_price not between 100 and 500",
+                                                   "select": ["order_id"], "sort": "order_id"})
+    rewrite = advice(negated, "sql_spelling")["rewrite"]
+    assert rewrite[0]["arguments"]["transform"]["filter"] == (
+        "(quantity * unit_price < 100 or quantity * unit_price > 500)")
+    assert [row[0] for row in run(backend, rewrite)[0]["result"]["rows"]] == [1003, 1006, 1010]
+
+
+def test_extract_epoch_is_counted_in_seconds_with_date_diff(backend, tmp_path):
+    path = write_csv(tmp_path / "jobs.csv", "job,started,finished",
+                     ["build,2026-09-01 10:00:00,2026-09-01 10:01:30", "deploy,2026-09-01 11:00:00,2026-09-01 12:00:00"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    response = backend.transform_dataset("jobs", {"derive": {"seconds": "EXTRACT(EPOCH FROM (finished - started))",
+                                                             "at": "extract(epoch from started)"},
+                                                  "select": ["job", "seconds", "at"]})
+    found = advice(response, "sql_spelling")
+    assert found["rewrite"][0]["arguments"]["transform"]["derive"] == {
+        "seconds": "date_diff('second', started, finished)",
+        "at": "date_diff('second', cast('1970-01-01' as timestamp), started)"}
+    (result,) = run(backend, found["rewrite"])
+    assert result["result"]["rows"] == [["build", 90, 1788256800], ["deploy", 3600, 1788260400]]
+
+
+def test_a_between_or_epoch_with_no_mechanical_respelling_is_explained(backend, orders):
+    unfinished = advice(backend.transform_dataset("orders", {"filter": "amount between 100"}), "sql_spelling")
+    assert "x >= a and x <= b" in unfinished["explanation"] and "rewrite" not in unfinished
+    summed = advice(backend.transform_dataset("orders", {"derive": {"s": "extract(epoch from order_date - order_date + order_date)"}}),
+                    "sql_spelling")
+    assert "date_diff('second', start, end)" in summed["explanation"] and "rewrite" not in summed
 
 
 def test_ilike_and_like_on_a_function_result_become_contains(backend, orders):

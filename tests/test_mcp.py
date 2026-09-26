@@ -35,6 +35,18 @@ def test_tool_surface_is_semantic(server):
     assert delete.annotations.destructive_hint is True
 
 
+def test_rows_written_inline_enter_through_import_dataset(server):
+    tools = asyncio.run(server.list_tools())
+    schema = next(t for t in tools if t.name == "import_dataset").input_schema
+    assert "rows" in schema["properties"] and "path" not in schema.get("required", [])
+    imported = call(server, "import_dataset", rows=[{"lot": "A", "weight": 12.5}, {"lot": "B", "weight": 3}],
+                    name="weighed lots")
+    assert imported["status"] == "success" and imported["dataset"]["name"] == "weighed_lots"
+    assert imported["source"]["name"] == "rows written inline"
+    refused = call(server, "import_dataset", name="nothing")
+    assert refused["code"] == "INVALID_INTENT" and refused["field"] == "path"
+
+
 def test_end_to_end_through_mcp(server):
     imported = call(server, "import_dataset", path=str(ORDERS_CSV), description="Orders")
     assert imported["status"] == "success"

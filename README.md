@@ -284,8 +284,13 @@ Expressions may be strings (`"quantity * unit_price"`,
 `"amount > 100 and region in ['West', 'East']"`) or object trees; identifiers
 are always resolved against the current schema and functions come from an
 allowlist (`abs round floor ceil upper lower trim length substr substring left
-right concat coalesce year month day date date_trunc date_diff strftime is_null contains
-starts_with ends_with`; `||` is read as `concat`). `cast(x as type)` converts to
+right replace regexp_replace concat coalesce year month day date date_trunc date_diff strftime
+is_null contains starts_with ends_with`; `||` is read as `concat`). `replace` and
+`regexp_replace(text, pattern, replacement)` clean a value read as text (markup,
+units, thousands separators) before it is cast; each replaces every occurrence,
+and SQL's options argument to `regexp_replace` is folded away (`g` is implied,
+`i` becomes `(?i)`). Rendering an answer as text stays with export (MADR 0005).
+`cast(x as type)` converts to
 `integer`, `float`, `string`, `boolean`, `date` or `timestamp`, and accepts SQL
 names such as `int`, `bigint`, `double`, `varchar`, `text`, `bool` and
 `datetime`; a value that does not convert fails the transform. `x::type` is the
@@ -515,8 +520,9 @@ a qualified or right-key name after a join (unqualified, or the left key under
 that name, naming any fuzzy match that hid it), join keys whose types do not
 compare (a derive casting the left key to the right key's type, then the join on
 it), a cast that meets a value it cannot convert (the same request with
-`try_cast`), SQL spellings with a direct equivalent (backtick names, `EXTRACT`,
-`ILIKE`), SQL that expressions do not have (`CASE`, a window function, a scalar
+`try_cast`), SQL spellings with a direct equivalent (backtick names, `EXTRACT`
+of a date part, `EXTRACT(EPOCH ...)` as `date_diff('second', ...)`, `BETWEEN`
+as two comparisons, `ILIKE`), SQL that expressions do not have (`CASE`, a window function, a scalar
 subquery: the step as a `raw_query` first step when it is the first step and
 reads only the source), a function the language lacks (the accepted name it was
 close to, otherwise the step as a `raw_query` first step, which runs any DuckDB
@@ -547,11 +553,15 @@ scope is explained with the scope and never rewritten from a look-alike name.
 A detector that cannot rewrite still explains. Every rewrite is executed in its
 test and must succeed.
 
-Two silent failures get the same treatment on *successful* responses: an empty
-result whose filter literal is absent from the filtered column says where in
-the workspace that literal does occur (`value_not_found`), and a result that
-already has, or mechanically reshapes to, the open output contract says so with
-the next call (`matches_contract`, `near_contract`). A `one_per` contract is
+Three silent failures get the same treatment on *successful* responses: an
+empty result whose filter literal is absent from the filtered column says where
+in the workspace that literal does occur (`value_not_found`); a text column of
+numbers ordered against a quoted number (`weight > '100000000'`), which compares
+as text, says how many of its values fall on the other side as numbers and
+rewrites the comparison with `try_cast` (`numbers_compared_as_text`; a column
+holding any non-number, or one where text and numbers agree, stays silent); and
+a result that already has, or mechanically reshapes to, the open output contract
+says so with the next call (`matches_contract`, `near_contract`). A `one_per` contract is
 said to match only after the result's distinct keys are counted, as
 `export_result` counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
@@ -617,6 +627,13 @@ names no scenario; `tests/test_boundary.py` checks both. Reading a PDF, a
 video or an audio track is the harness's job: a reader is a tool beside the
 backend's, and what it extracts enters the backend through `import_dataset`
 or `attach_metadata`, as a fresh agent output with provenance (MADR 0009).
+`import_dataset` takes a file's `path`, or `rows` written inline with a `name`
+(a list of objects, one per row): values the agent read from a document, an
+image or a video, or a literal answer, are kept as a content-addressed JSON
+source in the workspace and imported exactly as a file is, with an artifact
+marked as inline rows, type inference, provenance and replay. They are the
+agent's fresh output, accepted as given (MADR 0008); a `raw_query` that only
+writes out `VALUES` is refused and pointed here.
 
 The first perception reader is available with the DataSpace runner's `--video`
 option (OpenCode only). FFmpeg inspects videos and returns actual PNG frames at
@@ -710,6 +727,12 @@ Tools exposed (all semantic; no SQL tool, since read-only SQL enters only as the
 {"name": "import_dataset", "arguments": {"path": "/data/orders.csv", "description": "Shop orders"}}
 // → {"status": "success", "operation_id": "op_1", "dataset": {"id": "ds_1", "name": "orders", "rows": 12, ...},
 //    "source": {"artifact_id": "art_1", "name": "orders.csv", "kind": "csv", "locator": null}}
+
+// enter rows the agent read elsewhere (a table in a PDF, a figure on a video frame) as a dataset
+{"name": "import_dataset", "arguments": {"rows": [{"region": "West", "target": 1200}, {"region": "East", "target": 950}],
+                                         "name": "targets", "description": "read from the plan PDF, page 3"}}
+// → {"status": "success", "dataset": {"id": "ds_2", "name": "targets", "rows": 2, ...},
+//    "source": {"artifact_id": "art_2", "name": "rows written inline", "kind": "json", "locator": null}}
 
 // import a whole task workspace (csv + json + every table of every sqlite; docs/media become artifacts)
 {"name": "import_workspace", "arguments": {"path": "/data/task_10/context"}}
@@ -860,7 +883,7 @@ These capabilities are available in the current code:
 
 | Area | Available now |
 |---|---|
-| Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
+| Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, rows written inline (`import_dataset(rows=...)`), `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
 | Semantic transforms | `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`, `derive`, `join`, and `semi_join`; grouping without measures returns distinct groups, and compact transforms handle post-aggregate projection. |
 | [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
 | [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |
@@ -895,10 +918,11 @@ left on the data domain gives the backend more to check without letting it
 read the task: it holds the data facts and the agent's declarations, and those
 are enough to name more of the errors that enter silently.
 
-1. **Silent-failure signals on successful responses.** The two signals that
-   exist, `value_not_found` and `matches_contract` / `near_contract`, come
-   from one rule: the backend reports its own data facts and never reads the
-   task. The next signals are the mistakes an agent makes without noticing
+1. **Silent-failure signals on successful responses.** The signals that
+   exist, `value_not_found`, `numbers_compared_as_text` and
+   `matches_contract` / `near_contract`, come from one rule: the backend
+   reports its own data facts and never reads the task. The next signals are
+   the mistakes an agent makes without noticing
    and the backend can see: a join that multiplies the left rows (the row
    count before and after, and the duplicated key), a join key that matches a
    small share of the left rows, a `one_per` key that is not unique in the

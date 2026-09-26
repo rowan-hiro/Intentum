@@ -94,6 +94,7 @@ class AnalyticsEngine(Protocol):
     def count_distinct_rows(self, table: str, columns: list[str]) -> int: ...
     def count_distinct_of_query(self, sql: str, columns: list[str]) -> int: ...
     def column_contains(self, table: str, column: str, value: Any) -> bool: ...
+    def compare_text_as_number(self, table: str, column: str, op: str, text: str) -> tuple[int, int, str | None]: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def profile_columns(self, table: str, columns: list[str], *, ranged: list[str]) -> dict[str, dict[str, Any]]: ...
     def read_table(self, table: str, *, columns: list[str] | None = None,
@@ -317,6 +318,22 @@ class DuckDBEngine:
         except duckdb.Error:
             return False
         return row is not None
+
+    def compare_text_as_number(self, table: str, column: str, op: str, text: str) -> tuple[int, int, str | None]:
+        """For ``column op 'text'`` over a text column: how many non-blank values are not numbers, how many
+        numbers compare differently as numbers than as text, and one of those. One scan of the table."""
+        if op not in ("<", "<=", ">", ">="):
+            raise ValueError(f"not an ordering comparison: {op!r}")
+        ident = quote_ident(column)
+        number = f"TRY_CAST(NULLIF(trim({ident}), '') AS DOUBLE)"
+        differs = f"({number} IS NOT NULL AND ({ident} {op} ?) <> ({number} {op} ?))"
+        row = self.conn.execute(
+            f"SELECT count(*) FILTER (WHERE NULLIF(trim({ident}), '') IS NOT NULL AND {number} IS NULL), "
+            f"count(*) FILTER (WHERE {differs}), min({ident}) FILTER (WHERE {differs}) "
+            f"FROM {quote_ident(table)}",
+            [text, float(text), text, float(text)],
+        ).fetchone()
+        return int(row[0]), int(row[1]), row[2]
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)

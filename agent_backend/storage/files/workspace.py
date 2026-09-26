@@ -5,7 +5,7 @@ All physical state lives under one directory that the backend owns:
     <root>/
       metadata.sqlite      backend metadata (datasets, lineage, operations, audit)
       analytics.duckdb     analytical tables
-      files/               imported source files, copied in and content-addressed
+      files/               imported source files and rows written inline, content-addressed
 
 Agents never see these paths.
 """
@@ -13,8 +13,10 @@ Agents never see these paths.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 
 class Workspace:
@@ -39,6 +41,15 @@ class Workspace:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    def write_rows(self, records: list[dict[str, Any]]) -> Path:
+        """Keep rows written inline as a JSON source in the managed area, named by content hash as an imported
+        copy is, so registering it finds the copy already in place."""
+        data = json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        target = self.files_dir / f"{hashlib.sha256(data).hexdigest()[:16]}.json"
+        if not target.exists():
+            target.write_bytes(data)
+        return target
 
     def import_file(self, source: Path, content_hash: str) -> Path:
         """Copy a source file into the managed area, keyed by content hash.
