@@ -113,6 +113,35 @@ def test_a_name_whose_words_a_dataset_accounts_for_still_resolves(backend, order
     assert described["status"] == "success" and described["dataset"]["name"] == "orders"
 
 
+def test_a_suffix_that_names_no_file_a_dataset_comes_from_is_a_word_of_the_name(backend, orders):
+    for reference, absent in (("orders.west", "west"), ("orders.backup", "backup")):
+        response = backend.describe_dataset(reference)
+        assert response["code"] == "NOT_FOUND", (reference, response)
+        assert response["details"]["absent_words"] == [absent]
+        assert response["candidates"][0]["name"] == "orders"
+    for reference in ("orders.csv", "orders.json", "orders.parquet"):
+        response = backend.describe_dataset(reference)
+        assert response["status"] == "success" and response["dataset"]["name"] == "orders", (reference, response)
+
+
+def test_a_stopword_or_hint_word_inside_a_name_is_a_word_of_the_name(backend, orders):
+    _library(backend)
+    for reference, absent in (("orders_file", "file"), ("data_orders", "data"), ("orders_latest", "latest"),
+                              ("lib_latest", "latest")):
+        response = backend.describe_dataset(reference)
+        assert response["code"] == "NOT_FOUND", (reference, response)
+        assert response["details"]["absent_words"] == [absent]
+    latest = backend.describe_dataset("lib_latest")
+    assert [c["name"] for c in latest["candidates"]] == ["lib_loans", "lib_members", "lib_branch_hours"]
+    # the description says the orders were imported, so the word is accounted for
+    imported = backend.describe_dataset("orders_imported")
+    assert imported["status"] == "success" and imported["dataset"]["name"] == "orders"
+    # hint words alone, or in a description, are still hints
+    for reference, name in (("latest", "catalog_titles"), ("the latest lib table", "lib_branch_hours")):
+        response = backend.describe_dataset(reference)
+        assert response["status"] == "success" and response["dataset"]["name"] == name, (reference, response)
+
+
 def test_deleted_dataset_reference(backend, orders):
     backend.delete_dataset("orders")
     response = backend.transform_dataset("orders", AGG)

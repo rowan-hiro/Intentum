@@ -8,8 +8,11 @@ backend renders that as a ``needs_resolution`` response.
 
 A reference written as one name (no whitespace) is a name the agent believes
 exists, not a description: it resolves only to a dataset that accounts for
-each of its Latin-script words. One that no dataset accounts for is not found,
-with the words nothing here has, rather than a match on a shared prefix.
+each of its Latin-script words, "data", "file" or "latest" among them, apart
+from the extension of a file a dataset is imported from (orders.csv). One
+that no dataset accounts for is not found, with the words nothing here has,
+rather than a match on a shared prefix. A reference made only of hint words
+("latest") keeps its meaning.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from ..errors import AmbiguousReferenceError, InvalidIntentError, NotFoundError
-from ..models.entities import Dataset, DatasetStatus
+from ..models.entities import ArtifactKind, Dataset, DatasetStatus
 from ...storage.metadata.interface import MetadataStore
 from .common import ResolutionNote, is_cjk, normalize, tokens
 
@@ -191,9 +194,13 @@ class DatasetResolver:
         """Each dataset's score, the reasons, and the reference's Latin-script content words it does not account for."""
         words = tokens(text)
         content = [w for w in words if w not in STOPWORDS and w not in HINT_WORDS]
-        # A file name's extension says where the data came from, not which dataset: orders.csv is orders.
+        if content and not any(ch.isspace() for ch in text):
+            # In a name that says more than a hint, data, file or latest is one of its words, not one to set aside.
+            content = [w for w in words if w in content or not is_cjk(w)]
+        # The extension of a file a dataset is imported from says where the data came from: orders.csv is orders.
         extension = re.search(r"\.([^\W_]{1,8})$", text)
-        exempt = {extension.group(1).casefold()} if extension else set()
+        exempt = ({extension.group(1).casefold()}
+                  if extension and ArtifactKind.for_suffix(extension.group(1)).is_tabular else set())
         hints = set(words) & HINT_WORDS
         now = self.clock()
         today = now.date()
