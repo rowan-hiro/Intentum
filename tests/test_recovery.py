@@ -324,6 +324,67 @@ def test_text_comparisons_that_numbers_would_not_change_or_that_hold_codes_stay_
     assert "numbers_compared_as_text" not in kinds(numeric)
 
 
+def shelves(backend, tmp_path: Path, labels=("9", "12", "108", "30", " "), name="shelves"):
+    """Shelf numbers read from a floor plan arrive as text; a blank is a shelf without a label."""
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps([{"shelf": label, "books": 10 * (i + 1), "code": f"S-{i}"}
+                                for i, label in enumerate(labels)]), encoding="utf-8")
+    assert backend.import_dataset(str(path))["status"] == "success"
+
+
+def test_a_sort_step_by_numbers_stored_as_text_is_said_to_sort_as_text(backend, tmp_path):
+    shelves(backend, tmp_path)
+    response = backend.transform_dataset("shelves", [{"filter": "books > 0"}, {"sort": "shelf"}, {"select": ["shelf"]}])
+    assert [row[0] for row in response["result"]["rows"]] == [" ", "108", "12", "30", "9"]
+    found = advice(response, "numbers_sorted_as_text")
+    assert "shelves.shelf holds numbers stored as text" in found["explanation"]
+    assert "'108' sorts before '12'" in found["explanation"]
+    assert "try_cast(shelf as double)" in found["explanation"] and "rewrite" not in found
+
+
+def test_a_raw_query_order_by_numbers_stored_as_text_is_rewritten_with_the_key_cast(backend, tmp_path):
+    shelves(backend, tmp_path)
+    bare = backend.transform_dataset("shelves", {"raw_query": 'SELECT books FROM input WHERE shelf <> \' \' ORDER BY "shelf" DESC'})
+    assert [row[0] for row in bare["result"]["rows"]] == [10, 40, 20, 30]  # '9', '30', '12', '108'
+    (call,) = advice(bare, "numbers_sorted_as_text")["rewrite"]
+    assert call["arguments"]["transform"] == {
+        "raw_query": 'SELECT books FROM input WHERE shelf <> \' \' ORDER BY TRY_CAST("shelf" AS DOUBLE) DESC'}
+    (result,) = run(backend, [call])
+    assert [row[0] for row in result["result"]["rows"]] == [30, 40, 20, 10] and "advice" not in result
+
+    qualified = backend.materialize_result("shelves", [
+        {"raw_query": {"sql": "SELECT i.code, i.shelf AS label FROM input AS i ORDER BY label, i.code"}}, {"limit": 3}],
+        "first_shelves")
+    (call,) = advice(qualified, "numbers_sorted_as_text")["rewrite"]
+    assert call["tool"] == "materialize_result" and call["arguments"]["name"] == "first_shelves_numeric"
+    assert call["arguments"]["transform"] == [
+        {"raw_query": {"sql": "SELECT i.code, i.shelf AS label FROM input AS i ORDER BY TRY_CAST(label AS DOUBLE), "
+                              "i.code"}}, {"limit": 3}]
+    run(backend, [call])
+    rows = backend.transform_dataset("first_shelves_numeric", {"select": ["label"]})["result"]["rows"]
+    assert [row[0] for row in rows] == ["9", "12", "30"]  # the blank casts to null and sorts last
+
+
+def test_sorts_that_numbers_would_not_change_or_that_are_not_by_a_text_column_of_numbers_stay_silent(
+        backend, orders, tmp_path):
+    shelves(backend, tmp_path)
+    for transform in ({"sort": "code"},  # codes: text order is the order
+                      {"sort": "books"},  # a number column
+                      {"raw_query": "SELECT books FROM input ORDER BY lower(shelf)"},  # an expression key
+                      {"raw_query": "SELECT shelf || '!' AS shelf FROM input ORDER BY shelf"},  # an alias for another value
+                      {"raw_query": "WITH s AS (SELECT * FROM input) SELECT books FROM s ORDER BY shelf"}):  # not an input
+        response = backend.transform_dataset("shelves", transform)
+        assert response["status"] == "success" and "numbers_sorted_as_text" not in kinds(response), transform
+
+    shelves(backend, tmp_path, labels=("10", "11", "12"), name="aisles")
+    agreeing = backend.transform_dataset("aisles", {"sort": "shelf"})
+    assert "numbers_sorted_as_text" not in kinds(agreeing)
+
+    shelves(backend, tmp_path, labels=("9", "12", "A7"), name="bays")
+    coded = backend.transform_dataset("bays", {"raw_query": "SELECT * FROM input ORDER BY shelf"})
+    assert "numbers_sorted_as_text" not in kinds(coded)
+
+
 def test_a_non_empty_result_carries_no_empty_result_advice(backend, orders):
     response = backend.transform_dataset("orders", {"filter": "region = 'East'"})
     assert response["result"]["row_count"] > 0 and "advice" not in response

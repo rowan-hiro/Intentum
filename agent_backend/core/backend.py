@@ -34,7 +34,7 @@ from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
 from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_text_comparison,
-                       advise_unapplied_format, call as tool_call)
+                       advise_text_sort, advise_unapplied_format, call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
@@ -65,6 +65,7 @@ from .execution import Executor
 from .export import ExportFormat, ValueRenderer, write_formatted_csv
 from .ir import (AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RawQueryStep, RenameStep,
                  SelectStep, SemiJoinStep, SortStep, TransformIR)
+from .ir.raw_query import QueryShape
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
@@ -1024,8 +1025,8 @@ class Backend:
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
                           distinct_keys: int | None = None) -> list[Advice]:
-        """Advice on a successful transform: an empty result explained, numbers compared as text, or a result
-        that fits the contract."""
+        """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, or a
+        result that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -1035,6 +1036,10 @@ class Backend:
                     advice.append(found)
             found = advise_text_comparison(ir, used=used, compare=self._compare_text_as_number, tool=tool,
                                            arguments=arguments)
+            if found is not None:
+                advice.append(found)
+            found = advise_text_sort(ir, used=used, inspect=self._inspect_query, compare=self._compare_text_order,
+                                     tool=tool, arguments=arguments)
             if found is not None:
                 advice.append(found)
             contract = self.store.latest_contract()
@@ -1050,6 +1055,15 @@ class Backend:
     def _column_contains(self, dataset: Dataset, column: Column, value: Any) -> bool:
         version = self.store.get_version(dataset.id, dataset.version)
         return version is not None and self.engine.column_contains(version.physical_table, column.name, value)
+
+    def _inspect_query(self, sql: str) -> QueryShape | None:
+        return self.queries.inspect_query(sql) if self.queries is not None else None
+
+    def _compare_text_order(self, dataset: Dataset, column: Column) -> tuple[int, int, tuple[str, str] | None]:
+        version = self.store.get_version(dataset.id, dataset.version)
+        if version is None:
+            return 0, 0, None
+        return self.engine.compare_text_order(version.physical_table, column.name)
 
     def _compare_text_as_number(self, dataset: Dataset, column: Column, op: str, text: str) -> tuple[int, int, str | None]:
         version = self.store.get_version(dataset.id, dataset.version)

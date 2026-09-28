@@ -4,12 +4,12 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Four
+rewrites the agent's own request into tool calls it can send as-is. Five
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
-ordered against a quoted number (it compares as text), a result that already
-has (or mechanically reshapes to) the declared output shape, and an export
-whose date or timestamp pattern formatted no value.
+ordered against a quoted number (it compares as text) or sorted by (it sorts as
+text), a result that already has (or mechanically reshapes to) the declared
+output shape, and an export whose date or timestamp pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -30,7 +30,8 @@ from typing import Any, Callable
 from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
 from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
-                  TransformIR, TryCastExpr, UnaryExpr)
+                  RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
+from ..ir.raw_query import QueryShape
 from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
@@ -2650,6 +2651,109 @@ def advise_unapplied_format(
         call("materialize_result", source=dataset, name=name, transform=steps),
         call("export_result", dataset=name, **export, overwrite=True),
     ])
+
+
+_WRITTEN_REFERENCE_RE = re.compile(r'(?:"(?:[^"]|"")*"|[^\W\d]\w*)(?:\s*\.\s*(?:"(?:[^"]|"")*"|[^\W\d]\w*))*')
+
+
+def _sorted_as_numbers(sql: str, locations: list[int]) -> str | None:
+    """``sql`` with the column reference written at each offset wrapped in TRY_CAST(... AS DOUBLE)."""
+    for location in sorted(set(locations), reverse=True):
+        match = _WRITTEN_REFERENCE_RE.match(sql, location)
+        if match is None:
+            return None
+        sql = sql[:location] + f"TRY_CAST({match.group(0)} AS DOUBLE)" + sql[match.end():]
+    return sql
+
+
+def _query_sort_keys(step: RawQueryStep, shape: QueryShape) -> list[tuple[str, int]]:
+    """The column ids a raw_query's outermost ORDER BY sorts by, with the offset where each key is written."""
+    inputs = {i.placeholder.casefold(): i for i in step.inputs}
+    if not shape.order_from or any(name.casefold() not in inputs for name, _ in shape.order_from):
+        return []
+    found: list[tuple[str, int]] = []
+    for names, location in shape.order_by:
+        column, qualifier = names[-1].casefold(), names[-2].casefold() if len(names) > 1 else None
+        tables = [inputs[name.casefold()] for name, alias in shape.order_from
+                  if qualifier is None or qualifier in (name.casefold(), alias.casefold())]
+        fields = [f for table in tables for f in table.fields if f.name.casefold() == column]
+        if len(fields) == 1 and fields[0].column_id and fields[0].logical_type == LogicalType.STRING:
+            found.append((fields[0].column_id, location))
+    return found
+
+
+def advise_text_sort(
+    ir: TransformIR,
+    *,
+    used: list[Dataset],
+    inspect: Callable[[str], QueryShape | None],
+    compare: Callable[[Dataset, Column], tuple[int, int, tuple[str, str] | None]],
+    tool: str,
+    arguments: dict[str, Any],
+) -> Advice | None:
+    """A text column holding numbers sorts as text: '108' comes before '12'.
+
+    Said for a sort step's key and for a raw_query's outermost ORDER BY key when the key is a source text column,
+    every non-blank value of it is a number, and text order puts some neighbours in the opposite numeric order; a
+    column of codes, or one whose two orders agree, stays silent. A raw_query is rewritten with the key cast;
+    a sort step is explained, since sorting by a number there takes a derive and a select around it.
+    """
+    by_column: dict[str, tuple[Dataset, Column]] = {c.id: (d, c) for d in used for c in d.columns}
+    keys: list[tuple[str, int | None]] = []
+    query: RawQueryStep | None = None
+    for step in ir.steps:
+        if isinstance(step, SortStep):
+            keys += [(k.field.column_id, None) for k in step.keys
+                     if k.field.column_id and k.field.logical_type == LogicalType.STRING]
+        elif isinstance(step, RawQueryStep):
+            shape = inspect(step.sql)
+            if shape is not None:
+                query, found = step, _query_sort_keys(step, shape)
+                keys += [(column_id, location) for column_id, location in found]
+    verdicts: dict[str, tuple[Dataset, Column, tuple[str, str]] | None] = {}
+    for column_id, _ in keys:
+        if column_id in verdicts or column_id not in by_column:
+            continue
+        dataset, column = by_column[column_id]
+        unparsed, inversions, example = compare(dataset, column)
+        verdicts[column_id] = (dataset, column, example) if not unparsed and inversions and example else None
+    qualified = [(column_id, location) for column_id, location in keys if verdicts.get(column_id)]
+    if not qualified:
+        return None
+    facts: list[str] = []
+    names: list[str] = []
+    for column_id in dict.fromkeys(column_id for column_id, _ in qualified):
+        dataset, column, example = verdicts[column_id]  # type: ignore[misc]
+        names.append(column.name)
+        facts.append(f"{dataset.name}.{column.name} holds numbers stored as text, so sorting by it orders them as "
+                     f"text: '{example[0]}' sorts before '{example[1]}'")
+    sorted_by_step = any(location is None for _, location in qualified)
+    locations = [location for _, location in qualified if location is not None]
+    listed = ", ".join(f"try_cast({_expression_name(n)} as double)" for n in names)
+    explanation = "; ".join(facts) + f". Sorting by {listed} orders them as numbers"
+    if sorted_by_step:
+        return Advice("numbers_sorted_as_text", explanation + ": derive it under a new name before the sort, sort by "
+                      "that name, and leave it out afterwards with select.")
+    found = _query_step(arguments.get("transform"))
+    if query is None or found is None or tool not in _TRANSFORM_TOOLS:
+        return Advice("numbers_sorted_as_text", explanation + ".")
+    steps, index, step = found
+    sql, _ = _query_parts(step)
+    rewritten = _sorted_as_numbers(sql, locations) if sql == query.sql and locations else None
+    if rewritten is None:
+        return Advice("numbers_sorted_as_text", explanation + ".")
+    if isinstance(step.get("raw_query"), dict):
+        step["raw_query"]["sql"] = rewritten
+    elif isinstance(step.get("raw_query"), str):
+        step["raw_query"] = rewritten
+    else:
+        step["sql"] = rewritten
+    steps[index] = step
+    overrides: dict[str, Any] = {"transform": _rebuild(arguments.get("transform"), steps)}
+    if tool == "materialize_result" and isinstance(arguments.get("name"), str):
+        overrides["name"] = slugify(f"{arguments['name']}_numeric")  # the first result keeps its name
+    return Advice("numbers_sorted_as_text", explanation + "; the same request sorted that way:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

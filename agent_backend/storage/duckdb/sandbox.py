@@ -146,6 +146,7 @@ class QuerySandbox:
             shape.error = str(tree.get("error_message") or "the statement could not be read")
             return shape
         _walk(tree.get("statements"), shape)
+        _order_keys(tree.get("statements"), shape)
         return shape
 
     def describe_query(self, sql: str, relations: dict[str, list[tuple[str, str]]]) -> list[tuple[str, str, LogicalType]]:
@@ -359,6 +360,61 @@ def _walk(node: Any, shape: QueryShape, visible: frozenset[str] = frozenset()) -
     for key, value in node.items():
         if key != "cte_map" and isinstance(value, (dict, list)):
             _walk(value, shape, visible)
+
+
+def _from_tables(node: Any, ctes: set[str]) -> list[tuple[str, str]] | None:
+    """The tables a FROM clause reads, as (name, alias); None when it reads anything else (a subquery, a CTE, a
+    table function), where a column name need not mean the input column of that name."""
+    if not isinstance(node, dict):
+        return None
+    if node.get("type") == "BASE_TABLE":
+        name = str(node.get("table_name") or "")
+        if node.get("schema_name") or node.get("catalog_name") or name.casefold() in ctes:
+            return None
+        return [(name, str(node.get("alias") or ""))]
+    if node.get("type") == "JOIN":
+        left, right = _from_tables(node.get("left"), ctes), _from_tables(node.get("right"), ctes)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _order_keys(statements: Any, shape: QueryShape) -> None:
+    """The column references the outermost ORDER BY of a plain SELECT over tables sorts by, with their offsets.
+
+    A bare name that the select list gives to a column (``a AS x ... ORDER BY x``) stands for that column; one it
+    gives to anything else names the select item, not a column, and is left out.
+    """
+    node = statements[0].get("node") if isinstance(statements, list) and statements and isinstance(statements[0], dict) else None
+    if not isinstance(node, dict) or node.get("type") != "SELECT_NODE":
+        return
+    tables = _from_tables(node.get("from_table"), shape.ctes)
+    if not tables:
+        return
+    aliases: dict[str, tuple[str, ...] | None] = {}
+    for item in node.get("select_list") or []:
+        if isinstance(item, dict) and item.get("alias"):
+            names = item.get("column_names") if item.get("class") == "COLUMN_REF" else None
+            aliases[str(item["alias"]).casefold()] = tuple(str(n) for n in names) if names else None
+    keys: list[tuple[tuple[str, ...], int]] = []
+    for modifier in node.get("modifiers") or []:
+        if not isinstance(modifier, dict) or modifier.get("type") != "ORDER_MODIFIER":
+            continue
+        for order in modifier.get("orders") or []:
+            expression = order.get("expression") if isinstance(order, dict) else None
+            if not isinstance(expression, dict) or expression.get("class") != "COLUMN_REF":
+                continue
+            names = tuple(str(n) for n in expression.get("column_names") or [])
+            location = expression.get("query_location")
+            if not names or not isinstance(location, int):
+                continue
+            if len(names) == 1 and names[0].casefold() in aliases:
+                target = aliases[names[0].casefold()]
+                if target is None:
+                    continue
+                if target[-1].casefold() != names[0].casefold():
+                    names = target
+            keys.append((names, location))
+    shape.order_by, shape.order_from = keys, tables
 
 
 def _first_literal(children: Any) -> str | None:

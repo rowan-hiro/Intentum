@@ -167,7 +167,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "comes back with `advice`: what the backend accepts instead and, when mechanical, a "
                              "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
                              "says where a filtered value does occur; a text column of numbers ordered against a quoted "
-                             "number, which compares as text, is named with the comparison rewritten to try_cast; a result "
+                             "number, which compares as text, is named with the comparison rewritten to try_cast; a sort "
+                             "by such a column, which sorts '108' before '12', is named too; a result "
                              "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],

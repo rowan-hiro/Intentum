@@ -570,15 +570,21 @@ scope is explained with the scope and never rewritten from a look-alike name.
 A detector that cannot rewrite still explains. Every rewrite is executed in its
 test and must succeed.
 
-Three silent failures get the same treatment on *successful* responses: an
-empty result whose filter literal is absent from the filtered column says where
-in the workspace that literal does occur (`value_not_found`); a text column of
+Silent failures get the same treatment on *successful* responses: an empty
+result whose filter literal is absent from the filtered column says where in
+the workspace that literal does occur (`value_not_found`); a text column of
 numbers ordered against a quoted number (`weight > '100000000'`), which compares
 as text, says how many of its values fall on the other side as numbers and
 rewrites the comparison with `try_cast` (`numbers_compared_as_text`; a column
-holding any non-number, or one where text and numbers agree, stays silent); and
-a result that already has, or mechanically reshapes to, the open output contract
-says so with the next call (`matches_contract`, `near_contract`). A `one_per` contract is
+holding any non-number, or one where text and numbers agree, stays silent); a
+sort by such a column, in a sort step or in a raw_query's outermost `ORDER BY`,
+which sorts `'108'` before `'12'`, names the column and such a pair, and a
+raw_query comes back with the key cast (`numbers_sorted_as_text`; a sort step is
+explained, since sorting by a number there takes a derive and a select around
+it); an export whose date or timestamp pattern formatted nothing names the
+columns (`format_not_applied`, under Exporting an answer); and a result that
+already has, or mechanically reshapes to, the open output contract says so with
+the next call (`matches_contract`, `near_contract`). A `one_per` contract is
 said to match only after the result's distinct keys are counted, as
 `export_result` counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
@@ -936,7 +942,8 @@ read the task: it holds the data facts and the agent's declarations, and those
 are enough to name more of the errors that enter silently.
 
 1. **Silent-failure signals on successful responses.** The signals that
-   exist, `value_not_found`, `numbers_compared_as_text` and
+   exist, `value_not_found`, `numbers_compared_as_text`,
+   `numbers_sorted_as_text`, `format_not_applied` and
    `matches_contract` / `near_contract`, come from one rule: the backend
    reports its own data facts and never reads the task. The next signals are
    the mistakes an agent makes without noticing
