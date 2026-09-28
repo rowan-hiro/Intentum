@@ -117,6 +117,10 @@ class QueryShape:
     describes: bool = False  # DESCRIBE / SHOW / SUMMARIZE used as a relation
     dollar_names: list[tuple[int, str]] = field(default_factory=list)  # `$name` tokens: (offset of `$`, name)
     create_as: tuple[str, str] | None = None  # CREATE TABLE|VIEW name AS <select>: (name, select)
+    # The outermost ORDER BY of a plain SELECT, when it reads only tables: each key that is a column reference, as
+    # (the names written, offset of the reference in the text); a select alias for a column stands for that column.
+    order_by: list[tuple[tuple[str, ...], int]] = field(default_factory=list)
+    order_from: list[tuple[str, str]] = field(default_factory=list)  # that SELECT's tables: (name, alias)
 
 
 class QuerySession(Protocol):

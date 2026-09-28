@@ -324,3 +324,142 @@ def test_export_reports_a_refusing_filesystem_as_a_failed_export(backend, orders
     assert response["details"]["path"] == str(target)
     assert target.read_bytes() == b"previous export\n"
     assert list(target.parent.iterdir()) == [target]  # no staging directory left behind
+
+
+# -- a date or timestamp pattern that formats nothing -----------------------
+
+def _shipments(backend, tmp_path: Path) -> None:
+    """Shipments whose dispatch dates are text: one value is not a date, so import keeps the column as text."""
+    from tests.conftest import write_csv
+
+    path = write_csv(tmp_path / "shipments.csv", "ref,dispatched,weight_kg,received",
+                     ["S-1,2024-05-02,12.5,2024-05-06 10:15:00", "S-2,2024-05-09 16:40:00,3.25,2024-05-12 08:00:00",
+                      "S-3,awaiting pickup,7.0,"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    types = {c["name"]: c["type"] for c in backend.describe_dataset("shipments")["schema"]}
+    assert types == {"ref": "string", "dispatched": "string", "weight_kg": "float", "received": "timestamp"}
+
+
+def test_a_column_pattern_on_text_dates_is_reported_with_a_rewrite_that_applies_it(backend, tmp_path: Path):
+    _shipments(backend, tmp_path)
+    shipped = backend.materialize_result("shipments", {"filter": "ref <> 'S-3'"}, "shipped")
+    assert shipped["status"] == "success", shipped
+    target = tmp_path / "out.csv"
+    spec = {"columns": {"dispatched": {"date_format": "%d.%m.%Y"}}}
+    response = backend.export_result("shipped", str(target), format_spec=spec)
+    assert response["status"] == "success", response
+    assert rendered(target)[1:] == ["S-1,2024-05-02,12.5,2024-05-06 10:15:00",
+                                    "S-2,2024-05-09 16:40:00,3.25,2024-05-12 08:00:00"]
+    assert response["format_not_applied"] == [
+        {"column": "dispatched", "type": "string", "pattern_from": "column", "values": 2, "read_as_dates": 2}]
+    assert "rendered with the given format specification" not in response["summary"]
+    assert "formatted no value of dispatched (string)" in response["summary"]
+    [advice] = response["advice"]
+    assert advice["kind"] == "format_not_applied"
+    assert "try_cast(dispatched as timestamp)" in advice["explanation"]
+    materialize, export = advice["rewrite"]
+    assert materialize["tool"] == "materialize_result" and export["tool"] == "export_result"
+    assert export["arguments"]["format_spec"] == spec and export["arguments"]["overwrite"] is True
+    for step in advice["rewrite"]:
+        assert getattr(backend, step["tool"])(**step["arguments"])["status"] == "success"
+    assert rendered(target)[0] == "ref,dispatched,weight_kg,received"
+    assert [line.split(",")[1] for line in rendered(target)[1:]] == ["02.05.2024", "09.05.2024"]
+    exported = [e for e in backend.get_provenance("shipped")["audit"] if e["event"] == "dataset.exported"][-1]
+    assert exported["details"]["format_not_applied"] == response["format_not_applied"]
+
+
+def test_a_contract_that_declares_the_text_type_withholds_the_rewrite_and_names_the_declaration(
+        backend, tmp_path: Path):
+    _shipments(backend, tmp_path)
+    assert backend.materialize_result("shipments", {"filter": "ref <> 'S-3'"}, "shipped")["status"] == "success"
+    declared = backend.declare_output([{"name": "ref", "type": "string"}, {"name": "Dispatched", "type": "string"},
+                                       "weight_kg", "received"], rows="at_least_one")
+    contract = declared["contract"]["id"]
+    target = tmp_path / "out.csv"
+    response = backend.export_result("shipped", str(target),
+                                     format_spec={"columns": {"dispatched": {"date_format": "%d.%m.%Y"}}})
+    assert response["status"] == "success", response
+    assert [e["column"] for e in response["format_not_applied"]] == ["dispatched"]
+    [advice] = response["advice"]
+    assert advice["kind"] == "format_not_applied" and "rewrite" not in advice
+    assert "try_cast(dispatched as timestamp)" in advice["explanation"]
+    assert (f"output contract {contract} would refuse that export: it declares Dispatched as string, and the derive "
+            "makes dispatched timestamp") in advice["explanation"]
+    assert ("amend the contract with declare_output and a reason, declaring Dispatched as date or timestamp"
+            in advice["explanation"])
+    assert rendered(target)[1].split(",")[1] == "2024-05-02"
+
+
+def test_a_contract_that_declares_no_type_for_the_column_keeps_the_rewrite(backend, tmp_path: Path):
+    _shipments(backend, tmp_path)
+    assert backend.materialize_result("shipments", {"filter": "ref <> 'S-3'"}, "shipped")["status"] == "success"
+    declared = backend.declare_output([{"name": "ref", "type": "string"}, "Dispatched", "weight_kg", "received"],
+                                      rows="at_least_one")
+    target = tmp_path / "out.csv"
+    response = backend.export_result("shipped", str(target),
+                                     format_spec={"columns": {"dispatched": {"date_format": "%d.%m.%Y"}}})
+    [advice] = response["advice"]
+    assert advice["kind"] == "format_not_applied" and len(advice["rewrite"]) == 2
+    results = [getattr(backend, step["tool"])(**step["arguments"]) for step in advice["rewrite"]]
+    assert [r["status"] for r in results] == ["success", "success"], results
+    assert results[-1]["contract"]["id"] == declared["contract"]["id"]
+    assert rendered(target)[0] == "ref,Dispatched,weight_kg,received"
+    assert [line.split(",")[1] for line in rendered(target)[1:]] == ["02.05.2024", "09.05.2024"]
+
+
+def test_a_column_pattern_on_prose_dates_is_reported_without_a_rewrite(backend, tmp_path: Path):
+    from tests.conftest import write_csv
+
+    path = write_csv(tmp_path / "talks.csv", "title,held_on", ['Tide pools,"March 4, 2023"', 'Lichens,"June 11, 2023"'])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    response = backend.export_result("talks", str(tmp_path / "out.csv"),
+                                     format_spec={"columns": {"held_on": {"date_format": "%Y-%m-%d"}}})
+    assert response["status"] == "success", response
+    assert response["format_not_applied"] == [
+        {"column": "held_on", "type": "string", "pattern_from": "column", "values": 2, "read_as_dates": 0}]
+    [advice] = response["advice"]
+    assert advice["kind"] == "format_not_applied" and "rewrite" not in advice
+    assert "none of its 2 values reads as a date" in advice["explanation"] and "try_cast" not in advice["explanation"]
+
+
+def test_a_file_level_pattern_with_no_temporal_column_reports_every_column(backend, tmp_path: Path):
+    _shipments(backend, tmp_path)
+    without_times = backend.materialize_result("shipments", {"select": ["ref", "dispatched", "weight_kg"]}, "loads")
+    assert without_times["status"] == "success", without_times
+    response = backend.export_result("loads", str(tmp_path / "out.csv"),
+                                     format_spec={"decimals": 1, "timestamp_format": "%Y%m%d"})
+    assert response["status"] == "success", response
+    assert response["format_not_applied"] == [
+        {"column": "ref", "type": "string", "pattern_from": "file", "values": 3, "read_as_dates": 0},
+        {"column": "dispatched", "type": "string", "pattern_from": "file", "values": 3, "read_as_dates": 2},
+        {"column": "weight_kg", "type": "float", "pattern_from": "file", "values": 3, "read_as_dates": 0}]
+    assert "ref (string), dispatched (string) and weight_kg (float)" in response["summary"]
+    [advice] = response["advice"]
+    # Two of the three dispatch values read as dates: a cast would lose the third, so there is no rewrite.
+    assert "rewrite" not in advice and "becomes null" in advice["explanation"]
+
+
+def test_a_pattern_that_formats_a_value_is_not_reported(backend, tmp_path: Path):
+    _shipments(backend, tmp_path)
+    target = tmp_path / "out.csv"
+    for spec in ({"timestamp_format": "%Y-%m-%d"}, {"columns": {"received": {"timestamp_format": "%Y-%m-%d"}}},
+                 {"columns": {"weight_kg": {"decimals": 2}}}):
+        response = backend.export_result("shipments", str(target), format_spec=spec, overwrite=True)
+        assert response["status"] == "success", response
+        assert "format_not_applied" not in response and "advice" not in response, spec
+        assert response["summary"].endswith("Values were rendered with the given format specification.")
+    assert rendered(target)[1].split(",")[2:] == ["12.50", "2024-05-06 10:15:00"]
+
+
+def test_a_mixed_file_reports_only_the_pattern_that_formatted_nothing(backend, tmp_path: Path):
+    _shipments(backend, tmp_path)
+    target = tmp_path / "out.csv"
+    response = backend.export_result("shipments", str(target), format_spec={
+        "date_format": "%Y/%m/%d", "columns": {"dispatched": {"date_format": "%d %b %Y"}, "ref": {"null_text": "-"}}})
+    assert response["status"] == "success", response
+    # The file-level pattern formatted the received timestamps; the dispatched column's own pattern met only text.
+    assert [line.split(",")[3] for line in rendered(target)[1:]] == ["2024/05/06", "2024/05/12", ""]
+    assert response["format_not_applied"] == [
+        {"column": "dispatched", "type": "string", "pattern_from": "column", "values": 3, "read_as_dates": 2}]
+    [advice] = response["advice"]
+    assert "2 of its 3 values read as ISO dates" in advice["explanation"] and "rewrite" not in advice

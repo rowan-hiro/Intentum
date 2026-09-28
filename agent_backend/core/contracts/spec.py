@@ -64,17 +64,14 @@ class ContractSpec:
 
 @dataclass(frozen=True)
 class ContractProblem:
-    kind: str  # missing | renamed | extra | order | type | rows
+    kind: str  # missing | extra | order | type | rows
     message: str
     column: str | None = None
-    actual: str | None = None  # for "renamed": the dataset column that stands in for the declared one
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {"kind": self.kind, "message": self.message}
         if self.column is not None:
             body["column"] = self.column
-        if self.actual is not None:
-            body["actual"] = self.actual
         return body
 
 
@@ -286,32 +283,62 @@ def _parse_order_object(item: dict[str, Any]) -> tuple[Any, bool]:
 # Checking a dataset against a contract
 # --------------------------------------------------------------------------
 
+def match_columns(contract: OutputContract | ContractSpec, actual: list[str]) -> dict[str, str]:
+    """The dataset column each declared name stands for (MADR 0013).
+
+    Every name the contract uses, carried or organizing, stands for the column
+    of that exact name or, failing that, the one column whose normalized name
+    is the same: a declared FirstProduct stands for firstproduct, which the
+    transform language writes for it. A name that fits no column, or several
+    only after normalization, is left out.
+    """
+    exact = set(actual)
+    by_norm: dict[str, list[str]] = {}
+    for name in actual:
+        by_norm.setdefault(normalize(name), []).append(name)
+    found: dict[str, str] = {}
+    for declared in [c.name for c in contract.columns] + [o.name for o in contract.order_by] + list(contract.row_keys):
+        if declared in found:
+            continue
+        near = [declared] if declared in exact else by_norm.get(normalize(declared), [])
+        if len(near) == 1:
+            found[declared] = near[0]
+    return found
+
+
+def respelled(contract: OutputContract | ContractSpec, actual: list[str]) -> dict[str, str]:
+    """The carried columns the file writes under the contract's spelling: dataset name -> header."""
+    stands = match_columns(contract, actual)
+    return {stands[c.name]: c.name for c in contract.columns if c.name in stands and stands[c.name] != c.name}
+
+
+def _unmatched(name: str, actual: list[str]) -> str:
+    near = [a for a in actual if normalize(a) == normalize(name)]
+    if len(near) > 1:
+        return f"{name!r} fits {near} only after normalization; name one of them exactly."
+    return f"{name!r} is not in the dataset."
+
+
 def verify_columns(contract: OutputContract, actual: list[tuple[str, LogicalType]]) -> list[ContractProblem]:
     """Compare declared columns (name, order, type) with a dataset's columns.
 
-    Names must match exactly; a column that matches only after normalization
-    is reported as ``renamed`` so the repair can carry the rename. Declared
-    types are compared by family (numeric with numeric, temporal with
-    temporal), because a contract says what kind of value a column holds,
-    not how the engine stores it.
+    A declared name is matched as ``match_columns`` does: exactly, or by its
+    normalized form when that fits one column, whose values the export then
+    writes under the declared spelling (MADR 0013). Declared types are
+    compared by family (numeric with numeric, temporal with temporal),
+    because a contract says what kind of value a column holds, not how the
+    engine stores it.
     """
     problems: list[ContractProblem] = []
     actual_names = [name for name, _ in actual]
     actual_types = dict(actual)
-    by_norm: dict[str, list[str]] = {}
-    for name in actual_names:
-        by_norm.setdefault(normalize(name), []).append(name)
+    stands = match_columns(contract, actual_names)
     matched: list[str | None] = []
     for declared in contract.columns:
-        if declared.name in actual_types:
-            found: str | None = declared.name
-        else:
-            near = by_norm.get(normalize(declared.name), [])
-            found = near[0] if len(near) == 1 else None
-            if found is not None:
-                problems.append(ContractProblem("renamed", f"declared {declared.name!r} exists as {found!r}.", declared.name, found))
-            else:
-                problems.append(ContractProblem("missing", f"declared column {declared.name!r} is not in the dataset.", declared.name))
+        found = stands.get(declared.name)
+        if found is None:
+            problems.append(ContractProblem("missing", "declared column " + _unmatched(declared.name, actual_names),
+                                            declared.name))
         matched.append(found)
         if found is not None and declared.logical_type is not None:
             if not comparable(declared.logical_type, actual_types[found]):
@@ -321,19 +348,12 @@ def verify_columns(contract: OutputContract, actual: list[tuple[str, LogicalType
     # Organizing columns are expected in the dataset and left out of the file:
     # the export orders and counts by them (MADR 0012).
     for key in organizing_keys(contract):
-        if key in actual_types:
-            found = key
+        found = stands.get(key)
+        if found is None:
+            problems.append(ContractProblem(
+                "missing", "the contract is organized by " + _unmatched(key, actual_names).rstrip(".")
+                           + "; the export needs it to order and count by, and does not write it to the file.", key))
         else:
-            near = by_norm.get(normalize(key), [])
-            found = near[0] if len(near) == 1 else None
-            if found is not None:
-                problems.append(ContractProblem(
-                    "renamed", f"the contract is organized by {key!r}, which exists as {found!r}.", key, found))
-            else:
-                problems.append(ContractProblem(
-                    "missing", f"the contract is organized by {key!r}, which is not in the dataset; the export "
-                               "needs it to order and count by, and does not write it to the file.", key))
-        if found is not None:
             used.add(found)
     for name in actual_names:
         if name not in used:
@@ -365,19 +385,15 @@ def verify_rows(contract: OutputContract, row_count: int, distinct_keys: int | N
 def repair_transform(contract: OutputContract, problems: list[ContractProblem]) -> dict[str, Any] | None:
     """The transform that would give the dataset the declared shape, when one exists.
 
-    Only column problems can be repaired mechanically (rename near-misses, then
-    select the declared columns in order, keeping the organizing columns the
-    export needs); a missing column or a row problem needs the agent to go back
-    to the data.
+    Only column problems can be repaired mechanically (select the declared
+    columns in order, keeping the organizing columns the export needs); a
+    missing column or a row problem needs the agent to go back to the data. A
+    name spelled differently from its column is not a problem to repair: the
+    export writes the declared spelling (MADR 0013).
     """
     if not problems or any(p.kind in ("missing", "type", "rows") for p in problems):
         return None
-    renames = {p.actual: p.column for p in problems if p.kind == "renamed" and p.actual and p.column}
-    transform: dict[str, Any] = {}
-    if renames:
-        transform["rename"] = renames
-    transform["select"] = [c.name for c in contract.columns] + organizing_keys(contract)
-    return transform
+    return {"select": [c.name for c in contract.columns] + organizing_keys(contract)}
 
 
 def contract_summary(contract: OutputContract) -> dict[str, Any]:

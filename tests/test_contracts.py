@@ -124,19 +124,23 @@ def test_export_with_an_extra_column_is_refused_with_the_repair(backend, orders,
     assert backend.export_result("narrow", str(target))["status"] == "success"
 
 
-def test_a_near_miss_name_is_repaired_by_rename_then_select(backend, orders, tmp_path: Path):
+def test_a_declared_spelling_is_the_header_the_export_writes(backend, orders, tmp_path: Path):
+    """MADR 0013: a declared name that matches a column only after normalization is that column, written as declared."""
     backend.declare_output(["region", "total_revenue"], rows="at_least_one")
     backend.materialize_result("orders", AGG, "regional_sales")
     response = backend.export_result("regional_sales", str(tmp_path / "p.csv"))
     assert response["code"] == "CONTRACT_MISMATCH"
     assert [p["kind"] for p in response["details"]["problems"]] == ["missing", "extra"]
     assert "repair" not in response["details"]
-    backend.declare_output(["Region", "revenue"], rows="at_least_one", reason="match the file the grader expects")
-    response = backend.export_result("regional_sales", str(tmp_path / "p.csv"))
-    assert response["code"] == "CONTRACT_MISMATCH"
-    assert response["details"]["problems"] == [{"kind": "renamed", "message": "declared 'Region' exists as 'region'.",
-                                                "column": "Region", "actual": "region"}]
-    assert response["details"]["repair"] == {"rename": {"region": "Region"}, "select": ["Region", "revenue"]}
+    backend.declare_output(["Region", "revenue"], rows="at_least_one", reason="the file's reader expects Region")
+    target = tmp_path / "p.csv"
+    response = backend.export_result("regional_sales", str(target))
+    assert response["status"] == "success", response
+    assert response["columns"] == ["Region", "revenue"]
+    assert response["contract"]["verified"]["written_as"] == {"region": "Region"}
+    assert target.read_text(encoding="utf-8").splitlines()[:2] == ["Region,revenue", "East,1791.0"]
+    exported = [e for e in backend.get_provenance("regional_sales")["audit"] if e["event"] == "dataset.exported"][-1]
+    assert exported["details"]["contract"]["written_as"] == {"region": "Region"}
 
 
 def test_column_order_and_declared_types_are_held(backend, orders, tmp_path: Path):
@@ -278,6 +282,102 @@ def test_the_repair_keeps_the_organizing_columns(backend, orders, tmp_path: Path
     assert refused["details"]["repair"] == {"select": ["revenue", "region"]}
     backend.materialize_result("wide", refused["details"]["repair"], "answer")
     assert backend.export_result("answer", str(tmp_path / "p.csv"))["status"] == "success"
+
+
+# -- the declared spelling is the header (MADR 0013) --------------------------
+
+FIRST_PRODUCT = {"group_by": ["region"], "measures": [{"function": "min", "field": "product", "alias": "FirstProduct"}]}
+
+
+def _rewrite_steps(advice: dict) -> list[dict]:
+    steps: list[dict] = []
+    for call in advice.get("rewrite", []):
+        transform = call["arguments"].get("transform")
+        steps += transform if isinstance(transform, list) else [transform] if transform else []
+    return steps
+
+
+def test_an_aliased_measure_is_exported_under_the_declared_spelling(backend, orders, tmp_path: Path):
+    """The alias FirstProduct is written firstproduct in the dataset; the contract's spelling is the file's."""
+    backend.declare_output(["region", "FirstProduct"], rows={"one_per": ["region"]})
+    preview = backend.transform_dataset("orders", FIRST_PRODUCT)
+    assert [c["name"] for c in preview["result"]["columns"]] == ["region", "firstproduct"]
+    [advice] = preview["advice"]
+    assert advice["kind"] == "matches_contract"
+    assert "The file will spell firstproduct as FirstProduct" in advice["explanation"]
+    assert not any("rename" in step for step in _rewrite_steps(advice))
+    made = backend.materialize_result("orders", FIRST_PRODUCT, "firsts")
+    assert [a["kind"] for a in made["advice"]] == ["matches_contract"]
+    target = tmp_path / "p.csv"
+    response = backend.export_result("firsts", str(target))
+    assert response["status"] == "success", response
+    assert response["columns"] == ["region", "FirstProduct"]
+    assert response["contract"]["verified"]["written_as"] == {"firstproduct": "FirstProduct"}
+    rows = _read(target)
+    assert rows[0] == ["region", "FirstProduct"]
+    assert sorted(rows[1:]) == [["East", "Gadget"], ["North", "Gizmo"], ["South", "Gadget"], ["West", "Gizmo"]]
+    formatted = backend.export_result("firsts", str(tmp_path / "f.csv"),
+                                      format_spec={"columns": {"FirstProduct": {"null_text": "-"}}})
+    assert formatted["status"] == "success" and "resolution" not in formatted, formatted
+    assert _read(tmp_path / "f.csv")[0] == ["region", "FirstProduct"]
+
+
+def test_a_declared_name_with_a_space_is_written_as_declared_in_csv_and_parquet(backend, orders, tmp_path: Path):
+    import duckdb
+
+    backend.declare_output(["Region", "Total Revenue"], rows={"one_per": ["Region"]}, order_by=["-Total Revenue"])
+    backend.materialize_result("orders", {"group_by": ["region"], "measures": [
+        {"function": "sum", "field": "amount", "alias": "Total Revenue"}]}, "totals")
+    assert [c["name"] for c in backend.describe_dataset("totals")["schema"]] == ["region", "total_revenue"]
+    for fmt in ("csv", "parquet"):
+        target = tmp_path / f"p.{fmt}"
+        response = backend.export_result("totals", str(target), format=fmt)
+        assert response["status"] == "success", response
+        assert response["columns"] == ["Region", "Total Revenue"]
+        read = duckdb.sql(f"SELECT * FROM read_{fmt}('{target}')")
+        assert read.columns == ["Region", "Total Revenue"]
+        values = [row[1] for row in read.fetchall()]
+        assert values == sorted(values, reverse=True) and len(values) == 4
+
+
+def test_an_organizing_key_is_matched_by_its_normalized_name(backend, orders, tmp_path: Path):
+    backend.declare_output(["revenue"], rows={"one_per": ["Region"]}, order_by=["Region"])
+    backend.materialize_result("orders", {"group_by": ["region"], "metric": "revenue"}, "by_region")
+    target = tmp_path / "p.csv"
+    response = backend.export_result("by_region", str(target))
+    assert response["status"] == "success", response
+    assert response["columns"] == ["revenue"] and response["contract"]["verified"]["distinct_keys"] == 4
+    assert "written_as" not in response["contract"]["verified"]  # an organizing key is not written
+    ordered = backend.transform_dataset("by_region", {"sort": "region"})["result"]["rows"]
+    assert [r[1] for r in ordered] == [float(r[0]) for r in _read(target)[1:]]
+
+
+def test_a_declared_name_that_fits_several_columns_only_after_normalization_is_a_mismatch(backend, tmp_path: Path):
+    path = write_csv(tmp_path / "prices.csv", "Unit Price,unit_price", ["1.005,2.01"])
+    assert backend.import_dataset(str(path))["status"] == "success"
+    backend.declare_output(["UNIT PRICE"], rows="one")
+    refused = backend.export_result("prices", str(tmp_path / "p.csv"))
+    assert refused["code"] == "CONTRACT_MISMATCH"
+    missing = refused["details"]["problems"][0]
+    assert missing["kind"] == "missing" and "fits ['Unit Price', 'unit_price'] only after normalization" in missing["message"]
+    backend.declare_output(["Unit Price"], rows="one", reason="the exact name")
+    refused = backend.export_result("prices", str(tmp_path / "p.csv"))
+    assert [p["kind"] for p in refused["details"]["problems"]] == ["extra"]  # exact beats normalized
+
+
+def test_a_reshape_carries_no_rename_for_a_spelling(backend, orders, tmp_path: Path):
+    backend.declare_output(["FirstProduct"], rows="at_least_one", order_by=["Region"])
+    backend.materialize_result("orders", {"group_by": ["region", "customer"], "measures": [
+        {"function": "min", "field": "product", "alias": "FirstProduct"}]}, "wide")
+    refused = backend.export_result("wide", str(tmp_path / "p.csv"))
+    assert refused["code"] == "CONTRACT_MISMATCH"
+    assert [p["kind"] for p in refused["details"]["problems"]] == ["extra"]
+    assert refused["details"]["repair"] == {"select": ["FirstProduct", "Region"]}
+    [advice] = refused["advice"]
+    assert advice["kind"] == "reshape_to_contract" and not any("rename" in s for s in _rewrite_steps(advice))
+    for call in advice["rewrite"]:
+        assert getattr(backend, call["tool"])(**call["arguments"])["status"] == "success", call
+    assert _read(tmp_path / "p.csv")[0] == ["FirstProduct"]
 
 
 def test_order_by_shapes_are_read_and_validated(backend):

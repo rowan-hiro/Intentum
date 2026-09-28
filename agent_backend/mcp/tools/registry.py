@@ -108,7 +108,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "\"desc\"}]; a leading \"-\" also means descending). A column that only orders or "
                              "groups the answer does not belong in `columns`: put it in `order_by` or in the "
                              "`one_per` keys and the backend will sort and count by it and leave it out of the "
-                             "file, as long as the dataset you export carries it. Optional `description`. The "
+                             "file, as long as the dataset you export carries it. The names are written to the "
+                             "file as you spell them here: a dataset column whose name differs only in case or "
+                             "separators (firstproduct for FirstProduct) stands for the declared one, so no rename "
+                             "is needed for spelling. Optional `description`. The "
                              "backend keeps the contract and export_result refuses a dataset that does not match "
                              "it, so you cannot drift away from it later. One contract is current per workspace; "
                              "declaring a different shape while one is open needs `reason`, which is recorded as "
@@ -164,7 +167,9 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "comes back with `advice`: what the backend accepts instead and, when mechanical, a "
                              "`rewrite` to send as-is. A successful response may carry advice too: an empty result "
                              "says where a filtered value does occur; a text column of numbers ordered against a quoted "
-                             "number, which compares as text, is named with the comparison rewritten to try_cast; a result "
+                             "number, which compares as text, is named with the comparison rewritten to try_cast; a sort "
+                             "by such a column, which sorts '108' before '12', is named too; rows a sort leaves tied, "
+                             "whose order is open between runs, are counted; a result "
                              "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],
@@ -204,7 +209,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "order: shape the dataset first (select/rename) so it has exactly the columns the "
                              "answer asks for. When an output contract was declared with declare_output, the "
                              "dataset is checked against it (columns, order, types, row cardinality) before "
-                             "anything is written and a mismatch is returned as CONTRACT_MISMATCH with the "
+                             "anything is written, the header is written as the contract spells it, and a mismatch "
+                             "is returned as CONTRACT_MISMATCH with the "
                              "transform that would repair it; a matching export closes the contract with the "
                              "evidence in the audit trail. Paths are confined to the configured export root. The "
                              "dataset stays managed; the export is audited with its content hash. Existing files "
@@ -215,6 +221,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "decimals), `date_format` / `timestamp_format` (strftime patterns such as %Y-%m-%d) "
                              "and `null_text`. Example: {\"decimals\": 4, \"strip_trailing_zeros\": true, "
                              "\"integer_min_decimals\": 1, \"columns\": {\"end_date\": {\"date_format\": \"%Y-%m-%d\"}}}. "
+                             "A date or timestamp pattern formats date and timestamp columns only; one that "
+                             "formatted nothing is reported under `format_not_applied`, with advice. "
                              "The specification is recorded with the operation, so the file is reproducible.")
     def export_result(dataset: str, path: str, format: str = "csv", format_spec: dict[str, Any] | None = None,
                       overwrite: bool = False) -> dict[str, Any]:

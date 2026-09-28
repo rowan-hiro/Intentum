@@ -33,15 +33,18 @@ from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
-from .recovery import Advice, advise_contract, advise_empty_result, advise_error, advise_text_comparison, call as tool_call
+from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_sort_ties,
+                       advise_text_comparison, advise_text_sort, advise_unapplied_format, call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
     ContractSpec,
     contract_summary,
+    match_columns,
     organizing_keys,
     parse_contract,
     repair_transform,
+    respelled,
     verify_columns,
     verify_rows,
 )
@@ -62,6 +65,7 @@ from .execution import Executor
 from .export import ExportFormat, ValueRenderer, write_formatted_csv
 from .ir import (AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RawQueryStep, RenameStep,
                  SelectStep, SemiJoinStep, SortStep, TransformIR)
+from .ir.raw_query import QueryShape
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
@@ -238,6 +242,17 @@ def _path_facts(path: Path) -> dict[str, Any]:
     except OSError:
         entries = []
     return {"resolved": str(resolved), "cwd": str(Path.cwd()), "nearest_directory": str(nearest), "entries": entries}
+
+
+def _unapplied_summary(entries: list[dict[str, Any]], shown: int = 5) -> str:
+    """The export summary's sentence for columns a date or timestamp pattern formatted no value of."""
+    names = [f"{e['column']} ({e['type']})" for e in entries[:shown]]
+    if len(entries) > shown:
+        names.append(f"{len(entries) - shown} more")
+    listing = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return (f" The format specification's date or timestamp pattern formatted no value of {listing}: a pattern "
+            f"formats date and timestamp columns only, and {'this column was' if len(entries) == 1 else 'these were'} "
+            "written as stored (see format_not_applied).")
 
 
 @dataclass
@@ -955,7 +970,8 @@ class Backend:
             result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir))
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
-                                            ir.output.name if materialize else None, distinct_keys=result.distinct_keys)
+                                            ir.output.name if materialize else None, distinct_keys=result.distinct_keys,
+                                            ties=result.ties)
 
             now = self.clock()
             response: dict[str, Any]
@@ -1003,14 +1019,15 @@ class Backend:
             return None
         if contract is None or contract.status != ContractStatus.OPEN or contract.rows != RowCardinality.ONE_PER:
             return None
-        names = {f.name for f in ir.output_schema}
-        return list(contract.row_keys) if all(k in names for k in contract.row_keys) else None
+        stands = match_columns(contract, [f.name for f in ir.output_schema])
+        keys = [stands.get(k) for k in contract.row_keys]
+        return [k for k in keys if k] if all(keys) else None
 
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
-                          distinct_keys: int | None = None) -> list[Advice]:
-        """Advice on a successful transform: an empty result explained, numbers compared as text, or a result
-        that fits the contract."""
+                          distinct_keys: int | None = None, ties: Any = None) -> list[Advice]:
+        """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, rows
+        a sort leaves tied, or a result that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -1020,6 +1037,13 @@ class Backend:
                     advice.append(found)
             found = advise_text_comparison(ir, used=used, compare=self._compare_text_as_number, tool=tool,
                                            arguments=arguments)
+            if found is not None:
+                advice.append(found)
+            found = advise_text_sort(ir, used=used, inspect=self._inspect_query, compare=self._compare_text_order,
+                                     tool=tool, arguments=arguments)
+            if found is not None:
+                advice.append(found)
+            found = advise_sort_ties(ir, ties)
             if found is not None:
                 advice.append(found)
             contract = self.store.latest_contract()
@@ -1035,6 +1059,15 @@ class Backend:
     def _column_contains(self, dataset: Dataset, column: Column, value: Any) -> bool:
         version = self.store.get_version(dataset.id, dataset.version)
         return version is not None and self.engine.column_contains(version.physical_table, column.name, value)
+
+    def _inspect_query(self, sql: str) -> QueryShape | None:
+        return self.queries.inspect_query(sql) if self.queries is not None else None
+
+    def _compare_text_order(self, dataset: Dataset, column: Column) -> tuple[int, int, tuple[str, str] | None]:
+        version = self.store.get_version(dataset.id, dataset.version)
+        if version is None:
+            return 0, 0, None
+        return self.engine.compare_text_order(version.physical_table, column.name)
 
     def _compare_text_as_number(self, dataset: Dataset, column: Column, op: str, text: str) -> tuple[int, int, str | None]:
         version = self.store.get_version(dataset.id, dataset.version)
@@ -1540,18 +1573,26 @@ class Backend:
             evidence = (self._verify_contract(contract, ds, version, export={"path": str(target), "format": fmt,
                                                                          "format_spec": format_spec, "overwrite": overwrite})
                         if contract is not None else None)
-            # What the contract carries, in its order, sorted the way it declares:
-            # the organizing columns are needed in the dataset and left out of the
-            # file (MADR 0012). Without a contract the dataset is written as it is.
-            projection = [c.name for c in contract.columns] if contract is not None and organizing_keys(contract) else None
-            ordering = [(o.name, o.descending) for o in contract.order_by] if contract is not None else []
+            # What the contract carries, in its order and under its spelling, sorted the way it declares:
+            # the organizing columns are needed in the dataset and left out of the file (MADR 0012), and a
+            # declared name stands for the column it matches (MADR 0013). Without a contract the dataset is
+            # written as it is.
+            projection: list[str] | None = None
+            header: list[str] | None = None
+            ordering: list[tuple[str, bool]] = []
+            if contract is not None:
+                stands = match_columns(contract, [c.name for c in ds.columns])
+                carried = [stands[c.name] for c in contract.columns]
+                if organizing_keys(contract) or respelled(contract, [c.name for c in ds.columns]):
+                    projection, header = carried, [c.name for c in contract.columns]
+                ordering = [(stands[o.name], o.descending) for o in contract.order_by]
             renderer: ValueRenderer | None = None
             columns: list[str] = []
             data: list[Any] = []
             if spec is not None:
                 # Prepared before anything is staged, so a bad column key costs no work.
                 columns, data = self.engine.read_table(version.physical_table, columns=projection, order_by=ordering)
-                renderer = ValueRenderer(spec, columns)
+                renderer = ValueRenderer(spec, columns, header)
                 for key, column, how in renderer.lenient:
                     notes.append(ResolutionNote("format_spec.columns", key, column, how))
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1561,16 +1602,19 @@ class Backend:
                 staged = Path(staging_dir) / target.name
                 if renderer is None:
                     rows = self.engine.export_table(version.physical_table, staged, fmt,
-                                                    columns=projection, order_by=ordering)
+                                                    columns=projection, order_by=ordering, header=header)
                 else:
-                    rows = write_formatted_csv(staged, columns, data, renderer)
+                    rows = write_formatted_csv(staged, columns, data, renderer, header=header)
                 content_hash = self.workspace.content_hash(staged)
                 self._publish_export(staged, target, overwrite)
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
+            not_applied, casts = self._format_not_applied(renderer, ds, version.physical_table)
             now = self.clock()
             with self.store.transaction():
                 exported_details = {"path": str(target), "format": fmt, "rows": rows, "content_hash": content_hash,
                                     "version": ds.version, "format_spec": spec_payload}
+                if not_applied:
+                    exported_details["format_not_applied"] = not_applied
                 if contract is not None and evidence is not None:
                     contract.status = ContractStatus.SATISFIED
                     contract.satisfied_by = op.id
@@ -1592,20 +1636,58 @@ class Backend:
                     "path": str(target),
                     "format": fmt,
                     "rows": rows,
-                    "columns": projection or [c.name for c in ds.columns],
+                    "columns": header or projection or [c.name for c in ds.columns],
                     "content_hash": content_hash,
                     "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}."
-                               + (" Values were rendered with the given format specification." if spec is not None else ""),
+                               + (_unapplied_summary(not_applied) if not_applied
+                                  else " Values were rendered with the given format specification." if spec is not None
+                                  else ""),
                     "plan": plan.to_text(),
                 }
                 if spec_payload is not None:
                     response["format_spec"] = spec_payload
+                if not_applied:
+                    response["format_not_applied"] = not_applied
+                    try:
+                        advice = advise_unapplied_format(not_applied, casts=casts, dataset=ds.name,
+                                                         columns=[(c.name, c.logical_type) for c in ds.columns],
+                                                         arguments={"path": path, "format_spec": format_spec},
+                                                         contract=contract)
+                        response["advice"] = [advice.to_dict()]
+                    except Exception as err:  # advice never breaks a response
+                        log_event("advice.skipped", error=repr(err))
                 if contract is not None and evidence is not None:
                     response["contract"] = {**contract_summary(contract), "verified": evidence}
                     response["summary"] += f" Output contract {contract.id} (revision {contract.revision}) is satisfied."
                 self._complete(op, response, None, None, now)
             log_event("state.committed", operation_id=op.id, dataset_id=ds.id, exported=str(target))
             return self._with_notes(response, notes)
+
+    def _format_not_applied(self, renderer: ValueRenderer | None, ds: Dataset,
+                            table: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """The columns a date or timestamp pattern formatted no value of, and what their values read as.
+
+        Each entry names the column, its logical type, where the pattern came from, how many values it holds and
+        how many of them read as ISO dates or timestamps (the test import refines text columns with, MADR 0006).
+        The second result maps each column with such values to the type try_cast would give it.
+        """
+        if renderer is None:
+            return [], {}
+        found = renderer.unapplied()
+        if not found:
+            return [], {}
+        types = {c.name: c.logical_type.value for c in ds.columns}
+        counts = self.engine.count_iso_temporal(table, [name for name, _ in found])
+        entries: list[dict[str, Any]] = []
+        casts: dict[str, str] = {}
+        for name, source in found:
+            _, dates, timestamps = counts.get(name, (0, 0, 0))
+            values = renderer.values[renderer.columns.index(name)]
+            entries.append({"column": name, "type": types.get(name, "unknown"), "pattern_from": source,
+                            "values": values, "read_as_dates": dates + timestamps})
+            if dates + timestamps:
+                casts[name] = "timestamp" if timestamps else "date"
+        return entries, casts
 
     @semantic_operation("declare_output")
     def declare_output(
@@ -1798,9 +1880,10 @@ class Backend:
         actual = [(c.name, c.logical_type) for c in ds.columns]
         problems = verify_columns(contract, actual)
         distinct: int | None = None
-        names = {n for n, _ in actual}
-        if contract.rows == RowCardinality.ONE_PER and all(k in names for k in contract.row_keys) and version.row_count > 0:
-            distinct = self.engine.count_distinct_rows(version.physical_table, contract.row_keys)
+        stands = match_columns(contract, [n for n, _ in actual])
+        keys = [stands.get(k) for k in contract.row_keys]
+        if contract.rows == RowCardinality.ONE_PER and all(keys) and version.row_count > 0:
+            distinct = self.engine.count_distinct_rows(version.physical_table, [k for k in keys if k])
         if contract.rows != RowCardinality.ONE_PER or distinct is not None or version.row_count == 0:
             problems += verify_rows(contract, version.row_count, distinct)
         if problems:
@@ -1850,6 +1933,9 @@ class Backend:
             evidence["cardinality"] = str(contract.rows)
         if distinct is not None:
             evidence["distinct_keys"] = distinct
+        header = respelled(contract, [n for n, _ in actual])
+        if header:
+            evidence["written_as"] = header  # dataset column -> the declared spelling the file carries (MADR 0013)
         return evidence
 
     @staticmethod

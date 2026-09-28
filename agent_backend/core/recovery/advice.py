@@ -4,11 +4,13 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Three
+rewrites the agent's own request into tool calls it can send as-is. Six
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
-ordered against a quoted number (it compares as text), and a result that
-already has (or mechanically reshapes to) the declared output shape.
+ordered against a quoted number (it compares as text) or sorted by (it sorts as
+text), a sort that leaves tied rows in no defined order, a result that already
+has (or mechanically reshapes to) the declared output shape, and an export
+whose date or timestamp pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -26,10 +28,11 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..contracts import repair_transform, verify_columns, verify_rows
+from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
-from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
-                  TransformIR, TryCastExpr, UnaryExpr)
+from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LimitStep,
+                  LiteralExpr, RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
+from ..ir.raw_query import QueryShape
 from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
@@ -2577,6 +2580,229 @@ def advise_text_comparison(
                   rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
 
 
+_BARE_NAME = re.compile(r"[^\W\d]\w*")
+_EXPRESSION_KEYWORDS = {"and", "or", "not", "in", "is", "null", "true", "false"}
+
+
+def _expression_name(name: str) -> str:
+    """A field name as an expression may write it: bare when it is a plain identifier, otherwise double-quoted."""
+    if _BARE_NAME.fullmatch(name) and name.lower() not in _EXPRESSION_KEYWORDS:
+        return name
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _free_name(wanted: str, taken: set[str]) -> str:
+    name, n = wanted, 2
+    while name.casefold() in taken:
+        name, n = f"{wanted}_{n}", n + 1
+    return name
+
+
+def advise_unapplied_format(
+    unapplied: list[dict[str, Any]],
+    *,
+    casts: dict[str, str],
+    dataset: str,
+    columns: list[tuple[str, LogicalType]],
+    arguments: dict[str, Any],
+    contract: OutputContract | None = None,
+) -> Advice:
+    """A date or timestamp pattern that formatted no value: it formats date and timestamp columns only.
+
+    ``unapplied`` is the export's own report (column, type, values, read_as_dates); ``casts`` names, for each
+    column whose values read as ISO dates or timestamps, the type to cast it to; ``columns`` are the dataset's
+    columns and types, and ``contract`` the output contract the export is held to. The request is rewritten when
+    every such column casts without losing a value: a derive of each through try_cast, the dataset's columns in
+    their order, then the same export of that result. A column none of whose values reads as a date is left as
+    it is; one only some of whose values do blocks the rewrite, since the cast would turn the others into null.
+    A contract whose declared types the cast columns would not satisfy blocks it too: amending the contract is
+    the agent's judgement (MADR 0008), so the advice names the declaration instead.
+    """
+    facts: list[str] = []
+    for entry in unapplied:
+        values, read = entry["values"], entry["read_as_dates"]
+        if read == values:
+            read_text = ("its value reads as an ISO date" if values == 1 else "both its values read as ISO dates"
+                         if values == 2 else f"all {values} of its values read as ISO dates")
+        elif read:
+            read_text = f"{read} of its {values} values read as ISO dates"
+        else:
+            read_text = ("its value does not read as a date" if values == 1
+                         else f"none of its {values} values reads as a date")
+        facts.append(f"{entry['column']} is {entry['type']} and {read_text}")
+    explanation = ("date_format and timestamp_format format date and timestamp values only, so the pattern left "
+                   "these columns as stored: " + "; ".join(facts) + ".")
+    readable = [e for e in unapplied if e["column"] in casts]
+    if not readable:
+        return Advice("format_not_applied", explanation + " Pass the values through as they are, or build the text "
+                      "the answer needs in a transform before the export.")
+    derived = ", ".join(f"try_cast({_expression_name(e['column'])} as {casts[e['column']]})" for e in readable)
+    explanation += f" A derive of {derived} before the export gives a column the pattern formats"
+    if any(e["read_as_dates"] != e["values"] for e in readable):
+        return Advice("format_not_applied", explanation + "; a value that does not read as a date becomes null.")
+    names = [c for c, _ in columns]
+    if contract is not None:
+        cast = {e["column"]: LogicalType(casts[e["column"]]) for e in readable}
+        problems = verify_columns(contract, [(c, cast.get(c, t)) for c, t in columns])
+        if problems:
+            stands = match_columns(contract, names)
+            declared = {c.name: c.logical_type for c in contract.columns}
+            refusals = [f"it declares {p.column} as {declared[p.column]}, and the derive makes {stands[p.column]} "
+                        f"{cast[stands[p.column]]}" if p.kind == "type" and stands.get(p.column or "") in cast
+                        else p.message.rstrip(".") for p in problems]
+            refused = [p.column for p in problems if p.kind == "type" and p.column]
+            return Advice("format_not_applied", explanation + f", but output contract {contract.id} would refuse "
+                          "that export: " + "; ".join(refusals) + ". If the answer holds dates there, amend the "
+                          "contract with declare_output and a reason, declaring " + ", ".join(refused or ["them"])
+                          + " as date or timestamp, and export that derive; otherwise pass the values through as "
+                          "they are.")
+    taken = {c.casefold() for c in names}
+    temporary: dict[str, str] = {}
+    for entry in readable:
+        temporary[entry["column"]] = _free_name(f"{entry['column']}_{casts[entry['column']]}", taken)
+        taken.add(temporary[entry["column"]].casefold())
+    steps: list[dict[str, Any]] = [
+        {"derive": {temporary[c]: f"try_cast({_expression_name(c)} as {casts[c]})" for c in temporary}},
+        {"select": [temporary.get(c, c) for c in names]},
+        {"rename": {temporary[c]: c for c in temporary}},
+    ]
+    name = slugify(f"{dataset}_dated")
+    export = {k: v for k, v in arguments.items() if k in ("path", "format", "format_spec") and v is not None}
+    return Advice("format_not_applied", explanation + ". The same export with that derive first:", rewrite=[
+        call("materialize_result", source=dataset, name=name, transform=steps),
+        call("export_result", dataset=name, **export, overwrite=True),
+    ])
+
+
+_WRITTEN_REFERENCE_RE = re.compile(r'(?:"(?:[^"]|"")*"|[^\W\d]\w*)(?:\s*\.\s*(?:"(?:[^"]|"")*"|[^\W\d]\w*))*')
+
+
+def _sorted_as_numbers(sql: str, locations: list[int]) -> str | None:
+    """``sql`` with the column reference written at each offset wrapped in TRY_CAST(... AS DOUBLE)."""
+    for location in sorted(set(locations), reverse=True):
+        match = _WRITTEN_REFERENCE_RE.match(sql, location)
+        if match is None:
+            return None
+        sql = sql[:location] + f"TRY_CAST({match.group(0)} AS DOUBLE)" + sql[match.end():]
+    return sql
+
+
+def _query_sort_keys(step: RawQueryStep, shape: QueryShape) -> list[tuple[str, int]]:
+    """The column ids a raw_query's outermost ORDER BY sorts by, with the offset where each key is written."""
+    inputs = {i.placeholder.casefold(): i for i in step.inputs}
+    if not shape.order_from or any(name.casefold() not in inputs for name, _ in shape.order_from):
+        return []
+    found: list[tuple[str, int]] = []
+    for names, location in shape.order_by:
+        column, qualifier = names[-1].casefold(), names[-2].casefold() if len(names) > 1 else None
+        tables = [inputs[name.casefold()] for name, alias in shape.order_from
+                  if qualifier is None or qualifier in (name.casefold(), alias.casefold())]
+        fields = [f for table in tables for f in table.fields if f.name.casefold() == column]
+        if len(fields) == 1 and fields[0].column_id and fields[0].logical_type == LogicalType.STRING:
+            found.append((fields[0].column_id, location))
+    return found
+
+
+def advise_text_sort(
+    ir: TransformIR,
+    *,
+    used: list[Dataset],
+    inspect: Callable[[str], QueryShape | None],
+    compare: Callable[[Dataset, Column], tuple[int, int, tuple[str, str] | None]],
+    tool: str,
+    arguments: dict[str, Any],
+) -> Advice | None:
+    """A text column holding numbers sorts as text: '108' comes before '12'.
+
+    Said for a sort step's key and for a raw_query's outermost ORDER BY key when the key is a source text column,
+    every non-blank value of it is a number, and text order puts some neighbours in the opposite numeric order; a
+    column of codes, or one whose two orders agree, stays silent. A raw_query is rewritten with the key cast;
+    a sort step is explained, since sorting by a number there takes a derive and a select around it.
+    """
+    by_column: dict[str, tuple[Dataset, Column]] = {c.id: (d, c) for d in used for c in d.columns}
+    keys: list[tuple[str, int | None]] = []
+    query: RawQueryStep | None = None
+    for step in ir.steps:
+        if isinstance(step, SortStep):
+            keys += [(k.field.column_id, None) for k in step.keys
+                     if k.field.column_id and k.field.logical_type == LogicalType.STRING]
+        elif isinstance(step, RawQueryStep):
+            shape = inspect(step.sql)
+            if shape is not None:
+                query, found = step, _query_sort_keys(step, shape)
+                keys += [(column_id, location) for column_id, location in found]
+    verdicts: dict[str, tuple[Dataset, Column, tuple[str, str]] | None] = {}
+    for column_id, _ in keys:
+        if column_id in verdicts or column_id not in by_column:
+            continue
+        dataset, column = by_column[column_id]
+        unparsed, inversions, example = compare(dataset, column)
+        verdicts[column_id] = (dataset, column, example) if not unparsed and inversions and example else None
+    qualified = [(column_id, location) for column_id, location in keys if verdicts.get(column_id)]
+    if not qualified:
+        return None
+    facts: list[str] = []
+    names: list[str] = []
+    for column_id in dict.fromkeys(column_id for column_id, _ in qualified):
+        dataset, column, example = verdicts[column_id]  # type: ignore[misc]
+        names.append(column.name)
+        facts.append(f"{dataset.name}.{column.name} holds numbers stored as text, so sorting by it orders them as "
+                     f"text: '{example[0]}' sorts before '{example[1]}'")
+    sorted_by_step = any(location is None for _, location in qualified)
+    locations = [location for _, location in qualified if location is not None]
+    listed = ", ".join(f"try_cast({_expression_name(n)} as double)" for n in names)
+    explanation = "; ".join(facts) + f". Sorting by {listed} orders them as numbers"
+    if sorted_by_step:
+        return Advice("numbers_sorted_as_text", explanation + ": derive it under a new name before the sort, sort by "
+                      "that name, and leave it out afterwards with select.")
+    found = _query_step(arguments.get("transform"))
+    if query is None or found is None or tool not in _TRANSFORM_TOOLS:
+        return Advice("numbers_sorted_as_text", explanation + ".")
+    steps, index, step = found
+    sql, _ = _query_parts(step)
+    rewritten = _sorted_as_numbers(sql, locations) if sql == query.sql and locations else None
+    if rewritten is None:
+        return Advice("numbers_sorted_as_text", explanation + ".")
+    if isinstance(step.get("raw_query"), dict):
+        step["raw_query"]["sql"] = rewritten
+    elif isinstance(step.get("raw_query"), str):
+        step["raw_query"] = rewritten
+    else:
+        step["sql"] = rewritten
+    steps[index] = step
+    overrides: dict[str, Any] = {"transform": _rebuild(arguments.get("transform"), steps)}
+    if tool == "materialize_result" and isinstance(arguments.get("name"), str):
+        overrides["name"] = slugify(f"{arguments['name']}_numeric")  # the first result keeps its name
+    return Advice("numbers_sorted_as_text", explanation + "; the same request sorted that way:",
+                  rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
+
+
+def advise_sort_ties(ir: TransformIR, ties: tuple[list[Any], int, int, int] | None) -> Advice | None:
+    """Rows that tie on the keys of the sort that sets the output order come back in no defined order.
+
+    ``ties`` is the executor's count for that sort (the largest tied group's key values, its size, the number of
+    tied groups, the number of tied rows), None when nothing ties. Explained, never rewritten: which column tells
+    the rows apart is the agent's to choose.
+    """
+    if ties is None:
+        return None
+    sorts = [step for step in ir.steps if isinstance(step, SortStep)]
+    if not sorts:
+        return None
+    keys = [k.field.name for k in sorts[-1].keys]
+    values, size, groups, tied = ties
+    at = ", ".join(f"{k} = {v!r}" for k, v in zip(keys, values))
+    limited = any(isinstance(step, LimitStep) for step in ir.steps[ir.steps.index(sorts[-1]):])
+    explanation = (f"{tied} rows tie with another row on the sort key [{', '.join(keys)}] "
+                   f"({groups} {'group' if groups == 1 else 'groups'}, the largest {size} rows at {at}). Rows that tie "
+                   "come back in no defined order, so two runs of this transform, such as a preview and its "
+                   "materialization, can order them differently")
+    if limited:
+        explanation += ", and the limit can keep different ones"
+    return Advice("sort_ties", explanation + ". A key that tells them apart, such as an identifier, added to the sort "
+                  "settles the order.")
+
+
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:
     steps = _steps(transform)
     if "rename" in repair:
@@ -2605,20 +2831,24 @@ def advise_contract(
         return None
     actual = [(f.name, f.logical_type) for f in ir.output_schema]
     problems = verify_columns(contract, actual) + verify_rows(contract, row_count, distinct_keys)
-    keyed = contract.rows == RowCardinality.ONE_PER and all(k in {n for n, _ in actual} for k in contract.row_keys)
+    stands = match_columns(contract, [n for n, _ in actual])
+    keyed = contract.rows == RowCardinality.ONE_PER and all(k in stands for k in contract.row_keys)
     if not problems and keyed and row_count > 0 and distinct_keys is None:
         return None
     shape = f"columns [{', '.join(c.name for c in contract.columns)}]" + (f", rows {contract.rows}" if contract.rows else "")
     answer = f"answer_{contract.id}"
     if not problems:
+        header = respelled(contract, [n for n, _ in actual])
+        written = ("" if not header else " The file will spell " + ", ".join(f"{a} as {h}" for a, h in header.items())
+                   + ", as the contract declares.")
         if materialized_name:
             return Advice("matches_contract",
                           f"{materialized_name} has the shape declared in output contract {contract.id} ({shape}); "
-                          f"export_result(dataset={materialized_name!r}, path=...) will accept it.")
+                          f"export_result(dataset={materialized_name!r}, path=...) will accept it." + written)
         return Advice(
             "matches_contract",
             f"This preview has the shape declared in output contract {contract.id} ({shape}). Materialize it and export "
-            "the dataset; export_result will accept it.",
+            "the dataset; export_result will accept it." + written,
             rewrite=[call("materialize_result", source=arguments.get("source"), transform=arguments.get("transform"),
                           name=answer, description=contract.description or "the declared deliverable")],
         )

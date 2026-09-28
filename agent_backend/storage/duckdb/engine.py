@@ -88,6 +88,7 @@ class AnalyticsEngine(Protocol):
     def count_rows_of_query(self, sql: str) -> int: ...
     def describe_table(self, table: str) -> list[tuple[str, str]]: ...
     def probe_temporal_type(self, table: str, column: str) -> str | None: ...
+    def count_iso_temporal(self, table: str, columns: list[str]) -> dict[str, tuple[int, int, int]]: ...
     def cast_column(self, table: str, column: str, physical_type: str) -> None: ...
     def table_exists(self, table: str) -> bool: ...
     def row_count(self, table: str) -> int: ...
@@ -95,6 +96,7 @@ class AnalyticsEngine(Protocol):
     def count_distinct_of_query(self, sql: str, columns: list[str]) -> int: ...
     def column_contains(self, table: str, column: str, value: Any) -> bool: ...
     def compare_text_as_number(self, table: str, column: str, op: str, text: str) -> tuple[int, int, str | None]: ...
+    def compare_text_order(self, table: str, column: str) -> tuple[int, int, tuple[str, str] | None]: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def profile_columns(self, table: str, columns: list[str], *, ranged: list[str]) -> dict[str, dict[str, Any]]: ...
     def read_table(self, table: str, *, columns: list[str] | None = None,
@@ -102,7 +104,7 @@ class AnalyticsEngine(Protocol):
     def drop_table(self, table: str) -> None: ...
     def list_tables(self) -> list[str]: ...
     def export_table(self, table: str, path: Path, fmt: str, *, columns: list[str] | None = None,
-                     order_by: list[tuple[str, bool]] | None = None) -> int: ...
+                     order_by: list[tuple[str, bool]] | None = None, header: list[str] | None = None) -> int: ...
     def close(self) -> None: ...
 
 
@@ -282,6 +284,31 @@ class DuckDBEngine:
             return "TIMESTAMP"
         return None
 
+    def count_iso_temporal(self, table: str, columns: list[str]) -> dict[str, tuple[int, int, int]]:
+        """Per column, its non-null values and how many of them, read as text, are ISO dates and ISO timestamps.
+
+        The same test as the import-time probe: a value matches the documented pattern and casts cleanly. One
+        scan of the table; an empty result when the scan fails.
+        """
+        if not columns:
+            return {}
+        parts: list[str] = []
+        for column in columns:
+            col = quote_ident(column)
+            text = f"CAST({col} AS VARCHAR)"
+            castable = f"try_cast({text} AS TIMESTAMP) IS NOT NULL"
+            parts.append(
+                f"count({col}), "
+                f"count(*) FILTER (WHERE regexp_full_match({text}, {_literal(ISO_DATE_PATTERN)}) AND {castable}), "
+                f"count(*) FILTER (WHERE regexp_full_match({text}, {_literal(ISO_TIMESTAMP_PATTERN)}) AND {castable})"
+            )
+        try:
+            row = self.conn.execute(f"SELECT {', '.join(parts)} FROM {quote_ident(table)}").fetchone()
+        except duckdb.Error:
+            return {}
+        values = iter(row or ())
+        return {column: (int(next(values) or 0), int(next(values) or 0), int(next(values) or 0)) for column in columns}
+
     def cast_column(self, table: str, column: str, physical_type: str) -> None:
         if physical_type not in TEMPORAL_TYPES:
             raise InvalidSchemaError(f"Refusing to cast {column!r} to {physical_type!r}.", field="schema_hints")
@@ -335,6 +362,21 @@ class DuckDBEngine:
         ).fetchone()
         return int(row[0]), int(row[1]), row[2]
 
+    def compare_text_order(self, table: str, column: str) -> tuple[int, int, tuple[str, str] | None]:
+        """For a sort by a text column: how many distinct non-blank values are not numbers, how many neighbours in
+        text order are in the opposite numeric order, and the first such pair (the text that sorts first, then the
+        one after it). One scan of the table."""
+        ident = quote_ident(column)
+        row = self.conn.execute(
+            f"WITH v AS (SELECT DISTINCT {ident} AS t, TRY_CAST(NULLIF(trim({ident}), '') AS DOUBLE) AS n "
+            f"FROM {quote_ident(table)} WHERE NULLIF(trim({ident}), '') IS NOT NULL), "
+            "o AS (SELECT t, n, lead(t) OVER (ORDER BY t) AS next_t, lead(n) OVER (ORDER BY t) AS next_n FROM v) "
+            "SELECT count(*) FILTER (WHERE n IS NULL), count(*) FILTER (WHERE n > next_n), "
+            "min(t) FILTER (WHERE n > next_n), arg_min(next_t, t) FILTER (WHERE n > next_n) FROM o"
+        ).fetchone()
+        example = (str(row[2]), str(row[3])) if row and row[2] is not None else None
+        return int(row[0] or 0), int(row[1] or 0), example
+
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)
 
@@ -384,12 +426,13 @@ class DuckDBEngine:
         return [str(r[0]) for r in rows]
 
     def export_table(self, table: str, path: Path, fmt: str, *, columns: list[str] | None = None,
-                     order_by: list[tuple[str, bool]] | None = None) -> int:
+                     order_by: list[tuple[str, bool]] | None = None, header: list[str] | None = None) -> int:
         """Write a table to a file; returns the row count written.
 
         ``columns`` writes those columns, in that order, instead of every
-        column; ``order_by`` names ``(column, descending)`` pairs to sort by,
-        which need not be among the columns written.
+        column, and ``header`` names them in the file, one name per column;
+        ``order_by`` names ``(column, descending)`` pairs to sort by, which
+        need not be among the columns written.
         """
         if fmt == "csv":
             options = "FORMAT CSV, HEADER TRUE, DELIMITER ',', NULL ''"
@@ -397,7 +440,12 @@ class DuckDBEngine:
             options = "FORMAT PARQUET"
         else:
             raise InvalidSchemaError(f"Unsupported export format {fmt!r}; supported formats are csv and parquet.", field="format")
-        projection = ", ".join(quote_ident(c) for c in columns) if columns else "*"
+        if columns and header:
+            if len(header) != len(columns):
+                raise ValueError("header must name every exported column")
+            projection = ", ".join(f"{quote_ident(c)} AS {quote_ident(h)}" for c, h in zip(columns, header))
+        else:
+            projection = ", ".join(quote_ident(c) for c in columns) if columns else "*"
         ordering = ""
         if order_by:
             ordering = " ORDER BY " + ", ".join(

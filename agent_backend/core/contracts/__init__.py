@@ -3,9 +3,11 @@ from .spec import (
     ContractSpec,
     ContractSpec,
     contract_summary,
+    match_columns,
     organizing_keys,
     parse_contract,
     repair_transform,
+    respelled,
     verify_columns,
     verify_rows,
 )
@@ -15,9 +17,11 @@ __all__ = [
     "ContractSpec",
     "ContractSpec",
     "contract_summary",
+    "match_columns",
     "organizing_keys",
     "parse_contract",
     "repair_transform",
+    "respelled",
     "verify_columns",
     "verify_rows",
 ]

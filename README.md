@@ -227,8 +227,20 @@ name/aliases/description/columns with temporal words (`today`/`今天`,
 words (`published`/`发布`), and recency words (`latest`/`最新`, `earlier`/`之前`)
 → single clear winner, or a recency tie-break when the reference asks for it,
 otherwise `needs_resolution`. Tokens are Unicode-aware: CJK runs contribute
-character bigrams, so `股本变动` matches `北京股本变动`. A reference that hits a
-deleted dataset returns `NOT_FOUND` with `restorable: true`.
+character bigrams, so `股本变动` matches `北京股本变动`. A reference written as
+one name (no whitespace) is taken as a name, not a description: it resolves only
+to a dataset that accounts for each of its Latin-script words (a name or alias
+token, one close to or partly matching it, a description word or a column), so
+`lib_reservations` is `NOT_FOUND` with `absent_words: ["reservations"]` and the
+`lib_*` datasets as the nearest names, rather than ambiguous among them, and
+`orders_west` is not silently `orders`. Inside such a name, words that a
+description sets aside (`data`, `file`, `by`) or reads as hints (`latest`) are
+words of the name too, so `orders_file` and `lib_latest` are `NOT_FOUND` as
+well; a reference made only of hints (`latest`) keeps its meaning. The only
+word set aside is the extension of a file a dataset is imported from
+(`orders.csv`, `.json`, `.parquet`, `.db`, `.sqlite`, `.sqlite3`); `orders.backup`
+is not `orders`. A reference that hits a deleted dataset returns `NOT_FOUND`
+with `restorable: true`.
 
 Fields (resolved against the schema that is current at each step, so you can
 sort by an aggregate alias): exact → case-insensitive/alias → normalized → small
@@ -394,6 +406,22 @@ locale-dependent directives refused) and `null_text`. The dataset itself keeps
 its types; two differently formatted exports of the same version differ only in
 the file.
 
+A date or timestamp pattern formats date and timestamp values only. When one
+formatted nothing, the export still succeeds and says so instead of reporting
+the values as rendered: `format_not_applied` names each such column with its
+logical type, where the pattern came from (the column's own rule, or the file
+level when the file-level pattern met no date or timestamp anywhere in the
+file), how many values it holds and how many of them read as ISO dates or
+timestamps by the import rule of MADR 0006. `format_not_applied` advice
+explains this, and when the values read as dates it shows the derive through
+`try_cast` that gives the pattern a column to format; when every value would
+survive the cast, the request comes back rewritten as that derive followed by
+the same export. When the output contract declares that column's type as one
+the cast column would not satisfy (a text column declared `string`), the
+rewrite is withheld: the advice names the contract, the declared type and the
+type the derive gives, and leaves amending the contract with `declare_output`
+and a reason to the agent.
+
 ### Output contracts
 
 The shape of the deliverable is a contract the agent can write down while the
@@ -428,12 +456,17 @@ consequence and leaves the choice alone. `export_result`
 then checks the dataset against the current contract — names, order, declared
 types by family, row cardinality, the organizing columns — before anything is
 read or written, and writes the carried columns in the declared order, sorted
-the declared way. A mismatch is a recoverable
-`CONTRACT_MISMATCH` that shows the declared and the actual shape, lists the
-problems, and, when the fix is mechanical, carries the transform that repairs
-it (`{"select": [...]}`, with `rename` for near-miss names); a matching export
-records the contract as satisfied with the evidence (columns, rows, content
-hash) in the audit trail. Changing an open contract needs a `reason`, recorded
+the declared way. The declared spelling is the file's header (MADR 0013): a
+declared name stands for the dataset column of that exact name or, failing
+that, the one column whose normalized name is the same, so `FirstProduct`
+stands for the `firstproduct` the transform language writes for that alias and
+is written to the file as `FirstProduct`; the response's `columns` and the
+evidence's `written_as` show each column written under another spelling. A
+normalized name that fits several columns is a mismatch. A mismatch is a
+recoverable `CONTRACT_MISMATCH` that shows the declared and the actual shape,
+lists the problems, and, when the fix is mechanical, carries the transform that
+repairs it (`{"select": [...]}`); a matching export records the contract as
+satisfied with the evidence (columns, rows, content hash) in the audit trail. Changing an open contract needs a `reason`, recorded
 as an amendment with the shape before and after; re-declaring the same shape
 changes nothing; a new contract can be declared freely once the previous one is
 satisfied. Exports without a contract behave as before.
@@ -553,15 +586,25 @@ scope is explained with the scope and never rewritten from a look-alike name.
 A detector that cannot rewrite still explains. Every rewrite is executed in its
 test and must succeed.
 
-Three silent failures get the same treatment on *successful* responses: an
-empty result whose filter literal is absent from the filtered column says where
-in the workspace that literal does occur (`value_not_found`); a text column of
+Silent failures get the same treatment on *successful* responses: an empty
+result whose filter literal is absent from the filtered column says where in
+the workspace that literal does occur (`value_not_found`); a text column of
 numbers ordered against a quoted number (`weight > '100000000'`), which compares
 as text, says how many of its values fall on the other side as numbers and
 rewrites the comparison with `try_cast` (`numbers_compared_as_text`; a column
-holding any non-number, or one where text and numbers agree, stays silent); and
-a result that already has, or mechanically reshapes to, the open output contract
-says so with the next call (`matches_contract`, `near_contract`). A `one_per` contract is
+holding any non-number, or one where text and numbers agree, stays silent); a
+sort by such a column, in a sort step or in a raw_query's outermost `ORDER BY`,
+which sorts `'108'` before `'12'`, names the column and such a pair, and a
+raw_query comes back with the key cast (`numbers_sorted_as_text`; a sort step is
+explained, since sorting by a number there takes a derive and a select around
+it); a sort step that sets the output order and leaves rows tied on its keys
+says how many rows tie and where, since their order is open between runs and a
+preview and its materialization can differ (`sort_ties`; with a limit after the
+sort, only ties that reach the kept rows count); an export whose date or
+timestamp pattern formatted nothing names the
+columns (`format_not_applied`, under Exporting an answer); and a result that
+already has, or mechanically reshapes to, the open output contract says so with
+the next call (`matches_contract`, `near_contract`). A `one_per` contract is
 said to match only after the result's distinct keys are counted, as
 `export_result` counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
@@ -919,7 +962,8 @@ read the task: it holds the data facts and the agent's declarations, and those
 are enough to name more of the errors that enter silently.
 
 1. **Silent-failure signals on successful responses.** The signals that
-   exist, `value_not_found`, `numbers_compared_as_text` and
+   exist, `value_not_found`, `numbers_compared_as_text`,
+   `numbers_sorted_as_text`, `sort_ties`, `format_not_applied` and
    `matches_contract` / `near_contract`, come from one rule: the backend
    reports its own data facts and never reads the task. The next signals are
    the mistakes an agent makes without noticing
