@@ -365,6 +365,24 @@ def test_a_raw_query_order_by_numbers_stored_as_text_is_rewritten_with_the_key_c
     assert [row[0] for row in rows] == ["9", "12", "30"]  # the blank casts to null and sorts last
 
 
+def test_a_raw_query_order_by_after_non_ascii_text_is_rewritten_at_the_key(backend, tmp_path):
+    path = tmp_path / "wings.json"
+    path.write_text(json.dumps([{"区域": wing, "shelf": shelf, "books": books}
+                                for wing, shelf, books in (("北区", "9", 10), ("南区", "12", 20), ("东区", "108", 30))],
+                               ensure_ascii=False), encoding="utf-8")
+    assert backend.import_dataset(str(path))["status"] == "success"
+    sql = "SELECT 区域, \"区域\" AS wing, books FROM input WHERE 区域 <> '西区' ORDER BY input.shelf"
+    (key,) = backend.queries.inspect_query(sql).order_by
+    assert key == (("input", "shelf"), sql.index("input.shelf"))  # a character offset, not DuckDB's byte count
+    response = backend.transform_dataset("wings", {"raw_query": sql})
+    assert [row[2] for row in response["result"]["rows"]] == [30, 20, 10]  # '108', '12', '9'
+    (call,) = advice(response, "numbers_sorted_as_text")["rewrite"]
+    assert call["arguments"]["transform"] == {
+        "raw_query": sql.replace("ORDER BY input.shelf", "ORDER BY TRY_CAST(input.shelf AS DOUBLE)")}
+    (result,) = run(backend, [call])
+    assert [row[2] for row in result["result"]["rows"]] == [10, 20, 30] and "advice" not in result
+
+
 def test_sorts_that_numbers_would_not_change_or_that_are_not_by_a_text_column_of_numbers_stay_silent(
         backend, orders, tmp_path):
     shelves(backend, tmp_path)
