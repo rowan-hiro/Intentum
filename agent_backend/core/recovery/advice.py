@@ -27,7 +27,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..contracts import repair_transform, verify_columns, verify_rows
+from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
 from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
                   TransformIR, TryCastExpr, UnaryExpr)
@@ -2680,20 +2680,24 @@ def advise_contract(
         return None
     actual = [(f.name, f.logical_type) for f in ir.output_schema]
     problems = verify_columns(contract, actual) + verify_rows(contract, row_count, distinct_keys)
-    keyed = contract.rows == RowCardinality.ONE_PER and all(k in {n for n, _ in actual} for k in contract.row_keys)
+    stands = match_columns(contract, [n for n, _ in actual])
+    keyed = contract.rows == RowCardinality.ONE_PER and all(k in stands for k in contract.row_keys)
     if not problems and keyed and row_count > 0 and distinct_keys is None:
         return None
     shape = f"columns [{', '.join(c.name for c in contract.columns)}]" + (f", rows {contract.rows}" if contract.rows else "")
     answer = f"answer_{contract.id}"
     if not problems:
+        header = respelled(contract, [n for n, _ in actual])
+        written = ("" if not header else " The file will spell " + ", ".join(f"{a} as {h}" for a, h in header.items())
+                   + ", as the contract declares.")
         if materialized_name:
             return Advice("matches_contract",
                           f"{materialized_name} has the shape declared in output contract {contract.id} ({shape}); "
-                          f"export_result(dataset={materialized_name!r}, path=...) will accept it.")
+                          f"export_result(dataset={materialized_name!r}, path=...) will accept it." + written)
         return Advice(
             "matches_contract",
             f"This preview has the shape declared in output contract {contract.id} ({shape}). Materialize it and export "
-            "the dataset; export_result will accept it.",
+            "the dataset; export_result will accept it." + written,
             rewrite=[call("materialize_result", source=arguments.get("source"), transform=arguments.get("transform"),
                           name=answer, description=contract.description or "the declared deliverable")],
         )

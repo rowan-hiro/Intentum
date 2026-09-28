@@ -440,12 +440,17 @@ consequence and leaves the choice alone. `export_result`
 then checks the dataset against the current contract — names, order, declared
 types by family, row cardinality, the organizing columns — before anything is
 read or written, and writes the carried columns in the declared order, sorted
-the declared way. A mismatch is a recoverable
-`CONTRACT_MISMATCH` that shows the declared and the actual shape, lists the
-problems, and, when the fix is mechanical, carries the transform that repairs
-it (`{"select": [...]}`, with `rename` for near-miss names); a matching export
-records the contract as satisfied with the evidence (columns, rows, content
-hash) in the audit trail. Changing an open contract needs a `reason`, recorded
+the declared way. The declared spelling is the file's header (MADR 0013): a
+declared name stands for the dataset column of that exact name or, failing
+that, the one column whose normalized name is the same, so `FirstProduct`
+stands for the `firstproduct` the transform language writes for that alias and
+is written to the file as `FirstProduct`; the response's `columns` and the
+evidence's `written_as` show each column written under another spelling. A
+normalized name that fits several columns is a mismatch. A mismatch is a
+recoverable `CONTRACT_MISMATCH` that shows the declared and the actual shape,
+lists the problems, and, when the fix is mechanical, carries the transform that
+repairs it (`{"select": [...]}`); a matching export records the contract as
+satisfied with the evidence (columns, rows, content hash) in the audit trail. Changing an open contract needs a `reason`, recorded
 as an amendment with the shape before and after; re-declaring the same shape
 changes nothing; a new contract can be declared freely once the previous one is
 satisfied. Exports without a contract behave as before.

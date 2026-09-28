@@ -40,9 +40,11 @@ from .audit import AuditService
 from .contracts import (
     ContractSpec,
     contract_summary,
+    match_columns,
     organizing_keys,
     parse_contract,
     repair_transform,
+    respelled,
     verify_columns,
     verify_rows,
 )
@@ -1015,8 +1017,9 @@ class Backend:
             return None
         if contract is None or contract.status != ContractStatus.OPEN or contract.rows != RowCardinality.ONE_PER:
             return None
-        names = {f.name for f in ir.output_schema}
-        return list(contract.row_keys) if all(k in names for k in contract.row_keys) else None
+        stands = match_columns(contract, [f.name for f in ir.output_schema])
+        keys = [stands.get(k) for k in contract.row_keys]
+        return [k for k in keys if k] if all(keys) else None
 
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
@@ -1552,18 +1555,26 @@ class Backend:
             evidence = (self._verify_contract(contract, ds, version, export={"path": str(target), "format": fmt,
                                                                          "format_spec": format_spec, "overwrite": overwrite})
                         if contract is not None else None)
-            # What the contract carries, in its order, sorted the way it declares:
-            # the organizing columns are needed in the dataset and left out of the
-            # file (MADR 0012). Without a contract the dataset is written as it is.
-            projection = [c.name for c in contract.columns] if contract is not None and organizing_keys(contract) else None
-            ordering = [(o.name, o.descending) for o in contract.order_by] if contract is not None else []
+            # What the contract carries, in its order and under its spelling, sorted the way it declares:
+            # the organizing columns are needed in the dataset and left out of the file (MADR 0012), and a
+            # declared name stands for the column it matches (MADR 0013). Without a contract the dataset is
+            # written as it is.
+            projection: list[str] | None = None
+            header: list[str] | None = None
+            ordering: list[tuple[str, bool]] = []
+            if contract is not None:
+                stands = match_columns(contract, [c.name for c in ds.columns])
+                carried = [stands[c.name] for c in contract.columns]
+                if organizing_keys(contract) or respelled(contract, [c.name for c in ds.columns]):
+                    projection, header = carried, [c.name for c in contract.columns]
+                ordering = [(stands[o.name], o.descending) for o in contract.order_by]
             renderer: ValueRenderer | None = None
             columns: list[str] = []
             data: list[Any] = []
             if spec is not None:
                 # Prepared before anything is staged, so a bad column key costs no work.
                 columns, data = self.engine.read_table(version.physical_table, columns=projection, order_by=ordering)
-                renderer = ValueRenderer(spec, columns)
+                renderer = ValueRenderer(spec, columns, header)
                 for key, column, how in renderer.lenient:
                     notes.append(ResolutionNote("format_spec.columns", key, column, how))
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1573,9 +1584,9 @@ class Backend:
                 staged = Path(staging_dir) / target.name
                 if renderer is None:
                     rows = self.engine.export_table(version.physical_table, staged, fmt,
-                                                    columns=projection, order_by=ordering)
+                                                    columns=projection, order_by=ordering, header=header)
                 else:
-                    rows = write_formatted_csv(staged, columns, data, renderer)
+                    rows = write_formatted_csv(staged, columns, data, renderer, header=header)
                 content_hash = self.workspace.content_hash(staged)
                 self._publish_export(staged, target, overwrite)
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
@@ -1607,7 +1618,7 @@ class Backend:
                     "path": str(target),
                     "format": fmt,
                     "rows": rows,
-                    "columns": projection or [c.name for c in ds.columns],
+                    "columns": header or projection or [c.name for c in ds.columns],
                     "content_hash": content_hash,
                     "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}."
                                + (_unapplied_summary(not_applied) if not_applied
@@ -1850,9 +1861,10 @@ class Backend:
         actual = [(c.name, c.logical_type) for c in ds.columns]
         problems = verify_columns(contract, actual)
         distinct: int | None = None
-        names = {n for n, _ in actual}
-        if contract.rows == RowCardinality.ONE_PER and all(k in names for k in contract.row_keys) and version.row_count > 0:
-            distinct = self.engine.count_distinct_rows(version.physical_table, contract.row_keys)
+        stands = match_columns(contract, [n for n, _ in actual])
+        keys = [stands.get(k) for k in contract.row_keys]
+        if contract.rows == RowCardinality.ONE_PER and all(keys) and version.row_count > 0:
+            distinct = self.engine.count_distinct_rows(version.physical_table, [k for k in keys if k])
         if contract.rows != RowCardinality.ONE_PER or distinct is not None or version.row_count == 0:
             problems += verify_rows(contract, version.row_count, distinct)
         if problems:
@@ -1902,6 +1914,9 @@ class Backend:
             evidence["cardinality"] = str(contract.rows)
         if distinct is not None:
             evidence["distinct_keys"] = distinct
+        header = respelled(contract, [n for n, _ in actual])
+        if header:
+            evidence["written_as"] = header  # dataset column -> the declared spelling the file carries (MADR 0013)
         return evidence
 
     @staticmethod

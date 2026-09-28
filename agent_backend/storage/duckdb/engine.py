@@ -103,7 +103,7 @@ class AnalyticsEngine(Protocol):
     def drop_table(self, table: str) -> None: ...
     def list_tables(self) -> list[str]: ...
     def export_table(self, table: str, path: Path, fmt: str, *, columns: list[str] | None = None,
-                     order_by: list[tuple[str, bool]] | None = None) -> int: ...
+                     order_by: list[tuple[str, bool]] | None = None, header: list[str] | None = None) -> int: ...
     def close(self) -> None: ...
 
 
@@ -410,12 +410,13 @@ class DuckDBEngine:
         return [str(r[0]) for r in rows]
 
     def export_table(self, table: str, path: Path, fmt: str, *, columns: list[str] | None = None,
-                     order_by: list[tuple[str, bool]] | None = None) -> int:
+                     order_by: list[tuple[str, bool]] | None = None, header: list[str] | None = None) -> int:
         """Write a table to a file; returns the row count written.
 
         ``columns`` writes those columns, in that order, instead of every
-        column; ``order_by`` names ``(column, descending)`` pairs to sort by,
-        which need not be among the columns written.
+        column, and ``header`` names them in the file, one name per column;
+        ``order_by`` names ``(column, descending)`` pairs to sort by, which
+        need not be among the columns written.
         """
         if fmt == "csv":
             options = "FORMAT CSV, HEADER TRUE, DELIMITER ',', NULL ''"
@@ -423,7 +424,12 @@ class DuckDBEngine:
             options = "FORMAT PARQUET"
         else:
             raise InvalidSchemaError(f"Unsupported export format {fmt!r}; supported formats are csv and parquet.", field="format")
-        projection = ", ".join(quote_ident(c) for c in columns) if columns else "*"
+        if columns and header:
+            if len(header) != len(columns):
+                raise ValueError("header must name every exported column")
+            projection = ", ".join(f"{quote_ident(c)} AS {quote_ident(h)}" for c, h in zip(columns, header))
+        else:
+            projection = ", ".join(quote_ident(c) for c in columns) if columns else "*"
         ordering = ""
         if order_by:
             ordering = " ORDER BY " + ", ".join(

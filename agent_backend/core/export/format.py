@@ -103,13 +103,13 @@ def validate_pattern(pattern: str, field: str) -> str:
 class ValueRenderer:
     """Applies a validated specification to the values of one relation."""
 
-    def __init__(self, spec: ExportFormat, columns: list[str]) -> None:
+    def __init__(self, spec: ExportFormat, columns: list[str], header: list[str] | None = None) -> None:
         self.columns = list(columns)
         self.matched: dict[str, str] = {}  # specification key -> column name
         self.lenient: list[tuple[str, str, str]] = []  # key, column, how it matched
         overrides: dict[str, ValueFormat] = {}
         for key, rules in spec.columns.items():
-            column, how = self._match(str(key), columns)
+            column, how = self._match(str(key), columns, header)
             if column in overrides:
                 raise InvalidSchemaError(f"format_spec sets column {column!r} twice.", field="format_spec")
             overrides[column] = rules
@@ -136,14 +136,17 @@ class ValueRenderer:
         self.temporal = [0] * len(columns)
 
     @staticmethod
-    def _match(key: str, columns: list[str]) -> tuple[str, str | None]:
-        """One column for a specification key: exact name first, then lenient forms.
+    def _match(key: str, columns: list[str], header: list[str] | None = None) -> tuple[str, str | None]:
+        """One column for a specification key: exact name first (the column's, or the header the file writes
+        for it), then lenient forms.
 
         A lenient form that fits several columns is refused rather than guessed,
         so a key that exactly names one column can never be applied to another.
         """
         if key in columns:
             return key, None
+        if header and key in header:
+            return columns[header.index(key)], None
         for candidates, how in (
             ([c for c in columns if c.casefold() == key.casefold()], "case-insensitive match"),
             ([c for c in columns if normalize(c) == normalize(key)], "normalized match"),
@@ -235,16 +238,19 @@ class ValueRenderer:
         return text
 
 
-def write_formatted_csv(path: Path, columns: list[str], rows: Iterable[Iterable[Any]], renderer: ValueRenderer) -> int:
+def write_formatted_csv(path: Path, columns: list[str], rows: Iterable[Iterable[Any]], renderer: ValueRenderer, *,
+                        header: list[str] | None = None) -> int:
     """Write rows as csv with a prepared renderer; returns the row count.
 
-    Rendering happens in this process, so a formatted export materializes its
-    rows in memory — exports are answers, not bulk unloads.
+    ``header`` spells the columns in the file when it differs from their names
+    (an output contract's spelling, MADR 0013). Rendering happens in this
+    process, so a formatted export materializes its rows in memory — exports
+    are answers, not bulk unloads.
     """
     written = 0
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(columns)
+        writer.writerow(header or columns)
         for row in rows:
             writer.writerow(renderer.render_row(row))
             written += 1
