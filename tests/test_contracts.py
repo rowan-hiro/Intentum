@@ -125,7 +125,7 @@ def test_export_with_an_extra_column_is_refused_with_the_repair(backend, orders,
 
 
 def test_a_declared_spelling_is_the_header_the_export_writes(backend, orders, tmp_path: Path):
-    """MADR 0013: a declared name that matches a column only after normalization is that column, written as declared."""
+    """MADR 0018: a declared name that matches a column only after normalization is that column, written as declared."""
     backend.declare_output(["region", "total_revenue"], rows="at_least_one")
     backend.materialize_result("orders", AGG, "regional_sales")
     response = backend.export_result("regional_sales", str(tmp_path / "p.csv"))
@@ -284,7 +284,7 @@ def test_the_repair_keeps_the_organizing_columns(backend, orders, tmp_path: Path
     assert backend.export_result("answer", str(tmp_path / "p.csv"))["status"] == "success"
 
 
-# -- the declared spelling is the header (MADR 0013) --------------------------
+# -- the declared spelling is the header (MADR 0018) --------------------------
 
 FIRST_PRODUCT = {"group_by": ["region"], "measures": [{"function": "min", "field": "product", "alias": "FirstProduct"}]}
 

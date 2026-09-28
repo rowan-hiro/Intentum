@@ -243,7 +243,7 @@ def write_formatted_csv(path: Path, columns: list[str], rows: Iterable[Iterable[
     """Write rows as csv with a prepared renderer; returns the row count.
 
     ``header`` spells the columns in the file when it differs from their names
-    (an output contract's spelling, MADR 0013). Rendering happens in this
+    (an output contract's spelling, MADR 0018). Rendering happens in this
     process, so a formatted export materializes its rows in memory — exports
     are answers, not bulk unloads.
     """

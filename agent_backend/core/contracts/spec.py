@@ -284,7 +284,7 @@ def _parse_order_object(item: dict[str, Any]) -> tuple[Any, bool]:
 # --------------------------------------------------------------------------
 
 def match_columns(contract: OutputContract | ContractSpec, actual: list[str]) -> dict[str, str]:
-    """The dataset column each declared name stands for (MADR 0013).
+    """The dataset column each declared name stands for (MADR 0018).
 
     Every name the contract uses, carried or organizing, stands for the column
     of that exact name or, failing that, the one column whose normalized name
@@ -324,7 +324,7 @@ def verify_columns(contract: OutputContract, actual: list[tuple[str, LogicalType
 
     A declared name is matched as ``match_columns`` does: exactly, or by its
     normalized form when that fits one column, whose values the export then
-    writes under the declared spelling (MADR 0013). Declared types are
+    writes under the declared spelling (MADR 0018). Declared types are
     compared by family (numeric with numeric, temporal with temporal),
     because a contract says what kind of value a column holds, not how the
     engine stores it.
@@ -389,7 +389,7 @@ def repair_transform(contract: OutputContract, problems: list[ContractProblem]) 
     columns in order, keeping the organizing columns the export needs); a
     missing column or a row problem needs the agent to go back to the data. A
     name spelled differently from its column is not a problem to repair: the
-    export writes the declared spelling (MADR 0013).
+    export writes the declared spelling (MADR 0018).
     """
     if not problems or any(p.kind in ("missing", "type", "rows") for p in problems):
         return None
