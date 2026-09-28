@@ -5,19 +5,25 @@ and column tokens, temporal words ("today", "yesterday"), origin words
 ("imported", "result"), recency words ("latest", "earlier") and optional
 context hints. Material ambiguity raises ``AmbiguousReferenceError``; the
 backend renders that as a ``needs_resolution`` response.
+
+A reference written as one name (no whitespace) is a name the agent believes
+exists, not a description: it resolves only to a dataset that accounts for
+each of its Latin-script words. One that no dataset accounts for is not found,
+with the words nothing here has, rather than a match on a shared prefix.
 """
 
 from __future__ import annotations
 
 import difflib
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from ..errors import AmbiguousReferenceError, InvalidIntentError, NotFoundError
 from ..models.entities import Dataset, DatasetStatus
 from ...storage.metadata.interface import MetadataStore
-from .common import ResolutionNote, normalize, tokens
+from .common import ResolutionNote, is_cjk, normalize, tokens
 
 STOPWORDS = {
     "the", "a", "an", "i", "we", "my", "our", "of", "that", "this", "those", "these", "one", "ones",
@@ -79,15 +85,27 @@ class DatasetResolver:
 
         scored = self._score(text, active, context or {})
         ranked = sorted(scored, key=lambda item: (-item[1], item[0].created_at, item[0].id))
-        reasons = {d.id: why for d, _, why in ranked}
-        ranked = [(d, s) for d, s, _ in ranked]
-        positive = [(d, s) for d, s in ranked if s > 0]
+        reasons = {d.id: why for d, _, why, _ in ranked}
+        missing = {d.id: unmatched for d, _, _, unmatched in ranked}
+        named = not any(ch.isspace() for ch in text)
+        # A name must be accounted for word by word; a dataset that shares only some of its words is near, not it.
+        near = [(d, s) for d, s, _, unmatched in ranked if s > 0 and named and unmatched]
+        positive = [(d, s) for d, s, _, unmatched in ranked if s > 0 and not (named and unmatched)]
         if not positive:
+            absent = [w for w in dict.fromkeys(w for d, _ in near for w in missing[d.id])
+                      if all(w in missing[d.id] for d, _ in near)]
+            suggestions = [{"id": d.id, "name": d.name} for d, _ in near[:5]]
+            suggestions += [c for c in self._suggestions(text, active) if c["id"] not in {s["id"] for s in suggestions}]
+            details: dict[str, Any] = {"reference": text, "available": [{"id": d.id, "name": d.name} for d in active[:20]]}
+            if absent:
+                details["absent_words"] = absent
             raise NotFoundError(
-                f"No dataset matches {text!r}.",
+                f"No dataset matches {text!r}"
+                + (f": no dataset name, alias, description or column has {', '.join(repr(w) for w in absent)}."
+                   if absent else "."),
                 field=field,
-                candidates=self._suggestions(text, active),
-                details={"reference": text, "available": [{"id": d.id, "name": d.name} for d in active[:20]]},
+                candidates=suggestions[:5],
+                details=details,
             )
 
         best, best_score = positive[0]
@@ -168,16 +186,21 @@ class DatasetResolver:
         norm = normalize(text)
         return [d for d in datasets if normalize(d.name) == norm or norm in (normalize(a) for a in d.aliases)]
 
-    def _score(self, text: str, datasets: list[Dataset], context: dict[str, Any]) -> list[tuple[Dataset, float, list[str]]]:
+    def _score(self, text: str, datasets: list[Dataset],
+               context: dict[str, Any]) -> list[tuple[Dataset, float, list[str], list[str]]]:
+        """Each dataset's score, the reasons, and the reference's Latin-script content words it does not account for."""
         words = tokens(text)
         content = [w for w in words if w not in STOPWORDS and w not in HINT_WORDS]
+        # A file name's extension says where the data came from, not which dataset: orders.csv is orders.
+        extension = re.search(r"\.([^\W_]{1,8})$", text)
+        exempt = {extension.group(1).casefold()} if extension else set()
         hints = set(words) & HINT_WORDS
         now = self.clock()
         today = now.date()
         yesterday = today - timedelta(days=1)
         preferred = set(context.get("recent", []) or [])
 
-        results: list[tuple[Dataset, float, list[str]]] = []
+        results: list[tuple[Dataset, float, list[str], list[str]]] = []
         for d in datasets:
             name_tokens = set(tokens(d.name))
             alias_tokens = set(t for a in d.aliases for t in tokens(a))
@@ -185,6 +208,7 @@ class DatasetResolver:
             column_tokens = set(t for c in d.columns for t in tokens(c.name))
             score = 0.0
             why: list[str] = []
+            unmatched: list[str] = []
             for w in content:
                 if w in name_tokens or w in alias_tokens:
                     score += 3
@@ -203,8 +227,10 @@ class DatasetResolver:
                     elif any(w in t or t in w for t in name_tokens if len(w) >= 4 and len(t) >= 4):
                         score += 1.5
                         why.append(f"{w!r} partially matches the name")
+                    elif not is_cjk(w) and w not in exempt:
+                        unmatched.append(w)
             if content and score == 0:
-                results.append((d, 0.0, why))
+                results.append((d, 0.0, why, unmatched))
                 continue
 
             created_day = d.created_at.date()
@@ -234,7 +260,7 @@ class DatasetResolver:
                 # Pure hint reference ("the one I imported today"): every dataset
                 # passing the hint filters is a candidate.
                 score += 1
-            results.append((d, score, why))
+            results.append((d, score, why, unmatched))
         return results
 
     @staticmethod

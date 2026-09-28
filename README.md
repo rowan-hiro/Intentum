@@ -227,8 +227,15 @@ name/aliases/description/columns with temporal words (`today`/`今天`,
 words (`published`/`发布`), and recency words (`latest`/`最新`, `earlier`/`之前`)
 → single clear winner, or a recency tie-break when the reference asks for it,
 otherwise `needs_resolution`. Tokens are Unicode-aware: CJK runs contribute
-character bigrams, so `股本变动` matches `北京股本变动`. A reference that hits a
-deleted dataset returns `NOT_FOUND` with `restorable: true`.
+character bigrams, so `股本变动` matches `北京股本变动`. A reference written as
+one name (no whitespace) is taken as a name, not a description: it resolves only
+to a dataset that accounts for each of its Latin-script words (a name or alias
+token, one close to or partly matching it, a description word or a column; a
+file extension such as `.csv` is ignored), so `lib_reservations` is `NOT_FOUND`
+with `absent_words: ["reservations"]` and the `lib_*` datasets as the nearest
+names, rather than ambiguous among them, and `orders_west` is not silently
+`orders`. A reference that hits a deleted dataset returns `NOT_FOUND` with
+`restorable: true`.
 
 Fields (resolved against the schema that is current at each step, so you can
 sort by an aggregate alias): exact → case-insensitive/alias → normalized → small

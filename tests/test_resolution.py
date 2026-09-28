@@ -73,6 +73,46 @@ def test_unknown_dataset_lists_available(backend, orders):
     assert response["details"]["available"] == [{"id": "ds_1", "name": "orders"}]
 
 
+def _library(backend):
+    """Tables of a library catalogue: most share the lib prefix, as a schema's tables often do."""
+    for name in ("lib_loans", "lib_members", "lib_branch_hours", "catalog_titles"):
+        assert backend.import_dataset(rows=[{"id": 1, "note": "x"}], name=name)["status"] == "success"
+
+
+def test_a_name_that_shares_only_a_prefix_is_not_found_rather_than_ambiguous(backend):
+    _library(backend)
+    response = backend.describe_dataset("lib_reservations")
+    assert response["code"] == "NOT_FOUND", response
+    assert response["message"] == ("No dataset matches 'lib_reservations': no dataset name, alias, description or "
+                                   "column has 'reservations'.")
+    assert response["details"]["absent_words"] == ["reservations"]
+    assert [c["name"] for c in response["candidates"]] == ["lib_loans", "lib_members", "lib_branch_hours"]
+    assert [a["kind"] for a in response["advice"]] == ["dataset_not_found"]
+
+
+def test_a_name_that_shares_one_word_does_not_resolve_to_that_dataset(backend, orders):
+    _library(backend)
+    for reference, absent in (("branch_closures", "closures"), ("orders_west", "west")):
+        response = backend.describe_dataset(reference)
+        assert response["code"] == "NOT_FOUND", (reference, response)
+        assert response["details"]["absent_words"] == [absent]
+        assert "rewrite" not in response["advice"][0]
+
+
+def test_a_name_whose_words_a_dataset_accounts_for_still_resolves(backend, orders):
+    _library(backend)
+    for reference, name in (("lib_branch", "lib_branch_hours"),  # a prefix of the name
+                            ("orderz", "orders"),  # a typo close to the name
+                            ("orders.csv", "orders"),  # the file it came from
+                            ("lib_loan", "lib_loans")):
+        response = backend.describe_dataset(reference)
+        assert response["status"] == "success", (reference, response)
+        assert response["dataset"]["name"] == name
+    # a description is not a name: its words need not all be names
+    described = backend.describe_dataset("the orders from the west region")
+    assert described["status"] == "success" and described["dataset"]["name"] == "orders"
+
+
 def test_deleted_dataset_reference(backend, orders):
     backend.delete_dataset("orders")
     response = backend.transform_dataset("orders", AGG)
