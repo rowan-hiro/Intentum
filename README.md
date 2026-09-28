@@ -230,12 +230,17 @@ otherwise `needs_resolution`. Tokens are Unicode-aware: CJK runs contribute
 character bigrams, so `股本变动` matches `北京股本变动`. A reference written as
 one name (no whitespace) is taken as a name, not a description: it resolves only
 to a dataset that accounts for each of its Latin-script words (a name or alias
-token, one close to or partly matching it, a description word or a column; a
-file extension such as `.csv` is ignored), so `lib_reservations` is `NOT_FOUND`
-with `absent_words: ["reservations"]` and the `lib_*` datasets as the nearest
-names, rather than ambiguous among them, and `orders_west` is not silently
-`orders`. A reference that hits a deleted dataset returns `NOT_FOUND` with
-`restorable: true`.
+token, one close to or partly matching it, a description word or a column), so
+`lib_reservations` is `NOT_FOUND` with `absent_words: ["reservations"]` and the
+`lib_*` datasets as the nearest names, rather than ambiguous among them, and
+`orders_west` is not silently `orders`. Inside such a name, words that a
+description sets aside (`data`, `file`, `by`) or reads as hints (`latest`) are
+words of the name too, so `orders_file` and `lib_latest` are `NOT_FOUND` as
+well; a reference made only of hints (`latest`) keeps its meaning. The only
+word set aside is the extension of a file a dataset is imported from
+(`orders.csv`, `.json`, `.parquet`, `.db`, `.sqlite`, `.sqlite3`); `orders.backup`
+is not `orders`. A reference that hits a deleted dataset returns `NOT_FOUND`
+with `restorable: true`.
 
 Fields (resolved against the schema that is current at each step, so you can
 sort by an aggregate alias): exact → case-insensitive/alias → normalized → small
@@ -411,7 +416,11 @@ timestamps by the import rule of MADR 0006. `format_not_applied` advice
 explains this, and when the values read as dates it shows the derive through
 `try_cast` that gives the pattern a column to format; when every value would
 survive the cast, the request comes back rewritten as that derive followed by
-the same export.
+the same export. When the output contract declares that column's type as one
+the cast column would not satisfy (a text column declared `string`), the
+rewrite is withheld: the advice names the contract, the declared type and the
+type the derive gives, and leaves amending the contract with `declare_output`
+and a reason to the agent.
 
 ### Output contracts
 

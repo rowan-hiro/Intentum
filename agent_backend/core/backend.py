@@ -1650,8 +1650,9 @@ class Backend:
                     response["format_not_applied"] = not_applied
                     try:
                         advice = advise_unapplied_format(not_applied, casts=casts, dataset=ds.name,
-                                                         columns=[c.name for c in ds.columns],
-                                                         arguments={"path": path, "format_spec": format_spec})
+                                                         columns=[(c.name, c.logical_type) for c in ds.columns],
+                                                         arguments={"path": path, "format_spec": format_spec},
+                                                         contract=contract)
                         response["advice"] = [advice.to_dict()]
                     except Exception as err:  # advice never breaks a response
                         log_event("advice.skipped", error=repr(err))

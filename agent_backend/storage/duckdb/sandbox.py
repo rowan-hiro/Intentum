@@ -146,7 +146,7 @@ class QuerySandbox:
             shape.error = str(tree.get("error_message") or "the statement could not be read")
             return shape
         _walk(tree.get("statements"), shape)
-        _order_keys(tree.get("statements"), shape)
+        _order_keys(tree.get("statements"), shape, sql)
         return shape
 
     def describe_query(self, sql: str, relations: dict[str, list[tuple[str, str]]]) -> list[tuple[str, str, LogicalType]]:
@@ -378,7 +378,12 @@ def _from_tables(node: Any, ctes: set[str]) -> list[tuple[str, str]] | None:
     return None
 
 
-def _order_keys(statements: Any, shape: QueryShape) -> None:
+def _character_offset(sql: str, location: int) -> int:
+    """The offset into ``sql`` of a parser location, which DuckDB counts in UTF-8 bytes."""
+    return len(sql.encode("utf-8")[:location].decode("utf-8", errors="ignore"))
+
+
+def _order_keys(statements: Any, shape: QueryShape, sql: str) -> None:
     """The column references the outermost ORDER BY of a plain SELECT over tables sorts by, with their offsets.
 
     A bare name that the select list gives to a column (``a AS x ... ORDER BY x``) stands for that column; one it
@@ -413,7 +418,7 @@ def _order_keys(statements: Any, shape: QueryShape) -> None:
                     continue
                 if target[-1].casefold() != names[0].casefold():
                     names = target
-            keys.append((names, location))
+            keys.append((names, _character_offset(sql, location)))
     shape.order_by, shape.order_from = keys, tables
 
 
