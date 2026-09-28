@@ -2603,16 +2603,20 @@ def advise_unapplied_format(
     *,
     casts: dict[str, str],
     dataset: str,
-    columns: list[str],
+    columns: list[tuple[str, LogicalType]],
     arguments: dict[str, Any],
+    contract: OutputContract | None = None,
 ) -> Advice:
     """A date or timestamp pattern that formatted no value: it formats date and timestamp columns only.
 
     ``unapplied`` is the export's own report (column, type, values, read_as_dates); ``casts`` names, for each
-    column whose values read as ISO dates or timestamps, the type to cast it to. The request is rewritten when
+    column whose values read as ISO dates or timestamps, the type to cast it to; ``columns`` are the dataset's
+    columns and types, and ``contract`` the output contract the export is held to. The request is rewritten when
     every such column casts without losing a value: a derive of each through try_cast, the dataset's columns in
     their order, then the same export of that result. A column none of whose values reads as a date is left as
     it is; one only some of whose values do blocks the rewrite, since the cast would turn the others into null.
+    A contract whose declared types the cast columns would not satisfy blocks it too: amending the contract is
+    the agent's judgement (MADR 0008), so the advice names the declaration instead.
     """
     facts: list[str] = []
     for entry in unapplied:
@@ -2636,14 +2640,30 @@ def advise_unapplied_format(
     explanation += f" A derive of {derived} before the export gives a column the pattern formats"
     if any(e["read_as_dates"] != e["values"] for e in readable):
         return Advice("format_not_applied", explanation + "; a value that does not read as a date becomes null.")
-    taken = {c.casefold() for c in columns}
+    names = [c for c, _ in columns]
+    if contract is not None:
+        cast = {e["column"]: LogicalType(casts[e["column"]]) for e in readable}
+        problems = verify_columns(contract, [(c, cast.get(c, t)) for c, t in columns])
+        if problems:
+            stands = match_columns(contract, names)
+            declared = {c.name: c.logical_type for c in contract.columns}
+            refusals = [f"it declares {p.column} as {declared[p.column]}, and the derive makes {stands[p.column]} "
+                        f"{cast[stands[p.column]]}" if p.kind == "type" and stands.get(p.column or "") in cast
+                        else p.message.rstrip(".") for p in problems]
+            refused = [p.column for p in problems if p.kind == "type" and p.column]
+            return Advice("format_not_applied", explanation + f", but output contract {contract.id} would refuse "
+                          "that export: " + "; ".join(refusals) + ". If the answer holds dates there, amend the "
+                          "contract with declare_output and a reason, declaring " + ", ".join(refused or ["them"])
+                          + " as date or timestamp, and export that derive; otherwise pass the values through as "
+                          "they are.")
+    taken = {c.casefold() for c in names}
     temporary: dict[str, str] = {}
     for entry in readable:
         temporary[entry["column"]] = _free_name(f"{entry['column']}_{casts[entry['column']]}", taken)
         taken.add(temporary[entry["column"]].casefold())
     steps: list[dict[str, Any]] = [
         {"derive": {temporary[c]: f"try_cast({_expression_name(c)} as {casts[c]})" for c in temporary}},
-        {"select": [temporary.get(c, c) for c in columns]},
+        {"select": [temporary.get(c, c) for c in names]},
         {"rename": {temporary[c]: c for c in temporary}},
     ]
     name = slugify(f"{dataset}_dated")
