@@ -62,6 +62,49 @@ class SqlCompiler:
             prev = name
         return "WITH " + ",\n".join(ctes) + f"\nSELECT * FROM {prev}"
 
+    def compile_ties(self, ir: TransformIR, physical_inputs: dict[str, str]) -> str | None:
+        """A statement counting the rows that tie on the keys of the sort that sets the output order, or None.
+
+        That sort is the last one, followed only by steps that keep its rows and order (select, derive, rename)
+        and at most one limit; with a limit, only tied groups whose key values reach into the rows it keeps count.
+        The statement returns at most one row: the largest tied group's key values, its size, the number of tied
+        groups and the number of tied rows. A transform that starts with a raw_query is not counted.
+        """
+        if not ir.steps or isinstance(ir.steps[0], RawQueryStep):
+            return None
+        position: int | None = None
+        limit: LimitStep | None = None
+        for index in range(len(ir.steps) - 1, -1, -1):
+            step = ir.steps[index]
+            if isinstance(step, SortStep):
+                position = index
+                break
+            if isinstance(step, LimitStep) and limit is None:
+                limit = step
+                continue
+            if not isinstance(step, (SelectStep, DeriveStep, RenameStep)):
+                return None
+        if position is None:
+            return None
+        sort = ir.steps[position]
+        assert isinstance(sort, SortStep)
+        sorted_ir = ir.model_copy(update={"steps": ir.steps[: position + 1]})
+        chain = self.compile(sorted_ir, physical_inputs)
+        prefix, _, _ = chain.rpartition("\nSELECT * FROM ")
+        relation = f"s{position + 1}"
+        keys = [q(k.field.name) for k in sort.keys]
+        listed = ", ".join(keys)
+        ctes = [f"tied AS (SELECT {listed}, count(*) AS n FROM {relation} GROUP BY {listed} HAVING count(*) > 1)"]
+        kept = ""
+        if limit is not None:
+            ordering = ", ".join(f"{q(k.field.name)} {k.direction.upper()}" for k in sort.keys)
+            offset = f" OFFSET {limit.offset}" if limit.offset else ""
+            ctes.append(f"kept AS (SELECT {listed} FROM {relation} ORDER BY {ordering} LIMIT {limit.limit}{offset})")
+            matched = " AND ".join(f"kept.{k} IS NOT DISTINCT FROM tied.{k}" for k in keys)
+            kept = f" WHERE EXISTS (SELECT 1 FROM kept WHERE {matched})"
+        return (prefix + ",\n" + ",\n".join(ctes)
+                + f"\nSELECT {listed}, n, count(*) OVER (), sum(n) OVER () FROM tied{kept} ORDER BY n DESC, {listed} LIMIT 1")
+
     def _step_sql(self, step, prev: str, physical_inputs: dict[str, str]) -> str:
         if isinstance(step, SelectStep):
             return f"SELECT {', '.join(q(f.name) for f in step.fields)} FROM {prev}"

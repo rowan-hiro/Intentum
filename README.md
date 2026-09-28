@@ -581,7 +581,11 @@ sort by such a column, in a sort step or in a raw_query's outermost `ORDER BY`,
 which sorts `'108'` before `'12'`, names the column and such a pair, and a
 raw_query comes back with the key cast (`numbers_sorted_as_text`; a sort step is
 explained, since sorting by a number there takes a derive and a select around
-it); an export whose date or timestamp pattern formatted nothing names the
+it); a sort step that sets the output order and leaves rows tied on its keys
+says how many rows tie and where, since their order is open between runs and a
+preview and its materialization can differ (`sort_ties`; with a limit after the
+sort, only ties that reach the kept rows count); an export whose date or
+timestamp pattern formatted nothing names the
 columns (`format_not_applied`, under Exporting an answer); and a result that
 already has, or mechanically reshapes to, the open output contract says so with
 the next call (`matches_contract`, `near_contract`). A `one_per` contract is
@@ -943,7 +947,7 @@ are enough to name more of the errors that enter silently.
 
 1. **Silent-failure signals on successful responses.** The signals that
    exist, `value_not_found`, `numbers_compared_as_text`,
-   `numbers_sorted_as_text`, `format_not_applied` and
+   `numbers_sorted_as_text`, `sort_ties`, `format_not_applied` and
    `matches_contract` / `near_contract`, come from one rule: the backend
    reports its own data facts and never reads the task. The next signals are
    the mistakes an agent makes without noticing

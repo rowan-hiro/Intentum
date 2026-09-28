@@ -33,8 +33,8 @@ from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
-from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_text_comparison,
-                       advise_text_sort, advise_unapplied_format, call as tool_call)
+from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_sort_ties,
+                       advise_text_comparison, advise_text_sort, advise_unapplied_format, call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
@@ -970,7 +970,8 @@ class Backend:
             result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir))
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
-                                            ir.output.name if materialize else None, distinct_keys=result.distinct_keys)
+                                            ir.output.name if materialize else None, distinct_keys=result.distinct_keys,
+                                            ties=result.ties)
 
             now = self.clock()
             response: dict[str, Any]
@@ -1024,9 +1025,9 @@ class Backend:
 
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
-                          distinct_keys: int | None = None) -> list[Advice]:
-        """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, or a
-        result that fits the contract."""
+                          distinct_keys: int | None = None, ties: Any = None) -> list[Advice]:
+        """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, rows
+        a sort leaves tied, or a result that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -1040,6 +1041,9 @@ class Backend:
                 advice.append(found)
             found = advise_text_sort(ir, used=used, inspect=self._inspect_query, compare=self._compare_text_order,
                                      tool=tool, arguments=arguments)
+            if found is not None:
+                advice.append(found)
+            found = advise_sort_ties(ir, ties)
             if found is not None:
                 advice.append(found)
             contract = self.store.latest_contract()

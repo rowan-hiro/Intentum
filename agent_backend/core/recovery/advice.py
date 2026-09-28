@@ -4,12 +4,13 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Five
+rewrites the agent's own request into tool calls it can send as-is. Six
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
 ordered against a quoted number (it compares as text) or sorted by (it sorts as
-text), a result that already has (or mechanically reshapes to) the declared
-output shape, and an export whose date or timestamp pattern formatted no value.
+text), a sort that leaves tied rows in no defined order, a result that already
+has (or mechanically reshapes to) the declared output shape, and an export
+whose date or timestamp pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -29,8 +30,8 @@ from typing import Any, Callable
 
 from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
-from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LiteralExpr,
-                  RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
+from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LimitStep,
+                  LiteralExpr, RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
 from ..ir.raw_query import QueryShape
 from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
@@ -2754,6 +2755,32 @@ def advise_text_sort(
         overrides["name"] = slugify(f"{arguments['name']}_numeric")  # the first result keeps its name
     return Advice("numbers_sorted_as_text", explanation + "; the same request sorted that way:",
                   rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
+
+
+def advise_sort_ties(ir: TransformIR, ties: tuple[list[Any], int, int, int] | None) -> Advice | None:
+    """Rows that tie on the keys of the sort that sets the output order come back in no defined order.
+
+    ``ties`` is the executor's count for that sort (the largest tied group's key values, its size, the number of
+    tied groups, the number of tied rows), None when nothing ties. Explained, never rewritten: which column tells
+    the rows apart is the agent's to choose.
+    """
+    if ties is None:
+        return None
+    sorts = [step for step in ir.steps if isinstance(step, SortStep)]
+    if not sorts:
+        return None
+    keys = [k.field.name for k in sorts[-1].keys]
+    values, size, groups, tied = ties
+    at = ", ".join(f"{k} = {v!r}" for k, v in zip(keys, values))
+    limited = any(isinstance(step, LimitStep) for step in ir.steps[ir.steps.index(sorts[-1]):])
+    explanation = (f"{tied} rows tie with another row on the sort key [{', '.join(keys)}] "
+                   f"({groups} {'group' if groups == 1 else 'groups'}, the largest {size} rows at {at}). Rows that tie "
+                   "come back in no defined order, so two runs of this transform, such as a preview and its "
+                   "materialization, can order them differently")
+    if limited:
+        explanation += ", and the limit can keep different ones"
+    return Advice("sort_ties", explanation + ". A key that tells them apart, such as an identifier, added to the sort "
+                  "settles the order.")
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

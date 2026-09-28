@@ -23,6 +23,9 @@ class ExecutionResult:
     truncated: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
     distinct_keys: int | None = None  # distinct combinations of the columns asked for, when asked
+    # Rows tied on the keys of the sort that sets the output order: (largest group's key values, its size,
+    # tied groups, tied rows); None when nothing ties or nothing was counted.
+    ties: tuple[list[Any], int, int, int] | None = None
 
 
 class Executor:
@@ -37,7 +40,23 @@ class Executor:
         """Run the transform; ``count_distinct`` names columns whose distinct combinations the result should count."""
         if ir.steps and isinstance(ir.steps[0], RawQueryStep):
             return self._execute_after_query(ir, plan, count_distinct)
-        return self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs), count_distinct)
+        result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs), count_distinct)
+        if result.row_count:  # one row kept by a limit can still be one of several tied rows
+            try:
+                result.ties = self._ties(ir, plan)
+            except Exception:  # the count serves advice only: it never fails the transform
+                result.ties = None
+        return result
+
+    def _ties(self, ir: TransformIR, plan: ExecutionPlan) -> tuple[list[Any], int, int, int] | None:
+        sql = self.compiler.compile_ties(ir, plan.physical_inputs)
+        if sql is None:
+            return None
+        _, rows = self.engine.query(sql)
+        if not rows:
+            return None
+        *keys, size, groups, tied = rows[0]
+        return list(keys), int(size), int(groups), int(tied)
 
     def _execute(self, ir: TransformIR, plan: ExecutionPlan, sql: str,
                  count_distinct: list[str] | None = None) -> ExecutionResult:

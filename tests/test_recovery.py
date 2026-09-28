@@ -385,6 +385,40 @@ def test_sorts_that_numbers_would_not_change_or_that_are_not_by_a_text_column_of
     assert "numbers_sorted_as_text" not in kinds(coded)
 
 
+def test_rows_tied_on_the_sort_key_are_said_to_have_no_defined_order(backend, orders):
+    response = backend.transform_dataset("orders", {"sort": "region", "select": ["region", "customer"]})
+    found = advice(response, "sort_ties")
+    assert found["explanation"].startswith("12 rows tie with another row on the sort key [region] (4 groups, the "
+                                           "largest 3 rows at region = 'East')")
+    assert "a preview and its materialization, can order them differently" in found["explanation"]
+    assert "limit" not in found["explanation"] and "rewrite" not in found
+    made = backend.materialize_result("orders", [{"sort": "region"}, {"select": ["region", "customer"]}], "by_region")
+    assert "sort_ties" in kinds(made)
+    settled = backend.transform_dataset("orders", {"sort": ["region", "order_id"]})
+    assert "sort_ties" not in kinds(settled)
+
+
+def test_with_a_limit_only_ties_that_reach_the_kept_rows_count(backend, orders):
+    # quantity 1 is held by two orders: the limit keeps one of them, and which one is open.
+    boundary = backend.transform_dataset("orders", [{"sort": "quantity"}, {"limit": 1}, {"select": ["order_id"]}])
+    found = advice(boundary, "sort_ties")
+    assert found["explanation"].startswith("2 rows tie with another row on the sort key [quantity] (1 group, the "
+                                           "largest 2 rows at quantity = 1)")
+    assert "and the limit can keep different ones" in found["explanation"]
+    # the three largest quantities are distinct, and the tie at quantity 1 is outside them
+    top = backend.transform_dataset("orders", [{"sort": "-quantity"}, {"limit": 3}])
+    assert top["result"]["row_count"] == 3 and "sort_ties" not in kinds(top)
+
+
+def test_a_sort_that_does_not_set_the_output_order_is_not_counted(backend, orders):
+    regrouped = backend.transform_dataset("orders", [{"sort": "region"}, {"group_by": ["region"], "metric": "amount"}])
+    assert regrouped["status"] == "success" and "sort_ties" not in kinds(regrouped)
+    filtered = backend.transform_dataset("orders", [{"sort": "region"}, {"filter": "amount > 100"}])
+    assert filtered["status"] == "success" and "sort_ties" not in kinds(filtered)
+    queried = backend.transform_dataset("orders", [{"raw_query": "SELECT region, amount FROM input"}, {"sort": "region"}])
+    assert queried["status"] == "success" and "sort_ties" not in kinds(queried)
+
+
 def test_a_non_empty_result_carries_no_empty_result_advice(backend, orders):
     response = backend.transform_dataset("orders", {"filter": "region = 'East'"})
     assert response["result"]["row_count"] > 0 and "advice" not in response
