@@ -88,6 +88,7 @@ class AnalyticsEngine(Protocol):
     def count_rows_of_query(self, sql: str) -> int: ...
     def describe_table(self, table: str) -> list[tuple[str, str]]: ...
     def probe_temporal_type(self, table: str, column: str) -> str | None: ...
+    def count_iso_temporal(self, table: str, columns: list[str]) -> dict[str, tuple[int, int, int]]: ...
     def cast_column(self, table: str, column: str, physical_type: str) -> None: ...
     def table_exists(self, table: str) -> bool: ...
     def row_count(self, table: str) -> int: ...
@@ -281,6 +282,31 @@ class DuckDBEngine:
         if dates + timestamps == non_null:
             return "TIMESTAMP"
         return None
+
+    def count_iso_temporal(self, table: str, columns: list[str]) -> dict[str, tuple[int, int, int]]:
+        """Per column, its non-null values and how many of them, read as text, are ISO dates and ISO timestamps.
+
+        The same test as the import-time probe: a value matches the documented pattern and casts cleanly. One
+        scan of the table; an empty result when the scan fails.
+        """
+        if not columns:
+            return {}
+        parts: list[str] = []
+        for column in columns:
+            col = quote_ident(column)
+            text = f"CAST({col} AS VARCHAR)"
+            castable = f"try_cast({text} AS TIMESTAMP) IS NOT NULL"
+            parts.append(
+                f"count({col}), "
+                f"count(*) FILTER (WHERE regexp_full_match({text}, {_literal(ISO_DATE_PATTERN)}) AND {castable}), "
+                f"count(*) FILTER (WHERE regexp_full_match({text}, {_literal(ISO_TIMESTAMP_PATTERN)}) AND {castable})"
+            )
+        try:
+            row = self.conn.execute(f"SELECT {', '.join(parts)} FROM {quote_ident(table)}").fetchone()
+        except duckdb.Error:
+            return {}
+        values = iter(row or ())
+        return {column: (int(next(values) or 0), int(next(values) or 0), int(next(values) or 0)) for column in columns}
 
     def cast_column(self, table: str, column: str, physical_type: str) -> None:
         if physical_type not in TEMPORAL_TYPES:

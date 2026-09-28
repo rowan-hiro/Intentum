@@ -122,6 +122,18 @@ class ValueRenderer:
             if rules.timestamp_format is not None:
                 validate_pattern(rules.timestamp_format, f"{where}.timestamp_format")
         self.rules = [_Rule.build(spec, overrides.get(name)) for name in columns]
+        # Where each column's date or timestamp pattern comes from, and what it met while rendering: a
+        # pattern formats date and timestamp values only, so one that met none of them changed nothing.
+        file_pattern = bool(spec.date_format or spec.timestamp_format)
+        self.pattern_from: list[str | None] = []
+        for name in columns:
+            own = overrides.get(name)
+            if own is not None and (own.date_format or own.timestamp_format):
+                self.pattern_from.append("column")
+            else:
+                self.pattern_from.append("file" if file_pattern else None)
+        self.values = [0] * len(columns)
+        self.temporal = [0] * len(columns)
 
     @staticmethod
     def _match(key: str, columns: list[str]) -> tuple[str, str | None]:
@@ -148,7 +160,32 @@ class ValueRenderer:
         )
 
     def render_row(self, row: Iterable[Any]) -> list[str]:
-        return [self._render(value, rule) for value, rule in zip(row, self.rules)]
+        rendered: list[str] = []
+        for index, (value, rule) in enumerate(zip(row, self.rules)):
+            if value is not None:
+                self.values[index] += 1
+                if isinstance(value, dt.date):  # a datetime is a date too
+                    self.temporal[index] += 1
+            rendered.append(self._render(value, rule))
+        return rendered
+
+    def unapplied(self) -> list[tuple[str, str]]:
+        """Columns a date or timestamp pattern formatted no value of, with where the pattern came from.
+
+        Read after the rows are rendered. A column's own pattern is reported when the column has values and none
+        of them is a date or timestamp. A file-level pattern is a default meant for whichever columns hold dates,
+        so it is reported only when it formatted nothing in the whole file, and then on every column it covered
+        that has values.
+        """
+        covered = [i for i, source in enumerate(self.pattern_from) if source == "file"]
+        file_idle = bool(covered) and not any(self.temporal[i] for i in covered)
+        found: list[tuple[str, str]] = []
+        for index, source in enumerate(self.pattern_from):
+            if not self.values[index] or self.temporal[index]:
+                continue
+            if source == "column" or (source == "file" and file_idle):
+                found.append((self.columns[index], source))
+        return found
 
     # -- one value -------------------------------------------------------
     def _render(self, value: Any, rule: _Rule) -> str:

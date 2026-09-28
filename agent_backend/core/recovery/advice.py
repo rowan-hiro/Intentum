@@ -4,11 +4,12 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Three
+rewrites the agent's own request into tool calls it can send as-is. Four
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
-ordered against a quoted number (it compares as text), and a result that
-already has (or mechanically reshapes to) the declared output shape.
+ordered against a quoted number (it compares as text), a result that already
+has (or mechanically reshapes to) the declared output shape, and an export
+whose date or timestamp pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -2575,6 +2576,80 @@ def advise_text_comparison(
         overrides["name"] = slugify(f"{arguments['name']}_numeric")  # the first result keeps its name
     return Advice("numbers_compared_as_text", explanation + "; the same request compared that way:",
                   rewrite=[call(tool, **_call_arguments(tool, arguments, **overrides))])
+
+
+_BARE_NAME = re.compile(r"[^\W\d]\w*")
+_EXPRESSION_KEYWORDS = {"and", "or", "not", "in", "is", "null", "true", "false"}
+
+
+def _expression_name(name: str) -> str:
+    """A field name as an expression may write it: bare when it is a plain identifier, otherwise double-quoted."""
+    if _BARE_NAME.fullmatch(name) and name.lower() not in _EXPRESSION_KEYWORDS:
+        return name
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _free_name(wanted: str, taken: set[str]) -> str:
+    name, n = wanted, 2
+    while name.casefold() in taken:
+        name, n = f"{wanted}_{n}", n + 1
+    return name
+
+
+def advise_unapplied_format(
+    unapplied: list[dict[str, Any]],
+    *,
+    casts: dict[str, str],
+    dataset: str,
+    columns: list[str],
+    arguments: dict[str, Any],
+) -> Advice:
+    """A date or timestamp pattern that formatted no value: it formats date and timestamp columns only.
+
+    ``unapplied`` is the export's own report (column, type, values, read_as_dates); ``casts`` names, for each
+    column whose values read as ISO dates or timestamps, the type to cast it to. The request is rewritten when
+    every such column casts without losing a value: a derive of each through try_cast, the dataset's columns in
+    their order, then the same export of that result. A column none of whose values reads as a date is left as
+    it is; one only some of whose values do blocks the rewrite, since the cast would turn the others into null.
+    """
+    facts: list[str] = []
+    for entry in unapplied:
+        values, read = entry["values"], entry["read_as_dates"]
+        if read == values:
+            read_text = ("its value reads as an ISO date" if values == 1 else "both its values read as ISO dates"
+                         if values == 2 else f"all {values} of its values read as ISO dates")
+        elif read:
+            read_text = f"{read} of its {values} values read as ISO dates"
+        else:
+            read_text = ("its value does not read as a date" if values == 1
+                         else f"none of its {values} values reads as a date")
+        facts.append(f"{entry['column']} is {entry['type']} and {read_text}")
+    explanation = ("date_format and timestamp_format format date and timestamp values only, so the pattern left "
+                   "these columns as stored: " + "; ".join(facts) + ".")
+    readable = [e for e in unapplied if e["column"] in casts]
+    if not readable:
+        return Advice("format_not_applied", explanation + " Pass the values through as they are, or build the text "
+                      "the answer needs in a transform before the export.")
+    derived = ", ".join(f"try_cast({_expression_name(e['column'])} as {casts[e['column']]})" for e in readable)
+    explanation += f" A derive of {derived} before the export gives a column the pattern formats"
+    if any(e["read_as_dates"] != e["values"] for e in readable):
+        return Advice("format_not_applied", explanation + "; a value that does not read as a date becomes null.")
+    taken = {c.casefold() for c in columns}
+    temporary: dict[str, str] = {}
+    for entry in readable:
+        temporary[entry["column"]] = _free_name(f"{entry['column']}_{casts[entry['column']]}", taken)
+        taken.add(temporary[entry["column"]].casefold())
+    steps: list[dict[str, Any]] = [
+        {"derive": {temporary[c]: f"try_cast({_expression_name(c)} as {casts[c]})" for c in temporary}},
+        {"select": [temporary.get(c, c) for c in columns]},
+        {"rename": {temporary[c]: c for c in temporary}},
+    ]
+    name = slugify(f"{dataset}_dated")
+    export = {k: v for k, v in arguments.items() if k in ("path", "format", "format_spec") and v is not None}
+    return Advice("format_not_applied", explanation + ". The same export with that derive first:", rewrite=[
+        call("materialize_result", source=dataset, name=name, transform=steps),
+        call("export_result", dataset=name, **export, overwrite=True),
+    ])
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

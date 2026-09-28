@@ -394,6 +394,18 @@ locale-dependent directives refused) and `null_text`. The dataset itself keeps
 its types; two differently formatted exports of the same version differ only in
 the file.
 
+A date or timestamp pattern formats date and timestamp values only. When one
+formatted nothing, the export still succeeds and says so instead of reporting
+the values as rendered: `format_not_applied` names each such column with its
+logical type, where the pattern came from (the column's own rule, or the file
+level when the file-level pattern met no date or timestamp anywhere in the
+file), how many values it holds and how many of them read as ISO dates or
+timestamps by the import rule of MADR 0006. `format_not_applied` advice
+explains this, and when the values read as dates it shows the derive through
+`try_cast` that gives the pattern a column to format; when every value would
+survive the cast, the request comes back rewritten as that derive followed by
+the same export.
+
 ### Output contracts
 
 The shape of the deliverable is a contract the agent can write down while the

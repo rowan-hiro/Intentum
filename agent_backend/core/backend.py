@@ -33,7 +33,8 @@ from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
-from .recovery import Advice, advise_contract, advise_empty_result, advise_error, advise_text_comparison, call as tool_call
+from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_text_comparison,
+                       advise_unapplied_format, call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
@@ -238,6 +239,17 @@ def _path_facts(path: Path) -> dict[str, Any]:
     except OSError:
         entries = []
     return {"resolved": str(resolved), "cwd": str(Path.cwd()), "nearest_directory": str(nearest), "entries": entries}
+
+
+def _unapplied_summary(entries: list[dict[str, Any]], shown: int = 5) -> str:
+    """The export summary's sentence for columns a date or timestamp pattern formatted no value of."""
+    names = [f"{e['column']} ({e['type']})" for e in entries[:shown]]
+    if len(entries) > shown:
+        names.append(f"{len(entries) - shown} more")
+    listing = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return (f" The format specification's date or timestamp pattern formatted no value of {listing}: a pattern "
+            f"formats date and timestamp columns only, and {'this column was' if len(entries) == 1 else 'these were'} "
+            "written as stored (see format_not_applied).")
 
 
 @dataclass
@@ -1567,10 +1579,13 @@ class Backend:
                 content_hash = self.workspace.content_hash(staged)
                 self._publish_export(staged, target, overwrite)
             log_event("execution.completed", operation_id=op.id, path=str(target), rows=rows)
+            not_applied, casts = self._format_not_applied(renderer, ds, version.physical_table)
             now = self.clock()
             with self.store.transaction():
                 exported_details = {"path": str(target), "format": fmt, "rows": rows, "content_hash": content_hash,
                                     "version": ds.version, "format_spec": spec_payload}
+                if not_applied:
+                    exported_details["format_not_applied"] = not_applied
                 if contract is not None and evidence is not None:
                     contract.status = ContractStatus.SATISFIED
                     contract.satisfied_by = op.id
@@ -1595,17 +1610,54 @@ class Backend:
                     "columns": projection or [c.name for c in ds.columns],
                     "content_hash": content_hash,
                     "summary": f"Exported {ds.name} (version {ds.version}, {rows} rows) to {target}."
-                               + (" Values were rendered with the given format specification." if spec is not None else ""),
+                               + (_unapplied_summary(not_applied) if not_applied
+                                  else " Values were rendered with the given format specification." if spec is not None
+                                  else ""),
                     "plan": plan.to_text(),
                 }
                 if spec_payload is not None:
                     response["format_spec"] = spec_payload
+                if not_applied:
+                    response["format_not_applied"] = not_applied
+                    try:
+                        advice = advise_unapplied_format(not_applied, casts=casts, dataset=ds.name,
+                                                         columns=[c.name for c in ds.columns],
+                                                         arguments={"path": path, "format_spec": format_spec})
+                        response["advice"] = [advice.to_dict()]
+                    except Exception as err:  # advice never breaks a response
+                        log_event("advice.skipped", error=repr(err))
                 if contract is not None and evidence is not None:
                     response["contract"] = {**contract_summary(contract), "verified": evidence}
                     response["summary"] += f" Output contract {contract.id} (revision {contract.revision}) is satisfied."
                 self._complete(op, response, None, None, now)
             log_event("state.committed", operation_id=op.id, dataset_id=ds.id, exported=str(target))
             return self._with_notes(response, notes)
+
+    def _format_not_applied(self, renderer: ValueRenderer | None, ds: Dataset,
+                            table: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """The columns a date or timestamp pattern formatted no value of, and what their values read as.
+
+        Each entry names the column, its logical type, where the pattern came from, how many values it holds and
+        how many of them read as ISO dates or timestamps (the test import refines text columns with, MADR 0006).
+        The second result maps each column with such values to the type try_cast would give it.
+        """
+        if renderer is None:
+            return [], {}
+        found = renderer.unapplied()
+        if not found:
+            return [], {}
+        types = {c.name: c.logical_type.value for c in ds.columns}
+        counts = self.engine.count_iso_temporal(table, [name for name, _ in found])
+        entries: list[dict[str, Any]] = []
+        casts: dict[str, str] = {}
+        for name, source in found:
+            _, dates, timestamps = counts.get(name, (0, 0, 0))
+            values = renderer.values[renderer.columns.index(name)]
+            entries.append({"column": name, "type": types.get(name, "unknown"), "pattern_from": source,
+                            "values": values, "read_as_dates": dates + timestamps})
+            if dates + timestamps:
+                casts[name] = "timestamp" if timestamps else "date"
+        return entries, casts
 
     @semantic_operation("declare_output")
     def declare_output(

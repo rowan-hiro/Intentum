@@ -215,6 +215,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "decimals), `date_format` / `timestamp_format` (strftime patterns such as %Y-%m-%d) "
                              "and `null_text`. Example: {\"decimals\": 4, \"strip_trailing_zeros\": true, "
                              "\"integer_min_decimals\": 1, \"columns\": {\"end_date\": {\"date_format\": \"%Y-%m-%d\"}}}. "
+                             "A date or timestamp pattern formats date and timestamp columns only; one that "
+                             "formatted nothing is reported under `format_not_applied`, with advice. "
                              "The specification is recorded with the operation, so the file is reproducible.")
     def export_result(dataset: str, path: str, format: str = "csv", format_spec: dict[str, Any] | None = None,
                       overwrite: bool = False) -> dict[str, Any]:
