@@ -1575,7 +1575,7 @@ class Backend:
                         if contract is not None else None)
             # What the contract carries, in its order and under its spelling, sorted the way it declares:
             # the organizing columns are needed in the dataset and left out of the file (MADR 0012), and a
-            # declared name stands for the column it matches (MADR 0013). Without a contract the dataset is
+            # declared name stands for the column it matches (MADR 0018). Without a contract the dataset is
             # written as it is.
             projection: list[str] | None = None
             header: list[str] | None = None
@@ -1935,7 +1935,7 @@ class Backend:
             evidence["distinct_keys"] = distinct
         header = respelled(contract, [n for n, _ in actual])
         if header:
-            evidence["written_as"] = header  # dataset column -> the declared spelling the file carries (MADR 0013)
+            evidence["written_as"] = header  # dataset column -> the declared spelling the file carries (MADR 0018)
         return evidence
 
     @staticmethod

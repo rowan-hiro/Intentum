@@ -1,4 +1,4 @@
-# 13. The output contract's spelling of a column is the header the export writes; datasets keep canonical names
+# 18. The output contract's spelling of a column is the header the export writes; datasets keep canonical names
 
 Date: 2026-09-28
 
@@ -41,3 +41,15 @@ The contract's column names are the file's header. At export, each declared name
 Status: proposed -> accepted
 
 Implemented: match_columns lets a declared name stand for the column of that exact name or the one column with the same normalized name, for carried and organizing columns; export_result projects the matched columns, orders and counts by the matched keys, and writes the declared spelling as the header in csv, formatted csv and parquet, recording written_as in the contract evidence; the renamed contract problem and its rename repair are gone
+
+### 2026-09-28T23:53:01.585Z, outcome 2026-09-28-2352-qrwj
+
+Status: accepted -> accepted
+
+Renumbered from 0013 to 0018 on 2026-09-29. A repository derived from this one, which rebases onto it, already uses 0013-0017 for its own records, so after the rebase that brought this record in, two records carried 0013. 0018 is the first number neither repository uses, and it makes this repository's next record 0019. Nothing else in the record changed. Outcomes 2026-09-28-1056-6j0s and 2026-09-28-1542-dztr, sealed before the change, link this record as 0013.
+
+### 2026-09-29T01:05:17.928Z, outcome 2026-09-29-0104-j9y0
+
+Status: accepted -> accepted
+
+On 2026-09-29, as a one-time exception the user approved, outcomes 2026-09-28-1056-6j0s and 2026-09-28-1542-dztr were edited by hand so that their begin event's decisions list 0018 in place of 0013, which no record carried after the renumbering. Their contract hashes were recomputed with inkan's computeContractHash, which reproduced both stored hashes before the edit: ef6130022ad4d8fe to f784919507320cf4 for 6j0s, b7bda05659ad6f95 to 470d9de1376c55b1 for dztr. Nothing else in the two logs changed; their prose still names MADR 0013 as written when they were sealed. The previous entry's statement that they link this record as 0013 no longer holds.

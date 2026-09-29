@@ -456,7 +456,7 @@ consequence and leaves the choice alone. `export_result`
 then checks the dataset against the current contract — names, order, declared
 types by family, row cardinality, the organizing columns — before anything is
 read or written, and writes the carried columns in the declared order, sorted
-the declared way. The declared spelling is the file's header (MADR 0013): a
+the declared way. The declared spelling is the file's header (MADR 0018): a
 declared name stands for the dataset column of that exact name or, failing
 that, the one column whose normalized name is the same, so `FirstProduct`
 stands for the `firstproduct` the transform language writes for that alias and
