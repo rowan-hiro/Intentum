@@ -1,0 +1,4 @@
+[mcp_servers.agent-backend]
+command = ".venv/bin/agent-backend-mcp"
+args = ["--workspace", "workspace"]
+cwd = "."
