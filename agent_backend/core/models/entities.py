@@ -197,7 +197,8 @@ class EvidenceRef(_Entity):
     positions of the imported rows and ``columns`` their names; None means every row or every column.
     ``locator`` holds what points into the artifact (page, span, quote, time_s). ``checked`` names what the
     backend verified against its own facts and ``unchecked`` what it recorded as given; neither says the
-    evidence was read correctly. ``values`` is a snapshot of the referenced cells, one entry per row.
+    evidence was read correctly. ``values`` is a snapshot of the referenced cells, one entry per row:
+    ``{"row": position, "cells": {column: value}}``.
     """
 
     id: str

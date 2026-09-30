@@ -1518,7 +1518,8 @@ class Backend:
             if "rows" not in e.checked:
                 e.checked.append("rows")
             shown = names or physical
-            snapshots.append([{"row": int(position), **dict(zip(shown, _jsonable(list(values))))}
+            # The cells sit under their own key, so no imported column (one named row, say) can hide the position.
+            snapshots.append([{"row": int(position), "cells": dict(zip(shown, _jsonable(list(values))))}
                               for position, *values in self.engine.rows_at(table, e.spec.rows, shown)])
         return snapshots
 

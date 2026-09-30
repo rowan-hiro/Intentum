@@ -582,7 +582,9 @@ The backend checks what it holds facts for and records the rest as given:
 Each stored reference lists what was `checked` and what is `unchecked`;
 neither says the agent read the evidence correctly. It keeps the artifact's
 hash at the time and a snapshot of the cells it names (`values`, one entry per
-referenced row). References are written in the import's metadata transaction
+referenced row, `{"row": 2, "cells": {"unit": "cafe", "sold": 3015}}`, so no
+imported column name can hide the position). References are written in the
+import's metadata transaction
 (MADR 0001), belong to the version the import created, and are part of the
 import's canonical IR and replay fingerprint when given; an import without
 evidence replays as before. Storage is one row per reference, linear in the

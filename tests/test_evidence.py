@@ -72,9 +72,10 @@ def test_quotes_and_spans_in_a_text_document_are_checked(backend, files):
     located = NOTE.index("the bakery sold")
     assert first["locator"] == {"quote": "the bakery sold 1,240 loaves", "span": [located, located + 28]}
     assert set(first["checked"]) == {"artifact", "quote", "span", "columns", "rows"} and first["unchecked"] == []
-    assert first["values"] == [{"row": 0, "sold": 1240}]
+    assert first["values"] == [{"row": 0, "cells": {"sold": 1240}}]
     assert second["locator"]["span"] == [start, start + 34] and {"span", "quote"} <= set(second["checked"])
-    assert second["columns"] is None and second["values"] == [{"row": 1, "unit": "cafe", "year": 2024, "sold": 3015}]
+    assert second["columns"] is None
+    assert second["values"] == [{"row": 1, "cells": {"unit": "cafe", "year": 2024, "sold": 3015}}]
     assert second["note"] == "read from the second paragraph"
     provenance = backend.get_provenance("coop_sales")
     assert [e["id"] for e in provenance["evidence"]] == [first["id"], second["id"]]
@@ -135,7 +136,7 @@ def test_pages_and_times_are_recorded_as_given(backend, files):
     assert pdf["artifact"]["kind"] == "pdf" and pdf["unchecked"] == ["page", "quote"]
     assert pdf["locator"] == {"page": 3, "quote": "Loaves sold: 1,240"}
     assert clip["artifact"]["kind"] == "video" and clip["locator"] == {"time_s": [12.5, 14.0]}
-    assert clip["unchecked"] == ["time_s"] and clip["values"] == [{"row": 1, "sold": 3015}]
+    assert clip["unchecked"] == ["time_s"] and clip["values"] == [{"row": 1, "cells": {"sold": 3015}}]
     assert moment["locator"] == {"time_s": 3.0}
 
 
@@ -178,8 +179,8 @@ def test_a_file_import_checks_row_positions_after_the_load(backend, files, tmp_p
         {"artifact": str(files["note"]), "rows": [0, 1], "quote": "closed for two weeks in August"}])
     assert response["status"] == "success", response
     [ref] = response["evidence"]
-    assert ref["values"] == [{"row": 0, "day": "2024-08-01", "unit": "bakery", "sold": 0},
-                             {"row": 1, "day": "2024-08-02", "unit": "bakery", "sold": 0}]
+    assert ref["values"] == [{"row": 0, "cells": {"day": "2024-08-01", "unit": "bakery", "sold": 0}},
+                             {"row": 1, "cells": {"day": "2024-08-02", "unit": "bakery", "sold": 0}}]
     tables_before = set(backend.engine.list_tables())
     outside = backend.import_dataset(str(readings), name="again", evidence=[
         {"artifact": str(files["note"]), "rows": [3]}])
@@ -289,11 +290,19 @@ def test_the_mcp_tool_takes_evidence(backend, files):
 def test_a_column_named_rowid_does_not_move_row_positions(backend, files, tmp_path):
     response = imported(backend, [{"artifact": str(files["note"]), "rows": [0], "columns": ["amount"]}],
                         rows=[{"rowid": 1, "amount": 10}, {"rowid": 0, "amount": 20}], name="shadowed")
-    assert response["evidence"][0]["values"] == [{"row": 0, "amount": 10}]
+    assert response["evidence"][0]["values"] == [{"row": 0, "cells": {"amount": 10}}]
     ledger = write_csv(tmp_path / "ledger.csv", "rowid,amount", ["2,30", "1,40", "0,50"])
     response = backend.import_dataset(str(ledger), evidence=[{"artifact": str(files["note"]), "rows": [0, 2]}])
-    assert response["evidence"][0]["values"] == [{"row": 0, "rowid": 2, "amount": 30},
-                                                 {"row": 2, "rowid": 0, "amount": 50}]
+    assert response["evidence"][0]["values"] == [{"row": 0, "cells": {"rowid": 2, "amount": 30}},
+                                                 {"row": 2, "cells": {"rowid": 0, "amount": 50}}]
+
+
+def test_a_column_named_row_does_not_hide_the_position(backend, files):
+    response = imported(backend, [{"artifact": str(files["note"]), "rows": [2]}],
+                        rows=[{"row": "A", "v": 1}, {"row": "B", "v": 2}, {"row": "C", "v": 3}], name="lettered")
+    stored = [{"row": 2, "cells": {"row": "C", "v": 3}}]
+    assert response["evidence"][0]["values"] == stored
+    assert backend.get_provenance("lettered")["evidence"][0]["values"] == stored
 
 
 def test_a_path_names_its_own_file_before_any_artifact_name(backend, tmp_path):
