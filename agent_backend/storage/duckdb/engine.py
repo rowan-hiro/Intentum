@@ -100,6 +100,7 @@ class AnalyticsEngine(Protocol):
     def check_values(self, sql: str, column: str, *, not_null: bool = False, low: Any = None, high: Any = None,
                      cast: str | None = None, nan: bool = False, context: list[str] | None = None,
                      sample: int = 0) -> tuple[int, int, Any, Any, list[tuple[Any, ...]]]: ...
+    def rows_at(self, table: str, positions: list[int], columns: list[str]) -> list[tuple[Any, ...]]: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def profile_columns(self, table: str, columns: list[str], *, ranged: list[str]) -> dict[str, dict[str, Any]]: ...
     def read_table(self, table: str, *, columns: list[str] | None = None,
@@ -419,6 +420,20 @@ class DuckDBEngine:
         except duckdb.Error as exc:
             raise ExecutionFailedError(f"Execution failed: {exc}", details={"sql": sql}) from exc
         return nulls, out, row[2], row[3], rows
+
+    def rows_at(self, table: str, positions: list[int], columns: list[str]) -> list[tuple[Any, ...]]:
+        """The rows at 0-based ``positions`` of a table as it was loaded, as (position, *columns), in position order.
+
+        A table created from a source keeps the order the source was read in as its rowid (DuckDB preserves
+        insertion order), so a position names the same row the source had there.
+        """
+        if not positions:
+            return []
+        projection = ", ".join(quote_ident(c) for c in columns)
+        listed = ", ".join(str(int(p)) for p in sorted(set(positions)))
+        _, rows = self.query(f"SELECT rowid, {projection} FROM {quote_ident(table)} WHERE rowid IN ({listed}) "
+                             "ORDER BY rowid")
+        return rows
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)

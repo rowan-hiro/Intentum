@@ -169,7 +169,7 @@ Key properties, all enforced in software rather than in prompts:
 |---|---|
 | Identifiers, physical table names, storage paths, timestamps | allocated by the backend (`ds_N`, `col_N`, `art_N`, `op_N`, `ds_N_v1`), never accepted from the agent |
 | Name normalization / uniqueness | Unicode-aware `slugify` (`公募基金经理(新)` → `公募基金经理_新`, `Regional Sales` → `regional_sales`) + partial unique index on active dataset names; original names stay reachable as aliases |
-| Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too |
+| Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too; an import can carry evidence references from its rows and cells to a page, span, quote or time in an artifact (MADR 0021) |
 | Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match; declared units are followed through transforms and a conflict is reported (MADR 0019) |
 | Schema and type correctness | shared type rules in `core/ir/typing.py`, applied twice (resolver inference, validator re-check) |
 | Semantic types at import | text columns whose non-null values are all ISO dates/timestamps become `date`/`timestamp` (a source driver reports what it can store, not what the data means); an explicit `type` hint wins, and the refinement is a resolution note and part of the recorded IR |
@@ -526,6 +526,66 @@ This is the trust model of MADR 0008 made concrete: the declaration made
 fresh is the reference, the export attempted twenty turns later is the thing
 that gets checked, and the check runs outside the agent's context.
 
+### Evidence references
+
+Values an agent read from a document, an image or a video enter as rows
+(`import_dataset(rows=...)`), and the reading itself stays outside the
+backend (MADR 0009). `evidence` links those rows and cells to where they were
+read, so provenance can answer where a number came from and not only which
+operation produced it (MADR 0021):
+
+```json
+{"rows": [{"unit": "bakery", "year": 2024, "sold": 1240}, {"unit": "cafe", "year": 2024, "sold": 3015}],
+ "name": "coop_sales",
+ "evidence": [{"artifact": "annual_note.md", "rows": [0], "columns": ["sold"], "quote": "the bakery sold 1,240 loaves"},
+              {"artifact": "board_report.pdf", "rows": [1], "page": 3},
+              {"artifact": "open_day.mp4", "rows": [1], "columns": ["sold"], "time_s": [12.5, 14.0]}]}
+```
+
+A reference names an artifact by id or name, or a file by its path, which is
+then registered with its content hash. `rows` are 0-based positions of the
+imported rows in the order the source is read (rows as written, file order,
+a SQLite table's own order) and `columns` their names; leaving either out means
+all of them. The place is `page` (1 or more), `span` (`[start, end)` character
+offsets in the artifact's text), `quote`, `time_s` (seconds or `[start, end]`)
+and a free `note`; `content_hash`, when given, must be the registered hash.
+File imports take `evidence` too.
+
+The backend checks what it holds facts for and records the rest as given:
+
+- the artifact, its hash, the row positions and the column names are always
+  checked; a mismatch is refused with advice and no dataset is created (a file
+  import's row positions are checked right after its load, and the loaded
+  table is dropped);
+- in a markdown or text document whose file still has its registered hash, a
+  span must lie within the text, a quote given with a span must equal the text
+  there (whitespace collapsed, case kept), and a quote given alone must occur
+  in the text; it is located, and its span recorded, when it occurs exactly
+  once, and otherwise its number of occurrences is recorded;
+- a page, a time, and a span or quote in a PDF, an image or a video are
+  recorded as given; a page of audio, video or an image, and a time in
+  anything but audio, video or an unknown kind, are refused.
+
+Each stored reference lists what was `checked` and what is `unchecked`;
+neither says the agent read the evidence correctly. It keeps the artifact's
+hash at the time and a snapshot of the cells it names (`values`, one entry per
+referenced row). References are written in the import's metadata transaction
+(MADR 0001), belong to the version the import created, and are part of the
+import's canonical IR and replay fingerprint when given; an import without
+evidence replays as before. Storage is one row per reference, linear in the
+cells it names.
+
+`get_provenance` returns an `evidence` list. For an imported dataset these are
+its references (`association: "recorded"`). For a materialized dataset they are
+the references of every upstream dataset: `association: "columns"` with
+`carried_as` (referenced column to this dataset's columns) when a column
+carries a referenced column unchanged, which holds through `select`, `filter`,
+`sort`, `limit`, `rename`, `join`, `semi_join` and `group_by` keys and across
+several materializations; `association: "lineage"` otherwise. A derived
+column, a measure and a `raw_query` output carry no reference, and row
+positions are not carried past the import: a filtered or joined dataset does
+not say which of its rows a reference covers.
+
 ### Failure semantics
 
 Every failure is a structured response, never an exception string:
@@ -768,6 +828,7 @@ agent_backend/
 │   ├── execution/          IR → SQL compiler, executor
 │   ├── export/             export format specification (value rendering at the file boundary)
 │   ├── contracts/          output contracts: declared deliverable shape, checked at export
+│   ├── evidence/           evidence references: reading them, and checking spans and quotes in a text
 │   ├── recovery/           teach on refusal: structured advice and rewrites on refusals and silent failures
 │   ├── lineage/            lineage recording and traversal
 │   └── audit/              audit trail
@@ -1040,6 +1101,14 @@ the canonical IR, the full execution plan and the generated SQL.
   passing a range, NaN outside it, temporal and organizing columns, a range
   that cannot hold its column, an empty dataset, contracts without checks,
   transform advice that counts the checks, and storage migration.
+- `test_evidence.py`: evidence references on a made-up co-op annual note, a
+  PDF and a video the backend never reads — quotes located and spans checked,
+  a quote that occurs twice, every refused reference with its advice, hashes,
+  pages and times recorded as given, an unknown artifact, a file changed since
+  it was registered, a file import's row positions checked after the load, a
+  failed commit leaving no reference, the replay fingerprint, a reopened
+  workspace, and references carried through filter, sort, limit, rename,
+  group_by keys and joins but not through derives, measures or `raw_query`.
 - `test_export.py`: export to csv/parquet, overwrite and export-root refusals,
   and the format specification: half-up rounding on the shortest decimal form,
   trailing zeros, whole numbers keeping a decimal, date patterns, null text,
@@ -1093,6 +1162,7 @@ These capabilities are available in the current code:
 | [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, not-null and range [value checks](#value-checks) with evidence, and reproducible value formatting. |
 | [Recovery advice](#failure-semantics) | Structured advice on refusals, mechanical tool-call rewrites, and advice for empty results or results matching the declared contract. |
 | [Declared units](#declared-units) | Units follow their columns through transforms and into materialized datasets; an addition, subtraction or comparison of different declared units is reported, never refused or converted. |
+| [Evidence references](#evidence-references) | Imports carry references from rows and cells to a page, span, quote or time in a registered artifact; the backend checks what it holds facts for, and `get_provenance` returns them with the columns that carry them. |
 | [Join diagnostics](#join-diagnostics) | Every semantic join reports matched, unmatched and multiplied left rows and keys with bounded samples; advice when a join dropped or multiplied rows; server-level opt-out. |
 | Dataset profiles | `describe_dataset` returns non-null/distinct counts and finite numeric/temporal ranges, with explicit opt-out and scan limits. |
 | Operation lifecycle | Materialization, publish, soft delete/restore, metadata updates, provenance, audit, failure compensation and idempotent replay. Calls sharing one `Backend` instance are serialized. |
@@ -1156,11 +1226,14 @@ are enough to name more of the errors that enter silently.
    conflict into a refusal, and column-level lineage, belong to the same
    layer.
 4. **Provenance to the value.** `get_provenance` returns the operation and
-   the inputs that produced a dataset. Column-level lineage, reads of an
-   earlier version (`describe_dataset(version=…)`) and a downstream impact
-   report before a delete or replace lead to the question a reviewer asks,
-   how this number came about, answered as the intent, the step and the
-   source rows it came from.
+   the inputs that produced a dataset, and the evidence references that reach
+   it: where imported rows and cells were read, and which columns carry them
+   unchanged (MADR 0021). Row-level identity through transforms (which rows of
+   a filtered or joined result a reference covers), reads of an earlier
+   version (`describe_dataset(version=…)`) and a downstream impact report
+   before a delete or replace lead to the question a reviewer asks, how this
+   number came about, answered as the intent, the step and the source rows it
+   came from.
 5. **Resume by reference.** The agent's context is not a store (MADR 0008),
    so a fresh agent, or the same one after its context was reset, should be
    able to ask the workspace what is declared, what is done and what is still

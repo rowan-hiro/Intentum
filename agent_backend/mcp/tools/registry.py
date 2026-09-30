@@ -66,7 +66,14 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "result. Instead of `path`, `rows` (a list of objects, one per row, values text, numbers, "
                              "booleans or null) with a `name` enters values you read or computed outside the backend, "
                              "from a document, an image, a video or your own reasoning, as a dataset with the same "
-                             "provenance as a file; a literal answer is entered this way, not written into a query.")
+                             "provenance as a file; a literal answer is entered this way, not written into a query. "
+                             "Optional `evidence` links the imported rows and cells to where they were read: a list "
+                             "of {\"artifact\": id, name or file path, \"rows\": [0-based positions], "
+                             "\"columns\": [...], \"page\": n, \"span\": [start, end], \"quote\": text, "
+                             "\"time_s\": seconds or [start, end], \"note\": text, \"content_hash\": sha256}. "
+                             "The backend checks what it holds (the artifact and its hash, rows, columns, and a span "
+                             "or quote against a markdown or text document) and records the rest as given, saying "
+                             "which is which; get_provenance returns the references.")
     def import_dataset(
         path: str | None = None,
         rows: list[dict[str, Any]] | None = None,
@@ -75,10 +82,12 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         table: str | None = None,
         schema_hints: dict[str, Any] | None = None,
         aliases: list[str] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return backend.import_dataset(path, rows=rows, name=name, description=description, table=table,
-                                      schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key)
+                                      schema_hints=schema_hints, aliases=aliases, evidence=evidence,
+                                      idempotency_key=idempotency_key)
 
     @server.tool(name="import_workspace", annotations=annotations("write"),
                  description="Import a whole directory (a task workspace) in one operation: every csv/json/parquet file "
@@ -272,7 +281,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
 
     @server.tool(name="get_provenance", annotations=annotations("read"),
                  description="Explain where a dataset came from: the operation that produced it, the canonical "
-                             "intent that was executed, input datasets, source artifact, upstream lineage and audit trail.")
+                             "intent that was executed, input datasets, source artifact, upstream lineage, audit "
+                             "trail, and the evidence references that reach it: those recorded at its import, and "
+                             "those of upstream datasets, marked with the columns it carries unchanged from a "
+                             "referenced column (carried_as) or as reaching it through lineage only.")
     def get_provenance(dataset: str) -> dict[str, Any]:
         return backend.get_provenance(dataset)
 

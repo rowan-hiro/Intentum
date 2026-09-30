@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from ..contracts import (CHECKS_HINT, bind_checks, check_problem, match_columns, repair_transform, respelled,
                          verify_columns, verify_rows)
 from ..errors import BackendError, ErrorCode
+from ..evidence import EVIDENCE_HINT
 from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LimitStep,
                   LiteralExpr, RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
 from ..ir.raw_query import QueryShape
@@ -1521,6 +1522,26 @@ def _declaration_order(err: BackendError, tool: str, arguments: dict[str, Any]) 
     )
 
 
+def _evidence_reference(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """An import's evidence reference the backend could not accept, with the grammar and what it holds."""
+    if not (err.field or "").startswith("evidence"):
+        return None
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code == ErrorCode.CONFLICT and "registered" in details:
+        return Advice("evidence_reference",
+                      f"The artifact is registered with content hash {details['registered']}, and the reference gave "
+                      f"{details.get('given')}: the file was read in another version, or the reference names another "
+                      "file. Name the file by its path to register it as it is now, or leave content_hash out to "
+                      "reference the registered content.")
+    if err.code == ErrorCode.NOT_FOUND:
+        known = details.get("artifacts") or []
+        listed = f" The registered artifacts are {', '.join(known[:12])}." if known else ""
+        return Advice("evidence_reference", "A reference names a registered artifact by its id or name, or a file "
+                      "by its path, which is registered with its content hash." + listed)
+    return Advice("evidence_reference", EVIDENCE_HINT + " The backend checks what it holds facts for and records the "
+                  "rest as given; it never reads a PDF or a frame.")
+
+
 def _declaration_checks(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
     """A declaration whose value checks are not a shape the contract can hold."""
     if err.code != ErrorCode.INVALID_INTENT or err.field != "checks":
@@ -2356,6 +2377,7 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_declaration_rows, ("declare_output",), False),
     (_declaration_order, ("declare_output",), False),
     (_declaration_checks, ("declare_output",), False),
+    (_evidence_reference, ("import_dataset",), False),
     # detectors that read the facts the raise site attached
     (_transform_as_text, _TRANSFORM_TOOLS, False),
     (_function_as_infix, _TRANSFORM_TOOLS, False),

@@ -19,6 +19,7 @@ from ...core.models.entities import (
     ContractOrder,
     ContractStatus,
     Dataset,
+    EvidenceRef,
     DatasetStatus,
     DatasetVersion,
     LineageEdge,
@@ -145,6 +146,23 @@ CREATE TABLE IF NOT EXISTS output_contracts (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evidence_refs (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    dataset_version INTEGER NOT NULL,
+    operation_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    rows_json TEXT,
+    columns_json TEXT,
+    locator_json TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT '',
+    checked_json TEXT NOT NULL DEFAULT '[]',
+    unchecked_json TEXT NOT NULL DEFAULT '[]',
+    values_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_evidence_dataset ON evidence_refs(dataset_id);
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
     operation_id TEXT NOT NULL,
@@ -669,6 +687,37 @@ class SqliteMetadataStore:
             "SELECT * FROM output_contracts ORDER BY created_at DESC, CAST(substr(id, 4) AS INTEGER) DESC LIMIT ?", (limit,)
         ).fetchall()
         return [self._row_to_contract(r) for r in rows]
+
+    # -- evidence references ---------------------------------------------
+    def insert_evidence(self, refs: list[EvidenceRef]) -> None:
+        def dump(value: Any) -> str | None:
+            return None if value is None else json.dumps(value, ensure_ascii=False)
+
+        self.conn.executemany(
+            "INSERT INTO evidence_refs(id, dataset_id, dataset_version, operation_id, artifact_id, artifact_hash, "
+            "rows_json, columns_json, locator_json, note, checked_json, unchecked_json, values_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(r.id, r.dataset_id, r.dataset_version, r.operation_id, r.artifact_id, r.artifact_hash, dump(r.rows),
+              dump(r.columns), dump(r.locator), r.note, dump(r.checked), dump(r.unchecked), dump(r.values),
+              _iso(r.created_at)) for r in refs],
+        )
+
+    def list_evidence(self, dataset_id: str) -> list[EvidenceRef]:
+        rows = self.conn.execute(
+            "SELECT * FROM evidence_refs WHERE dataset_id = ? ORDER BY CAST(substr(id, 4) AS INTEGER)", (dataset_id,)
+        ).fetchall()
+        return [
+            EvidenceRef(
+                id=r["id"], dataset_id=r["dataset_id"], dataset_version=int(r["dataset_version"]),
+                operation_id=r["operation_id"], artifact_id=r["artifact_id"], artifact_hash=r["artifact_hash"],
+                rows=json.loads(r["rows_json"]) if r["rows_json"] is not None else None,
+                columns=json.loads(r["columns_json"]) if r["columns_json"] is not None else None,
+                locator=json.loads(r["locator_json"]), note=r["note"], checked=json.loads(r["checked_json"]),
+                unchecked=json.loads(r["unchecked_json"]), values=json.loads(r["values_json"]),
+                created_at=_dt(r["created_at"]),
+            )
+            for r in rows
+        ]
 
     # -- idempotency -----------------------------------------------------
     def get_idempotent_response(self, key: str) -> dict[str, Any] | None:

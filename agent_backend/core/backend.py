@@ -56,6 +56,7 @@ from .contracts import (
     verify_columns,
     verify_rows,
 )
+from .evidence import EvidenceSpec, check_kind, check_text, parse_evidence
 from .errors import (
     AmbiguousReferenceError,
     BackendError,
@@ -87,6 +88,7 @@ from .models.entities import (
     Dataset,
     DatasetStatus,
     DatasetVersion,
+    EvidenceRef,
     LogicalType,
     Operation,
     OperationKind,
@@ -275,6 +277,7 @@ class _ImportSpec:
     hints: dict[str, dict[str, Any]] = dc_field(default_factory=dict)
     aliases: list[str] = dc_field(default_factory=list)
     parent_operation_id: str | None = None
+    evidence: list["_Evidence"] = dc_field(default_factory=list)
 
     @property
     def locator(self) -> str | None:
@@ -282,6 +285,21 @@ class _ImportSpec:
 
     def describe(self) -> str:
         return f"{self.artifact.name}::{self.locator}" if self.locator else self.artifact.name
+
+
+@dataclass
+class _Evidence:
+    """An evidence reference whose artifact is resolved and whose place is checked as far as the backend can."""
+
+    spec: EvidenceSpec
+    artifact: Artifact
+    locator: dict[str, Any]
+    checked: list[str]
+    unchecked: list[str]
+
+    def canonical(self) -> dict[str, Any]:
+        return {"artifact_id": self.artifact.id, "content_hash": self.artifact.content_hash, "rows": self.spec.rows,
+                "columns": self.spec.columns, "locator": self.locator, "note": self.spec.note}
 
 
 class Backend:
@@ -480,6 +498,9 @@ class Backend:
         }
         if op and op.canonical_ir:
             body["canonical_intent"] = op.canonical_ir
+        evidence = self._evidence_for(ds)
+        if evidence:
+            body["evidence"] = evidence
         return self._with_notes(body, notes)
 
     @semantic_operation("get_output_contract")
@@ -528,13 +549,14 @@ class Backend:
         table: str | None = None,
         schema_hints: dict[str, Any] | None = None,
         aliases: list[str] | None = None,
+        evidence: Any = None,
         idempotency_key: str | None = None,
         principal: str | None = None,
     ) -> dict[str, Any]:
         if rows is not None or path is None:
             return self._import_rows(path, rows, name=name, description=description, format=format, table=table,
-                                     schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key,
-                                     principal=principal)
+                                     schema_hints=schema_hints, aliases=aliases, evidence=evidence,
+                                     idempotency_key=idempotency_key, principal=principal)
         source = Path(str(path)).expanduser()
         if not source.is_file():
             raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True,
@@ -580,14 +602,16 @@ class Backend:
             description=description or "",
             hints=hints,
             aliases=[str(a) for a in (aliases or [])],
+            evidence=self._resolve_evidence(evidence, row_count=None),
         )
         intent = _jsonable({"path": path, "name": name, "description": description, "format": format, "table": table,
-                            "schema_hints": schema_hints, "aliases": aliases})
+                            "schema_hints": schema_hints, "aliases": aliases, "evidence": evidence})
         return self._import_source(spec, intent, idempotency_key, principal)
 
     def _import_rows(self, path: str | None, rows: Any, *, name: str | None, description: str | None,
                      format: str | None, table: str | None, schema_hints: dict[str, Any] | None,
-                     aliases: list[str] | None, idempotency_key: str | None, principal: str | None) -> dict[str, Any]:
+                     aliases: list[str] | None, evidence: Any, idempotency_key: str | None,
+                     principal: str | None) -> dict[str, Any]:
         """Rows the agent read or computed outside the backend, entered as a dataset (MADR 0008, 0009).
 
         They are the agent's fresh output, accepted as given; kept as a content-addressed JSON source, they are
@@ -606,6 +630,7 @@ class Backend:
             raise InvalidIntentError("format and table describe a file; rows written inline take neither.",
                                      field="format" if format not in (None, "json") else "table")
         records = _inline_records(rows)
+        resolved = self._resolve_evidence(evidence, row_count=len(records))
         artifact = self._register_artifact(self.workspace.write_rows(records), ArtifactKind.JSON,
                                            name="rows written inline", metadata={"origin": "inline_rows"})
         spec = _ImportSpec(
@@ -615,10 +640,11 @@ class Backend:
             description=description or "",
             hints=self._normalize_hints(schema_hints),
             aliases=[str(a) for a in (aliases or [])],
+            evidence=resolved,
         )
         intent = _jsonable({"rows": {"count": len(records), "columns": list(records[0]), "artifact_id": artifact.id},
                             "name": name, "description": description, "schema_hints": schema_hints,
-                            "aliases": aliases})
+                            "aliases": aliases, "evidence": evidence})
         return self._import_source(spec, intent, idempotency_key, principal)
 
     @semantic_operation("import_workspace")
@@ -764,6 +790,7 @@ class Backend:
         ir = ImportIR(
             source_path=spec.artifact.path, format=spec.source.format, locator=spec.locator, name=spec.name,
             description=spec.description, content_hash=spec.artifact.content_hash, column_hints=spec.hints,
+            evidence=[e.canonical() for e in spec.evidence],
         )
         key = idempotency_key or f"import:{ir.logical_fingerprint()}"
         replay = self._replay(key, ir.logical_fingerprint())
@@ -787,6 +814,7 @@ class Backend:
             if not physical_columns:
                 raise InvalidSchemaError(f"{spec.describe()} has no columns.", field="path")
             self._check_column_names([c for c, _ in physical_columns])
+            evidence_columns = self._evidence_columns(spec.evidence, [c for c, _ in physical_columns])
             dataset_id = self.store.allocate_id("ds")
             table = f"{dataset_id}_v1"
             plan = ExecutionPlan(
@@ -816,6 +844,8 @@ class Backend:
                     op.execution_plan = plan.to_dict()
                     log_event("ir.canonical", operation_id=op.id, refined_types=refined)
                 log_event("execution.completed", operation_id=op.id, table=table, rows=row_count)
+                snapshots = self._evidence_values(spec.evidence, evidence_columns, table, row_count,
+                                                  [c for c, _ in physical_columns])
                 now = self.clock()
                 with self.store.transaction():
                     columns = self._build_columns(dataset_id, physical_columns, spec.hints)
@@ -849,6 +879,19 @@ class Backend:
                                                "artifact_id": spec.artifact.id, "locator": spec.locator})
                     self.audit.record(event_type="version.created", entity_type="dataset", entity_id=dataset_id,
                                       operation_id=op.id, now=now, actor=principal, details={"version": 1, "table": table})
+                    refs = [
+                        EvidenceRef(id=self.store.allocate_id("ev"), dataset_id=dataset_id, dataset_version=1,
+                                    operation_id=op.id, artifact_id=e.artifact.id, artifact_hash=e.artifact.content_hash,
+                                    rows=e.spec.rows, columns=names, locator=e.locator, note=e.spec.note,
+                                    checked=e.checked, unchecked=e.unchecked, values=values, created_at=now)
+                        for e, names, values in zip(spec.evidence, evidence_columns, snapshots)
+                    ]
+                    if refs:
+                        self.store.insert_evidence(refs)
+                        self.audit.record(event_type="evidence.recorded", entity_type="dataset", entity_id=dataset_id,
+                                          operation_id=op.id, now=now, actor=principal,
+                                          details={"references": [r.id for r in refs],
+                                                   "artifacts": sorted({r.artifact_id for r in refs})})
                     response = {
                         "status": "success",
                         "operation_id": op.id,
@@ -857,8 +900,11 @@ class Backend:
                         "schema": [self._column_summary(c) for c in columns],
                         "source": {"artifact_id": spec.artifact.id, "name": spec.artifact.name,
                                    "kind": str(spec.artifact.kind), "locator": spec.locator},
-                        "summary": f"Imported {spec.describe()} as {spec.name} ({row_count} rows, {len(columns)} columns).",
+                        "summary": f"Imported {spec.describe()} as {spec.name} ({row_count} rows, {len(columns)} columns)."
+                                   + (f" {len(refs)} evidence reference(s) recorded." if refs else ""),
                     }
+                    if refs:
+                        response["evidence"] = [self._evidence_summary(r, association="recorded") for r in refs]
                     response = self._with_notes(response, notes)
                     self._complete(op, response, key, ir.logical_fingerprint(), now)
             except Exception:
@@ -1372,13 +1418,202 @@ class Backend:
             log_event("state.committed", operation_id=op.id, datasets=len(touched))
             return self._with_notes(response, notes)
 
-    def _resolve_document(self, source: str) -> Artifact:
-        if not isinstance(source, str) or not source.strip():
-            raise InvalidIntentError("source must be an artifact id, an artifact name, or a path to a markdown document.", field="source")
-        text = source.strip()
+    # -- evidence references (MADR 0021) -----------------------------------
+    def _resolve_evidence(self, loose: Any, *, row_count: int | None) -> list[_Evidence]:
+        """Read evidence references and check them against what the backend holds, before anything is loaded.
+
+        The artifact is resolved (a file not registered yet is registered), a given hash must be the registered
+        one, a place must suit the artifact's kind, and a span or quote in a markdown or text document whose file
+        still holds its registered content is checked against its text. Row positions are checked here when the
+        row count is known (rows written inline) and after the load otherwise; columns once the source is read.
+        """
+        found: list[_Evidence] = []
+        for spec in parse_evidence(loose):
+            artifact = self._find_artifact(spec.artifact, f"{spec.field}.artifact")
+            checked, unchecked = ["artifact"], []
+            if spec.content_hash is not None:
+                if spec.content_hash != artifact.content_hash:
+                    raise ConflictError(
+                        f"content_hash does not match {artifact.name} ({artifact.id}), which is registered with "
+                        f"{artifact.content_hash}.", field=f"{spec.field}.content_hash",
+                        details={"artifact": self._artifact_summary(artifact), "registered": artifact.content_hash,
+                                 "given": spec.content_hash},
+                        hint="Reference the file as it is now by its path to register its current content, or leave "
+                             "content_hash out.")
+                checked.append("content_hash")
+            check_kind(spec, artifact.kind, artifact.name)
+            if spec.rows is not None and row_count is not None:
+                self._check_evidence_rows(spec, row_count)
+            locator = spec.locator()
+            for key in ("page", "time_s"):
+                if key in locator:
+                    unchecked.append(key)
+            if spec.span is not None or spec.quote is not None:
+                text = self._artifact_text(artifact)
+                if text is None:
+                    unchecked += [k for k in ("span", "quote") if k in locator]
+                else:
+                    result = check_text(spec, text, artifact.name)
+                    checked += result.checked
+                    if result.span is not None:
+                        locator["span"] = list(result.span)
+                        checked.append("span")
+                    if result.occurrences and result.occurrences > 1:
+                        locator["quote_occurrences"] = result.occurrences
+            found.append(_Evidence(spec, artifact, locator, checked, unchecked))
+        return found
+
+    @staticmethod
+    def _check_evidence_rows(spec: EvidenceSpec, row_count: int) -> None:
+        outside = [r for r in spec.rows or [] if r >= row_count]
+        if outside:
+            raise InvalidIntentError(
+                f"Reference {spec.index + 1} names row position(s) {outside}, but the import holds {row_count} "
+                f"row(s), at positions 0 to {row_count - 1}.", field=f"{spec.field}.rows",
+                details={"rows": row_count, "outside": outside})
+
+    def _artifact_text(self, artifact: Artifact) -> str | None:
+        """A markdown or text artifact's text, when its file still holds the registered content; None otherwise."""
+        if artifact.kind not in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT):
+            return None
+        path = Path(artifact.managed_path or artifact.path)
+        try:
+            if not path.is_file() or self.workspace.content_hash(path) != artifact.content_hash:
+                return None
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    @staticmethod
+    def _evidence_columns(evidence: list[_Evidence], physical: list[str]) -> list[list[str] | None]:
+        """Each reference's columns as the source names them (exactly, or ignoring case); refuse unknown ones."""
+        by_fold = {c.casefold(): c for c in physical}
+        found: list[list[str] | None] = []
+        for e in evidence:
+            if e.spec.columns is None:
+                found.append(None)
+                continue
+            names = []
+            for name in e.spec.columns:
+                column = name if name in physical else by_fold.get(name.casefold())
+                if column is None:
+                    raise InvalidIntentError(f"Reference {e.spec.index + 1} names column {name!r}, which the import "
+                                             f"does not have; its columns are {', '.join(physical)}.",
+                                             field=f"{e.spec.field}.columns", candidates=physical)
+                names.append(column)
+            if "columns" not in e.checked:
+                e.checked.append("columns")
+            found.append(list(dict.fromkeys(names)))
+        return found
+
+    def _evidence_values(self, evidence: list[_Evidence], columns: list[list[str] | None], table: str,
+                         row_count: int, physical: list[str]) -> list[list[dict[str, Any]]]:
+        """Check each reference's row positions against the loaded rows and snapshot the cells it names."""
+        snapshots: list[list[dict[str, Any]]] = []
+        for e, names in zip(evidence, columns):
+            if e.spec.rows is None:
+                snapshots.append([])
+                continue
+            self._check_evidence_rows(e.spec, row_count)
+            if "rows" not in e.checked:
+                e.checked.append("rows")
+            shown = names or physical
+            snapshots.append([{"row": int(position), **dict(zip(shown, _jsonable(list(values))))}
+                              for position, *values in self.engine.rows_at(table, e.spec.rows, shown)])
+        return snapshots
+
+    def _evidence_for(self, ds: Dataset) -> list[dict[str, Any]]:
+        """The evidence references that reach a dataset (MADR 0021).
+
+        Its own references, recorded at its import; then every upstream dataset's references, each marked with
+        the columns of this dataset that carry a referenced column unchanged, or as reaching it through lineage.
+        """
+        found = [self._evidence_summary(r, association="recorded") for r in self.store.list_evidence(ds.id)]
+        upstream = list(dict.fromkeys(e["source"] for e in self.lineage.upstream(ds.id)))
+        if not upstream:
+            return found
+        origins = self._column_origins(ds)
+        for source_id in upstream:
+            for ref in self.store.list_evidence(source_id):
+                carried: dict[str, list[str]] = {}
+                for column, chain in origins.items():
+                    for dataset_id, name in chain:
+                        if dataset_id == source_id and (ref.columns is None or name in ref.columns):
+                            carried.setdefault(name, []).append(column)
+                summary = self._evidence_summary(ref, association="columns" if carried else "lineage")
+                if carried:
+                    summary["carried_as"] = carried
+                found.append(summary)
+        return found
+
+    def _column_origins(self, ds: Dataset) -> dict[str, list[tuple[str, str]]]:
+        """For each column of a dataset, the upstream (dataset id, column) it carries unchanged, nearest first.
+
+        A materialized column carries a source column unchanged when the producing transform's canonical IR gives
+        it that column's id (select, filter, sort, limit, rename, join, semi_join, group_by keys); the chain is
+        followed through every materialization in between and stops at a computed column or an import.
+        """
+        origins: dict[str, list[tuple[str, str]]] = {}
+        for column in ds.columns:
+            chain: list[tuple[str, str]] = []
+            current, name = ds, column.name
+            while current is not None and len(chain) < 64:
+                source = self._carried_from(current, name)
+                if source is None:
+                    break
+                chain.append((source[0].id, source[1]))
+                current, name = source
+            origins[column.name] = chain
+        return origins
+
+    def _carried_from(self, ds: Dataset, name: str) -> tuple[Dataset, str] | None:
+        version = self.store.get_version(ds.id, ds.version)
+        op = self.store.get_operation(version.operation_id) if version and version.operation_id else None
+        if op is None or op.kind not in (OperationKind.TRANSFORM, OperationKind.MATERIALIZE) or not op.canonical_ir:
+            return None
+        try:
+            ir = TransformIR.model_validate(op.canonical_ir)
+        except ValidationError:
+            return None
+        column_id = next((f.column_id for f in ir.output_schema if f.name == name), None)
+        if column_id is None:
+            return None
+        for ref in ir.referenced_datasets():
+            source = self.store.get_dataset(ref.dataset_id, include_deleted=True)
+            column = next((c for c in source.columns if c.id == column_id), None) if source else None
+            if column is not None:
+                return source, column.name
+        return None
+
+    def _evidence_summary(self, ref: EvidenceRef, *, association: str) -> dict[str, Any]:
+        artifact = self.store.get_artifact(ref.artifact_id)
+        dataset = self.store.get_dataset(ref.dataset_id, include_deleted=True)
+        body: dict[str, Any] = {
+            "id": ref.id,
+            "association": association,
+            "dataset": {"id": ref.dataset_id, "name": dataset.name if dataset else None, "version": ref.dataset_version},
+            "artifact": {"id": ref.artifact_id, "name": artifact.name if artifact else None,
+                         "kind": str(artifact.kind) if artifact else None, "content_hash": ref.artifact_hash},
+            "rows": ref.rows,
+            "columns": ref.columns,
+            "locator": ref.locator,
+            "checked": ref.checked,
+            "unchecked": ref.unchecked,
+            "operation_id": ref.operation_id,
+        }
+        if ref.note:
+            body["note"] = ref.note
+        if ref.values:
+            body["values"] = ref.values
+        return body
+
+    def _find_artifact(self, reference: str, field: str, *, noun: str = "artifacts",
+                       listed: Callable[[Artifact], bool] | None = None) -> Artifact:
+        """An artifact by id, name or path; a file that is not registered yet is registered with its hash."""
+        text = reference.strip()
         artifact = self.store.get_artifact(text)
         if artifact is None:
-            # A leading slash or ./ and a bare file name are the same document to an agent.
+            # A leading slash or ./ and a bare file name are the same file to an agent.
             loose = text.lstrip("./").lower()
             candidates = [a for a in self.store.list_artifacts()
                           if a.name.lower() in (text.lower(), loose) or a.path == text]
@@ -1387,20 +1622,26 @@ class Backend:
             if len(candidates) == 1:
                 artifact = candidates[0]
             elif len(candidates) > 1:
-                raise AmbiguousReferenceError(f"Several artifacts are named {text!r}.", field="source",
+                raise AmbiguousReferenceError(f"Several artifacts are named {text!r}.", field=field,
                                               candidates=[self._artifact_summary(a) for a in candidates])
         if artifact is None:
             path = Path(text).expanduser()
             if not path.is_file():
-                documents = [a for a in self.store.list_artifacts() if a.kind.is_document]
-                shown = ", ".join(a.name for a in documents[:12]) if documents else "none"
+                known = [a for a in self.store.list_artifacts() if listed is None or listed(a)]
+                shown = ", ".join(a.name for a in known[:12]) if known else "none"
                 raise NotFoundError(
-                    f"No artifact or file matches {text!r}; the documents registered here are {shown}.",
-                    field="source",
-                    candidates=[self._artifact_summary(a) for a in documents],
-                    details={"reference": text, "documents": [a.name for a in documents]},
+                    f"No artifact or file matches {text!r}; the {noun} registered here are {shown}.",
+                    field=field,
+                    candidates=[self._artifact_summary(a) for a in known],
+                    details={"reference": text, noun: [a.name for a in known]},
                 )
             artifact = self._register_artifact(path, self._classify(path, None))
+        return artifact
+
+    def _resolve_document(self, source: str) -> Artifact:
+        if not isinstance(source, str) or not source.strip():
+            raise InvalidIntentError("source must be an artifact id, an artifact name, or a path to a markdown document.", field="source")
+        artifact = self._find_artifact(source, "source", noun="documents", listed=lambda a: a.kind.is_document)
         if artifact.kind not in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT):
             raise InvalidSchemaError(f"{artifact.name} is a {artifact.kind} artifact; attach_metadata reads markdown or text.", field="source")
         return artifact

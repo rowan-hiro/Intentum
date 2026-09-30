@@ -35,6 +35,7 @@ perception extracts enters the backend only through `import_dataset` or
 | `agent_backend/core/execution/` | Compile IR to internal SQL, execute plans, and roll back physical tables on failure. |
 | `agent_backend/core/export/` | Export format specification: how typed values are rendered as text at the file boundary. |
 | `agent_backend/core/contracts/` | Output contracts: read a declared deliverable shape and its value checks into canonical form and check a dataset against them (MADR 0020). |
+| `agent_backend/core/evidence/` | Evidence references from imported rows and cells to registered artifacts: read them into canonical form, and check a span or quote against a text document (MADR 0021). |
 | `agent_backend/core/recovery/` | Teach on refusal (MADR 0010): turn a refusal or a silent-failure signal into structured advice naming what the backend accepts, with the request rewritten as tool calls when mechanical. |
 | `agent_backend/core/knowledge/` | Parse knowledge.md-style semantic-layer documents into table and column facts. |
 | `agent_backend/core/lineage/` | Record lineage edges and traverse upstream and downstream dependencies. |

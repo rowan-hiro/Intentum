@@ -72,3 +72,9 @@ Outcome 2026-09-10-0735-sd88 extends harness perception to offline speech transc
 Status: accepted -> accepted
 
 import_dataset now takes rows written inline, a list of objects given with a name, in place of a path, so what the agent reads from a document, an image or a video, or a literal answer it holds, still enters the backend through import_dataset as this record requires. The rows are kept as a content-addressed JSON source in the workspace, registered as an artifact marked as inline rows, and imported through the same path as a file: type inference, temporal refinement, provenance, audit and replay. Set aside: a separate tool for rows, which would have been a third entry point beside import_dataset and attach_metadata; and letting a raw_query write out VALUES without reading its source, which MADR 0002 refuses so that every query result derives from a bound dataset. That refusal now points at rows written inline. Recorded in Intentum-DataSpace's GAPS.md as G4.
+
+### 2026-09-30T08:47:59.119Z, outcome 2026-09-30-0841-1yhn
+
+Status: accepted -> accepted
+
+The boundary holds with evidence references (MADR 0021): the harness or any front end reads a document, an image or a video and imports what it read with references to the artifact and the place (page, span, quote, time); the backend links the references to the imported rows and cells, checks only what it holds facts for (the artifact and its hash, rows, columns, and a span or quote against a markdown or text document) and records the rest as given. It still reads no PDF, frame or audio.
