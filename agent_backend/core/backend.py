@@ -33,7 +33,7 @@ from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
-from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_sort_ties,
+from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_joins, advise_sort_ties,
                        advise_text_comparison, advise_text_sort, advise_unapplied_format, call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
@@ -286,6 +286,7 @@ class Backend:
         engine: AnalyticsEngine | None = None,
         export_root: str | Path | None = None,
         query_timeout: float | None = None,
+        join_diagnostics: bool = True,
     ) -> None:
         self._lock = threading.RLock()  # one semantic operation at a time; see semantic_operation
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
@@ -296,6 +297,9 @@ class Backend:
                                           or query_timeout <= 0):
             raise ValueError(f"query_timeout must be a positive number of seconds or None, got {query_timeout!r}")
         self.query_timeout = float(query_timeout) if query_timeout is not None else None
+        # Count what each semantic join step does to its inputs: one grouped query per join step, plus one bounded
+        # sample query when rows are unmatched or multiplied. False leaves joins undiagnosed.
+        self.join_diagnostics = bool(join_diagnostics)
         self.clock = clock or _utcnow
         self.policy = policy or AllowAllPolicy()
         self.store = store or SqliteMetadataStore(self.workspace.metadata_path)
@@ -967,11 +971,12 @@ class Backend:
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
-            result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir))
+            result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir),
+                                                     diagnose_joins=self.join_diagnostics)
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
                                             ir.output.name if materialize else None, distinct_keys=result.distinct_keys,
-                                            ties=result.ties)
+                                            ties=result.ties, joins=result.joins)
 
             now = self.clock()
             response: dict[str, Any]
@@ -993,6 +998,9 @@ class Backend:
                             "summary": self._summarize(ir, None),
                             "hint": "Call materialize_result with the same source/transform and a name to persist this result.",
                         }
+                    if result.joins:
+                        # What each join did to its inputs: data facts, reported whether or not advice follows.
+                        response["joins"] = _jsonable([facts.to_dict() for facts in result.joins])
                     if advice:
                         response["advice"] = [a.to_dict() for a in advice]
                     response["plan"] = plan.to_text()
@@ -1025,9 +1033,9 @@ class Backend:
 
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
-                          distinct_keys: int | None = None, ties: Any = None) -> list[Advice]:
+                          distinct_keys: int | None = None, ties: Any = None, joins: Any = None) -> list[Advice]:
         """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, rows
-        a sort leaves tied, or a result that fits the contract."""
+        a sort leaves tied, rows a join dropped or multiplied, or a result that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -1046,6 +1054,7 @@ class Backend:
             found = advise_sort_ties(ir, ties)
             if found is not None:
                 advice.append(found)
+            advice.extend(advise_joins(joins or []))
             contract = self.store.latest_contract()
             if contract is not None:
                 found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,

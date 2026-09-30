@@ -4,13 +4,16 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Six
+rewrites the agent's own request into tool calls it can send as-is. Seven
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
 ordered against a quoted number (it compares as text) or sorted by (it sorts as
-text), a sort that leaves tied rows in no defined order, a result that already
-has (or mechanically reshapes to) the declared output shape, and an export
-whose date or timestamp pattern formatted no value.
+text), a sort that leaves tied rows in no defined order, a semantic join that
+dropped left rows matching nothing or repeated left rows whose key matches
+several right rows (from the executor's counts, which the response also
+carries as facts under ``joins``), a result that already has (or mechanically
+reshapes to) the declared output shape, and an export whose date or timestamp
+pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -26,7 +29,7 @@ import json
 import re
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
 from ..errors import BackendError, ErrorCode
@@ -37,6 +40,9 @@ from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
+
+if TYPE_CHECKING:
+    from ..execution import JoinFacts
 
 
 @dataclass
@@ -2801,6 +2807,73 @@ def advise_sort_ties(ir: TransformIR, ties: tuple[list[Any], int, int, int] | No
         explanation += ", and the limit can keep different ones"
     return Advice("sort_ties", explanation + ". A key that tells them apart, such as an identifier, added to the sort "
                   "settles the order.")
+
+
+def _key_text(facts: "JoinFacts", values: list[Any]) -> str:
+    pairs = [f"{name} = {value!r}" for name, value in facts.key(values).items()]
+    return pairs[0] if len(pairs) == 1 else "(" + ", ".join(pairs) + ")"
+
+
+def _plural(n: int, one: str, many: str | None = None) -> str:
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def advise_joins(facts: list["JoinFacts"]) -> list[Advice]:
+    """What a join did to its inputs, when it dropped left rows or multiplied them.
+
+    ``facts`` are the executor's counts, one per diagnosed join step. The advice states the counts and what they
+    mean for the rows; it never rewrites and never calls a join wrong: a join meant to pair every match, or to keep
+    only matched rows, is legitimate, and only the agent knows which one was meant.
+    """
+    found: list[Advice] = []
+    for f in facts:
+        right = f.step.right.name
+        at = f"The join with {right} at transform.steps[{f.position}]"
+        if f.multiple_match_keys:
+            example = ""
+            if f.multiple_sample:
+                values, _, matches = f.multiple_sample[0]
+                example = f" (such as {_key_text(f, values)}, which matches {matches} rows)"
+            explanation = (f"{at} matched {_plural(f.multiple_match_keys, 'left key')} to more than one row of "
+                           f"{right}{example}; a left row with such a key appears once per match, which added "
+                           f"{_plural(f.added_rows, 'row')}.")
+            if f.step.how == "inner" and f.unmatched_left_rows and f.rows_out == f.left_rows:
+                explanation += (f" The join returns as many rows as its left input ({f.left_rows}) only because it "
+                                f"also dropped {_plural(f.unmatched_left_rows, 'unmatched left row')}: the added "
+                                "rows hide the dropped ones, so the row count alone shows neither.")
+            right_keys = ", ".join(c.right.name for c in f.step.on)
+            found.append(Advice("join_multiplied_rows", explanation + (
+                f" If each left row should appear once, reduce {right} to one row per [{right_keys}] first (an "
+                "aggregate materialized, then joined), or use semi_join when only whether a match exists matters; "
+                "a join meant to pair each left row with every match needs no change.")))
+        kept_right = f.step.how in ("right", "full") and f.unmatched_right_rows
+        if not f.unmatched_left_rows and not kept_right:
+            continue
+        parts: list[str] = []
+        if f.unmatched_left_rows:
+            detail: list[str] = []
+            if f.unmatched_left_keys:
+                keys = _plural(f.unmatched_left_keys, "key")
+                if f.unmatched_sample:
+                    keys += f", such as {_key_text(f, f.unmatched_sample[0][0])}"
+                detail.append(keys)
+            if f.null_key_left_rows:
+                detail.append(f"{_plural(f.null_key_left_rows, 'row')} with a null key, which never matches")
+            listed = f" ({'; '.join(detail)})" if detail else ""
+            fate = ("are kept with nulls in the columns it adds" if f.step.how in ("left", "full")
+                    else "are not in the result")
+            parts.append(f"{at} found no row of {right} for {f.unmatched_left_rows} of {f.left_rows} left rows"
+                         f"{listed}; they {fate}. The match coverage is {f.coverage:.0%} of the left rows.")
+            if f.step.how in ("inner", "right"):
+                parts.append("A left join keeps unmatched left rows with nulls instead.")
+            if f.coverage is not None and f.coverage < 0.5:
+                parts.append("When most left rows match nothing, the key columns may hold different identifiers on "
+                             "the two sides; describe_dataset shows their values.")
+        if kept_right:
+            parts.append(f"{_plural(f.unmatched_right_rows, 'row')} of {right} match no left row and are kept "
+                         "with nulls in the left columns.")
+        found.append(Advice("join_unmatched_rows", " ".join(parts)))
+    return found
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

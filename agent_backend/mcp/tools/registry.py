@@ -169,7 +169,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "says where a filtered value does occur; a text column of numbers ordered against a quoted "
                              "number, which compares as text, is named with the comparison rewritten to try_cast; a sort "
                              "by such a column, which sorts '108' before '12', is named too; rows a sort leaves tied, "
-                             "whose order is open between runs, are counted; a result "
+                             "whose order is open between runs, are counted; every join step reports under `joins` "
+                             "its matched and unmatched left rows and keys and the left keys matching several right "
+                             "rows, with samples, and advice names a join that dropped or multiplied rows (a join "
+                             "meant to do so needs no change); a result "
                              "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],

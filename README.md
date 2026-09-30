@@ -600,7 +600,10 @@ explained, since sorting by a number there takes a derive and a select around
 it); a sort step that sets the output order and leaves rows tied on its keys
 says how many rows tie and where, since their order is open between runs and a
 preview and its materialization can differ (`sort_ties`; with a limit after the
-sort, only ties that reach the kept rows count); an export whose date or
+sort, only ties that reach the kept rows count); a join that dropped left rows
+matching nothing or multiplied left rows whose key matches several right rows
+says how many and which keys (`join_unmatched_rows`, `join_multiplied_rows`;
+see Join diagnostics below); an export whose date or
 timestamp pattern formatted nothing names the
 columns (`format_not_applied`, under Exporting an answer); and a result that
 already has, or mechanically reshapes to, the open output contract says so with
@@ -609,6 +612,62 @@ said to match only after the result's distinct keys are counted, as
 `export_result` counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
 turn budget, repeated previews) belongs to the agent harness.
+
+#### Join diagnostics
+
+A join can drop the left rows that match nothing and repeat the left rows whose
+key matches several right rows, and the two can cancel: two accounts joined to
+a table that holds the first one twice and the second not at all come back as
+two rows, both of the first account. A check on the row count before and after
+sees nothing. Every semantic `join` step therefore reports what it did to its
+inputs under `joins` on the successful response (and in the operation record),
+whether or not anything is wrong:
+
+```json
+"joins": [{"step": "transform.steps[0] (join)", "right": {"id": "ds_2", "name": "probe_right", "version": 1},
+           "how": "inner", "on": {"account": "account"},
+           "left_rows": 2, "matched_left_rows": 1, "unmatched_left_rows": 1, "null_key_left_rows": 0,
+           "left_keys": 2, "matched_left_keys": 1, "unmatched_left_keys": 1,
+           "left_keys_with_multiple_matches": 1, "rows_added_by_multiple_matches": 1,
+           "right_rows": 2, "unmatched_right_rows": 0, "rows_out": 2, "match_coverage": 0.5,
+           "unmatched_left_key_sample": [{"key": {"account": "B"}, "left_rows": 1}],
+           "multiple_match_sample": [{"key": {"account": "A"}, "left_rows": 1, "right_rows": 2}]}]
+```
+
+The left input is the relation the transform holds just before the join
+(after any filter written before it), the right input the joined dataset's
+version; both are grouped by the join keys and the groups matched with the
+join's own equality, so a left row with a null key is counted in
+`null_key_left_rows` and among the unmatched rows, and never sampled as a key.
+Keys are distinct non-null key values; `match_coverage` is the share of left
+rows that matched at least one right row; `rows_out` is what the step returns
+for its `how` (a left or full join keeps unmatched left rows, a right or full
+join unmatched right rows). Samples hold at most five keys each, the unmatched
+ones with the most left rows first and the multiplied ones with the most right
+matches first.
+
+These are facts, and the facts carry no verdict: a join meant to pair each
+left row with every match, or to keep only matched rows, is legitimate. Advice
+follows only when something changed the rows. `join_multiplied_rows` names the
+keys that matched several right rows and the rows that added, says when the
+row count equals the left input's only because as many unmatched rows were
+dropped, and names the choices (reduce the right side to one row per key
+first, `semi_join` when only whether a match exists matters, or keep the join).
+`join_unmatched_rows` names the unmatched left rows and keys, what happened to
+them for this `how`, the coverage, and, when fewer than half of the left rows
+matched, that the key columns may hold different identifiers on the two sides.
+Neither is rewritten.
+
+Diagnostics cover semantic `join` steps of every `how`. They do not cover
+`semi_join`, which never repeats a left row and drops unmatched ones by
+design; joins written inside `raw_query` SQL, which the backend does not
+decompose; or semantic steps after a `raw_query` first step, whose input exists
+only inside the sandbox run. Each diagnosed step costs one grouped query over
+its left input and the right dataset, plus one sample query, bounded by the
+sample size, only when some key is unmatched or multiplied. A diagnostic that
+fails is left out of the response and never fails the transform.
+`Backend(..., join_diagnostics=False)` and `agent-backend-mcp
+--no-join-diagnostics` (or `$AGENT_BACKEND_JOIN_DIAGNOSTICS=0`) turn them off.
 
 ## 2. Repository structure
 
@@ -729,6 +788,9 @@ uv run agent-backend-mcp --workspace ./workspace
 `--query-timeout SECONDS` (or `$AGENT_BACKEND_QUERY_TIMEOUT`) sets the
 deadline after which a `raw_query` statement is interrupted; without it there
 is none. The library takes the same as `Backend(..., query_timeout=...)`.
+`--no-join-diagnostics` (or `$AGENT_BACKEND_JOIN_DIAGNOSTICS=0`, or
+`Backend(..., join_diagnostics=False)`) stops counting what each semantic join
+does to its inputs (see Join diagnostics).
 
 Client configuration (Claude Desktop / Claude Code / Codex style; see
 `examples/mcp_config.json`):
@@ -910,6 +972,12 @@ the canonical IR, the full execution plan and the generated SQL.
   it has passed, the binding tests' deadline calibrated below what one binding
   of their statement takes on the fastest machine measured; the
   `--query-timeout` flag and the MCP surface.
+- `test_join_diagnostics.py`: the join facts and advice on made-up accounts,
+  shifts, stations and budgets — a join whose dropped and added rows cancel in
+  the row count, a unique fully matched join, null keys, left, right and full
+  joins, several keys, a legitimate many-to-many join, the left input after a
+  filter and between two joins, the scope (no `semi_join`, no `raw_query`),
+  rows unchanged with diagnostics off, a failing diagnostic, and the CLI flag.
 - `test_profile.py`: per-column non-null and distinct counts, finite numeric
   and temporal ranges, profile opt-out, wide datasets, and JSON-safe
   non-finite values.
@@ -931,6 +999,7 @@ These capabilities are available in the current code:
 | [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
 | [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |
 | [Recovery advice](#failure-semantics) | Structured advice on refusals, mechanical tool-call rewrites, and advice for empty results or results matching the declared contract. |
+| [Join diagnostics](#join-diagnostics) | Every semantic join reports matched, unmatched and multiplied left rows and keys with bounded samples; advice when a join dropped or multiplied rows; server-level opt-out. |
 | Dataset profiles | `describe_dataset` returns non-null/distinct counts and finite numeric/temporal ranges, with explicit opt-out and scan limits. |
 | Operation lifecycle | Materialization, publish, soft delete/restore, metadata updates, provenance, audit, failure compensation and idempotent replay. Calls sharing one `Backend` instance are serialized. |
 | Agent harness | Containerized OpenCode host plus the in-process control loop; optional timestamped video frames, offline speech transcription and importable observations. Perception stays in `agent_harness`, outside the backend and wheel. |
@@ -963,13 +1032,12 @@ are enough to name more of the errors that enter silently.
 
 1. **Silent-failure signals on successful responses.** The signals that
    exist, `value_not_found`, `numbers_compared_as_text`,
-   `numbers_sorted_as_text`, `sort_ties`, `format_not_applied` and
+   `numbers_sorted_as_text`, `sort_ties`, `join_unmatched_rows`,
+   `join_multiplied_rows` (with the `joins` facts), `format_not_applied` and
    `matches_contract` / `near_contract`, come from one rule: the backend
    reports its own data facts and never reads the task. The next signals are
    the mistakes an agent makes without noticing
-   and the backend can see: a join that multiplies the left rows (the row
-   count before and after, and the duplicated key), a join key that matches a
-   small share of the left rows, a `one_per` key that is not unique in the
+   and the backend can see: a `one_per` key that is not unique in the
    result, a measure that adds a column to one whose declared unit differs
    (`attach_metadata` already records units), and a well-typed filter that
    keeps nothing although its literal does occur in the column. Each is a

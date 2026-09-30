@@ -1,6 +1,6 @@
 """Thin MCP server entry point.
 
-    agent-backend-mcp [--workspace DIR] [--export-root DIR] [--query-timeout SECONDS]
+    agent-backend-mcp [--workspace DIR] [--export-root DIR] [--query-timeout SECONDS] [--no-join-diagnostics]
 
 The server validates protocol input (handled by the MCP SDK from the tool
 signatures), invokes the backend, and returns the backend's structured
@@ -25,7 +25,7 @@ This server is an agent-ready data backend. Express what you want, not how to do
 - Field names may be approximate; responses report how they were resolved.
 - If a response has status "needs_resolution", pick one of the candidates and retry.
 - If a response has status "error", read `code`, `message` and `advice`: each advice entry says what the backend accepts instead of what you wrote and, when the fix is mechanical, carries `rewrite`, your request as tool calls to send as-is; `candidates` lists what a name could have meant. Most errors are recoverable by fixing the intent.
-- A successful response may carry `advice` too: an empty result says where a filtered value actually occurs; a result that already has the declared output shape says so and names the next call.
+- A successful response may carry `advice` too: an empty result says where a filtered value actually occurs; a join that dropped unmatched rows or multiplied rows says how many and which keys (the counts are under `joins`); a result that already has the declared output shape says so and names the next call.
 - State-changing tools are safe to retry; identical requests replay the original result.
 - Transforms are written in semantic steps. Only for a shape the steps cannot express (a window over groups, every row tied at an extremum, a union) use a raw_query first step: one read-only SELECT over placeholders (input is the source, other datasets are bound under inputs), run in a sandbox; its response says used_raw_query.
 - Declare the shape of your deliverable with declare_output while the requirement is in front of you; export_result holds the file to it.
@@ -59,12 +59,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--query-timeout", type=_seconds, default=os.environ.get("AGENT_BACKEND_QUERY_TIMEOUT"),
                         help="Seconds a raw_query statement may run before it is stopped with a structured error "
                              "(default: no deadline, or $AGENT_BACKEND_QUERY_TIMEOUT)")
+    parser.add_argument("--no-join-diagnostics", dest="join_diagnostics", action="store_false",
+                        default=os.environ.get("AGENT_BACKEND_JOIN_DIAGNOSTICS", "1").strip().lower()
+                        not in ("0", "false", "no", "off"),
+                        help="Do not count what each semantic join does to its inputs; each join step otherwise "
+                             "costs one grouped query over its inputs (default: on, or "
+                             "$AGENT_BACKEND_JOIN_DIAGNOSTICS=0 to turn off)")
     parser.add_argument("--log-level", default=os.environ.get("AGENT_BACKEND_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     export_root = args.export_root or os.path.join(args.workspace, "exports")
-    backend = Backend(args.workspace, export_root=export_root, query_timeout=args.query_timeout)
+    backend = Backend(args.workspace, export_root=export_root, query_timeout=args.query_timeout,
+                      join_diagnostics=args.join_diagnostics)
     try:
         create_server(backend).run(transport="stdio")
     finally:
