@@ -4,16 +4,17 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Seven
+rewrites the agent's own request into tool calls it can send as-is. Eight
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
 ordered against a quoted number (it compares as text) or sorted by (it sorts as
 text), a sort that leaves tied rows in no defined order, a semantic join that
 dropped left rows matching nothing or repeated left rows whose key matches
 several right rows (from the executor's counts, which the response also
-carries as facts under ``joins``), a result that already has (or mechanically
-reshapes to) the declared output shape, and an export whose date or timestamp
-pattern formatted no value.
+carries as facts under ``joins``), an addition, subtraction or comparison of
+operands whose declared units differ (core/ir/units.py), a result that already
+has (or mechanically reshapes to) the declared output shape, and an export
+whose date or timestamp pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -38,8 +39,10 @@ from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, Func
 from ..ir.raw_query import QueryShape
 from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
+from ..ir.units import UnitConflict
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
+from ..planner.planner import _expr_text
 
 if TYPE_CHECKING:
     from ..execution import JoinFacts
@@ -2874,6 +2877,39 @@ def advise_joins(facts: list["JoinFacts"]) -> list[Advice]:
                          "with nulls in the left columns.")
         found.append(Advice("join_unmatched_rows", " ".join(parts)))
     return found
+
+
+def advise_units(conflicts: list[UnitConflict], shown: int = 5) -> Advice | None:
+    """Operands whose declared units differ, added, subtracted or compared (core/ir/units.py, MADR 0019).
+
+    Explained, never rewritten and never refused: which operand to convert, and by what factor, is the agent's
+    to know; the backend converts nothing.
+    """
+    if not conflicts:
+        return None
+    facts: list[str] = []
+    for c in conflicts[:shown]:
+        left = f"{_expr_text(c.left)} ({c.left_unit})"
+        right = f"{_expr_text(c.right)} ({c.right_unit})"
+        subject = f"derive of {c.name}" if c.step == "derive" and c.name else c.step
+        where = f"{'the' if facts else 'The'} {subject} at transform.steps[{c.position}]"
+        if c.op == "+":
+            did = f"adds {left} and {right}"
+        elif c.op == "-":
+            did = f"subtracts {right} from {left}"
+        else:
+            did = f"compares {left} {c.op} {right}"
+        facts.append(f"{where} {did}")
+    if len(conflicts) > shown:
+        facts.append(f"{len(conflicts) - shown} more")
+    derived = list(dict.fromkeys(c.name for c in conflicts if c.name))
+    result = (f"; {', '.join(derived)} {'has' if len(derived) == 1 else 'have'} no unit" if derived else "")
+    return Advice("unit_mismatch",
+                  "; ".join(facts) + f". Their declared units differ, so the values combine two measures{result}. "
+                  "Units are compared as declared, ignoring case and spacing, and the backend converts nothing, "
+                  "neither currencies nor scale. Convert one operand to the other's unit first (a derive before "
+                  "this step), or, when both are one unit written two ways, give them one spelling with "
+                  "update_metadata. The result is returned as computed.")
 
 
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:

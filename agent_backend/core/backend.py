@@ -34,7 +34,8 @@ from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
 from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_joins, advise_sort_ties,
-                       advise_text_comparison, advise_text_sort, advise_unapplied_format, call as tool_call)
+                       advise_text_comparison, advise_text_sort, advise_unapplied_format, advise_units,
+                       call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
@@ -66,6 +67,7 @@ from .export import ExportFormat, ValueRenderer, write_formatted_csv
 from .ir import (AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RawQueryStep, RenameStep,
                  SelectStep, SemiJoinStep, SortStep, TransformIR)
 from .ir.raw_query import QueryShape
+from .ir.units import UnitReport, infer_units
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
@@ -974,23 +976,27 @@ class Backend:
             result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir),
                                                      diagnose_joins=self.join_diagnostics)
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
+            units = self._units(ir, used)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
                                             ir.output.name if materialize else None, distinct_keys=result.distinct_keys,
-                                            ties=result.ties, joins=result.joins)
+                                            ties=result.ties, joins=result.joins, units=units)
 
             now = self.clock()
             response: dict[str, Any]
             try:
                 with self.store.transaction():
                     if materialize:
-                        response = self._commit_materialization(op, ir, used, dataset_id, table, result, now, principal)
+                        response = self._commit_materialization(op, ir, used, dataset_id, table, result, now, principal,
+                                                                units=units)
                     else:
                         response = {
                             "status": "success",
                             "operation_id": op.id,
                             "source": {"id": ir.source.dataset_id, "name": ir.source.name, "version": ir.source.version},
                             "result": {
-                                "columns": [{"name": f.name, "type": str(f.logical_type)} for f in ir.output_schema],
+                                "columns": [{"name": f.name, "type": str(f.logical_type),
+                                             **({"unit": units.units[f.name]} if units.units.get(f.name) else {})}
+                                            for f in ir.output_schema],
                                 "rows": _jsonable(result.rows),
                                 "row_count": result.row_count,
                                 "truncated": result.truncated,
@@ -1033,9 +1039,11 @@ class Backend:
 
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
-                          distinct_keys: int | None = None, ties: Any = None, joins: Any = None) -> list[Advice]:
+                          distinct_keys: int | None = None, ties: Any = None, joins: Any = None,
+                          units: UnitReport | None = None) -> list[Advice]:
         """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, rows
-        a sort leaves tied, rows a join dropped or multiplied, or a result that fits the contract."""
+        a sort leaves tied, rows a join dropped or multiplied, operands with different declared units, or a
+        result that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -1055,6 +1063,9 @@ class Backend:
             if found is not None:
                 advice.append(found)
             advice.extend(advise_joins(joins or []))
+            found = advise_units(units.conflicts if units is not None else [])
+            if found is not None:
+                advice.append(found)
             contract = self.store.latest_contract()
             if contract is not None:
                 found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,
@@ -1064,6 +1075,15 @@ class Backend:
         except Exception as err:  # advice never breaks a response
             log_event("advice.skipped", error=repr(err))
         return advice
+
+    def _units(self, ir: TransformIR, used: list[Dataset]) -> UnitReport:
+        """The declared units followed through the transform (core/ir/units.py); empty when they cannot be."""
+        declared = {c.id: c.unit for d in used for c in d.columns if c.unit.strip()}
+        try:
+            return infer_units(ir, lambda column_id: declared.get(column_id or "", ""))
+        except Exception as err:  # units serve advice and metadata only: they never fail the transform
+            log_event("advice.skipped", error=repr(err))
+            return UnitReport()
 
     def _column_contains(self, dataset: Dataset, column: Column, value: Any) -> bool:
         version = self.store.get_version(dataset.id, dataset.version)
@@ -1094,8 +1114,10 @@ class Backend:
         result,
         now: dt.datetime,
         principal: str | None,
+        units: UnitReport | None = None,
     ) -> dict[str, Any]:
         physical_types = dict(self.engine.describe_table(table))
+        inferred = units.units if units is not None else {}
         columns: list[Column] = []
         source_columns = {c.id: c for d in used for c in d.columns}
         for position, f in enumerate(ir.output_schema):
@@ -1105,7 +1127,9 @@ class Backend:
                 logical_type=f.logical_type, physical_type=physical_types.get(f.name, "UNKNOWN"),
                 description=origin.description if origin else "",
                 semantic_role=origin.semantic_role if origin else (SemanticRole.MEASURE if f.logical_type.is_numeric else SemanticRole.UNKNOWN),
-                aliases=list(origin.aliases) if origin else [], unit=origin.unit if origin else "", position=position,
+                aliases=list(origin.aliases) if origin else [], position=position,
+                # The unit the transform's inputs agree on (core/ir/units.py): a column's own, or a derived one's.
+                unit=inferred.get(f.name) or (origin.unit if origin else ""),
             ))
         metadata = {"derived": True, "intent_fingerprint": ir.logical_fingerprint()}
         dataset = Dataset(

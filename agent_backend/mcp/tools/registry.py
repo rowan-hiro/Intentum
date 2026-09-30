@@ -172,7 +172,9 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "whose order is open between runs, are counted; every join step reports under `joins` "
                              "its matched and unmatched left rows and keys and the left keys matching several right "
                              "rows, with samples, and advice names a join that dropped or multiplied rows (a join "
-                             "meant to do so needs no change); a result "
+                             "meant to do so needs no change); adding, subtracting or comparing columns whose declared "
+                             "units differ (USD and percent; units are compared as written, nothing is converted) "
+                             "is named as unit_mismatch, and result columns list the unit they carry; a result "
                              "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],

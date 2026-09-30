@@ -28,7 +28,7 @@ perception extracts enters the backend only through `import_dataset` or
 | `agent_backend/core/logging.py` | Structured events for the execution stages. |
 | `agent_backend/core/naming.py` | Unicode-aware identifier rules shared by the IR, validator and resolvers. |
 | `agent_backend/core/models/` | Dataset, column, version, operation, lineage, and audit entities. |
-| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, shared type rules, and the raw_query step's rules (`raw_query.py`, MADR 0002). |
+| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, shared type rules, the raw_query step's rules (`raw_query.py`, MADR 0002), and the unit rules that follow declared units through a transform (`units.py`, MADR 0019). |
 | `agent_backend/core/resolver/` | Resolve loose dataset, field, expression, and transform references into canonical IR. |
 | `agent_backend/core/validation/` | Independently validate IR types, schemas, input versions, and dataset state. |
 | `agent_backend/core/planner/` | Build explicit, inspectable execution plans. |

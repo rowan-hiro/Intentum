@@ -169,7 +169,7 @@ Key properties, all enforced in software rather than in prompts:
 | Identifiers, physical table names, storage paths, timestamps | allocated by the backend (`ds_N`, `col_N`, `art_N`, `op_N`, `ds_N_v1`), never accepted from the agent |
 | Name normalization / uniqueness | Unicode-aware `slugify` (`公募基金经理(新)` → `公募基金经理_新`, `Regional Sales` → `regional_sales`) + partial unique index on active dataset names; original names stay reachable as aliases |
 | Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too |
-| Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match |
+| Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match; declared units are followed through transforms and a conflict is reported (MADR 0019) |
 | Schema and type correctness | shared type rules in `core/ir/typing.py`, applied twice (resolver inference, validator re-check) |
 | Semantic types at import | text columns whose non-null values are all ISO dates/timestamps become `date`/`timestamp` (a source driver reports what it can store, not what the data means); an explicit `type` hint wins, and the refinement is a resolution note and part of the recorded IR |
 | Value rendering | a property of the exported file, not of the data: `export_result` takes a validated `format_spec`; transforms compute, they do not format |
@@ -603,7 +603,9 @@ preview and its materialization can differ (`sort_ties`; with a limit after the
 sort, only ties that reach the kept rows count); a join that dropped left rows
 matching nothing or multiplied left rows whose key matches several right rows
 says how many and which keys (`join_unmatched_rows`, `join_multiplied_rows`;
-see Join diagnostics below); an export whose date or
+see Join diagnostics below); an addition, subtraction or comparison of two
+operands whose declared units differ names the operands and their units
+(`unit_mismatch`; see Declared units below); an export whose date or
 timestamp pattern formatted nothing names the
 columns (`format_not_applied`, under Exporting an answer); and a result that
 already has, or mechanically reshapes to, the open output contract says so with
@@ -669,6 +671,41 @@ fails is left out of the response and never fails the transform.
 `Backend(..., join_diagnostics=False)` and `agent-backend-mcp
 --no-join-diagnostics` (or `$AGENT_BACKEND_JOIN_DIAGNOSTICS=0`) turn them off.
 
+#### Declared units
+
+A column's unit is what was declared for it: an import `schema_hints` entry,
+`update_metadata`, or `attach_metadata` from a knowledge document. The backend
+never infers one, and it follows the declared units through a transform
+(`agent_backend/core/ir/units.py`, MADR 0019):
+
+- A column keeps its unit through `select`, `filter`, `sort`, `limit`,
+  `rename` and `semi_join`; a `join` brings each right column's own unit.
+- `sum`, `avg`, `min` and `max` keep their field's unit; `count` has none.
+- In an expression a column has its unit and a literal has none; `+` and `-`
+  give the unit both operands agree on and nothing when either is unknown;
+  `abs`, `round`, `floor`, `ceil`, negation and a cast to a number keep their
+  operand's unit; every other operation, `*`, `/` and `%` included, gives none.
+- A `raw_query`'s output columns have no unit.
+
+Two units are one unit when they are equal as written, ignoring case and
+spacing: `USD` and `usd` agree; `USD` and `EUR`, `元` and `万元`, and `%` and
+`percent` do not. Nothing is converted, neither currencies nor scale. An
+undeclared unit is unknown, not dimensionless, and never produces a signal.
+When an addition, subtraction or comparison in a `derive` or a `filter` meets
+two operands with declared units that differ, the successful response carries
+`unit_mismatch` advice naming the step, the operands and their units, and the
+result has no unit:
+
+```json
+{"kind": "unit_mismatch",
+ "explanation": "The derive of mixed_measure at transform.steps[0] adds sales (USD) and return_rate (percent). Their declared units differ, so the values combine two measures; mixed_measure has no unit. ..."}
+```
+
+The transform is not refused and its values do not change. A preview lists
+each result column's unit when it has one, and a materialized dataset stores
+the unit of each of its columns, derived ones included, so a later transform
+over it is checked as well.
+
 ## 2. Repository structure
 
 ```
@@ -680,7 +717,7 @@ agent_backend/
 │   ├── logging.py          structured stage events
 │   ├── naming.py           Unicode-aware identifier rules (normalize, slugify, tokens)
 │   ├── models/             Dataset, Column, Artifact, DatasetVersion, LineageEdge, Operation, AuditEvent
-│   ├── ir/                 canonical IR (pydantic), expression parser, shared type and raw_query rules
+│   ├── ir/                 canonical IR (pydantic), expression parser, shared type, raw_query and unit rules
 │   ├── knowledge/          heuristic parser for knowledge.md-style semantic-layer documents
 │   ├── resolver/           dataset / field / expression / transform resolvers
 │   ├── validation/         IR validator (independent re-check)
@@ -978,6 +1015,12 @@ the canonical IR, the full execution plan and the generated SQL.
   joins, several keys, a legitimate many-to-many join, the left input after a
   filter and between two joins, the scope (no `semi_join`, no `raw_query`),
   rows unchanged with diagnostics off, a failing diagnostic, and the CLI flag.
+- `test_units.py`: declared units on a made-up shop ledger and household
+  budget — a currency added to a percentage, one unit written two ways, an
+  undeclared unit, multiplication and division, scale and currency
+  differences (nothing converted), a comparison in a filter, propagation
+  through rename, select, sort, limit, measures, functions, casts, joins and
+  materialized datasets, `raw_query` outputs, and units set after import.
 - `test_profile.py`: per-column non-null and distinct counts, finite numeric
   and temporal ranges, profile opt-out, wide datasets, and JSON-safe
   non-finite values.
@@ -999,6 +1042,7 @@ These capabilities are available in the current code:
 | [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
 | [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |
 | [Recovery advice](#failure-semantics) | Structured advice on refusals, mechanical tool-call rewrites, and advice for empty results or results matching the declared contract. |
+| [Declared units](#declared-units) | Units follow their columns through transforms and into materialized datasets; an addition, subtraction or comparison of different declared units is reported, never refused or converted. |
 | [Join diagnostics](#join-diagnostics) | Every semantic join reports matched, unmatched and multiplied left rows and keys with bounded samples; advice when a join dropped or multiplied rows; server-level opt-out. |
 | Dataset profiles | `describe_dataset` returns non-null/distinct counts and finite numeric/temporal ranges, with explicit opt-out and scan limits. |
 | Operation lifecycle | Materialization, publish, soft delete/restore, metadata updates, provenance, audit, failure compensation and idempotent replay. Calls sharing one `Backend` instance are serialized. |
@@ -1033,13 +1077,12 @@ are enough to name more of the errors that enter silently.
 1. **Silent-failure signals on successful responses.** The signals that
    exist, `value_not_found`, `numbers_compared_as_text`,
    `numbers_sorted_as_text`, `sort_ties`, `join_unmatched_rows`,
-   `join_multiplied_rows` (with the `joins` facts), `format_not_applied` and
-   `matches_contract` / `near_contract`, come from one rule: the backend
-   reports its own data facts and never reads the task. The next signals are
-   the mistakes an agent makes without noticing
+   `join_multiplied_rows` (with the `joins` facts), `unit_mismatch`,
+   `format_not_applied` and `matches_contract` / `near_contract`, come from
+   one rule: the backend reports its own data facts and never reads the task.
+   The next signals are the mistakes an agent makes without noticing
    and the backend can see: a `one_per` key that is not unique in the
-   result, a measure that adds a column to one whose declared unit differs
-   (`attach_metadata` already records units), and a well-typed filter that
+   result, and a well-typed filter that
    keeps nothing although its literal does occur in the column. Each is a
    fact about the workspace, attached to a successful response, never a
    judgement about the task.
@@ -1058,8 +1101,10 @@ are enough to name more of the errors that enter silently.
    document. Metric definitions (`revenue := sum(amount)`) would make it a
    contract: the agent references `revenue` and the backend expands it, and
    an aggregate that computes revenue differently is refused with the
-   definition as advice. Units used by the type rules and column-level
-   lineage belong to the same layer.
+   definition as advice. Declared units are already followed and a conflict
+   reported (MADR 0019); whether such a declaration should turn a unit
+   conflict into a refusal, and column-level lineage, belong to the same
+   layer.
 4. **Provenance to the value.** `get_provenance` returns the operation and
    the inputs that produced a dataset. Column-level lineage, reads of an
    earlier version (`describe_dataset(version=…)`) and a downstream impact
