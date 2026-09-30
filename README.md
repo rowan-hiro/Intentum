@@ -54,8 +54,9 @@ without advice and the repair rate beside the pass rate.
 ### The deliverable is declared before the work, and the export is held to it
 
 `declare_output` records the shape of the answer while the requirement is in
-front of the agent: the columns the file carries, the row cardinality, and
-what it is organized by (MADR 0007, 0012). `export_result` checks the dataset
+front of the agent: the columns the file carries, the row cardinality, what
+it is organized by, and optional checks on their values (MADR 0007, 0012,
+0020). `export_result` checks the dataset
 against that contract before anything is read or written, refuses a mismatch
 with the declared and the actual shape and the transform that repairs it, and
 records a match with its evidence. The declaration is made at turn one; the
@@ -168,8 +169,8 @@ Key properties, all enforced in software rather than in prompts:
 |---|---|
 | Identifiers, physical table names, storage paths, timestamps | allocated by the backend (`ds_N`, `col_N`, `art_N`, `op_N`, `ds_N_v1`), never accepted from the agent |
 | Name normalization / uniqueness | Unicode-aware `slugify` (`公募基金经理(新)` → `公募基金经理_新`, `Regional Sales` → `regional_sales`) + partial unique index on active dataset names; original names stay reachable as aliases |
-| Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too |
-| Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match |
+| Source provenance | every imported dataset points at an `Artifact` (file + content hash + optional managed copy) and a locator (SQLite table); documents and media are artifacts too; an import can carry evidence references from its rows and cells to a page, span, quote or time in an artifact (MADR 0021) |
+| Semantic layer | `attach_metadata` ingests a `knowledge.md`-style document into dataset/column descriptions and units, reporting every fact that did not match; declared units are followed through transforms and a conflict is reported (MADR 0019) |
 | Schema and type correctness | shared type rules in `core/ir/typing.py`, applied twice (resolver inference, validator re-check) |
 | Semantic types at import | text columns whose non-null values are all ISO dates/timestamps become `date`/`timestamp` (a source driver reports what it can store, not what the data means); an explicit `type` hint wins, and the refinement is a resolution note and part of the recorded IR |
 | Value rendering | a property of the exported file, not of the data: `export_result` takes a validated `format_spec`; transforms compute, they do not format |
@@ -481,9 +482,124 @@ This review is an interaction instruction, not an additional confirmation API
 or a backend model: a successful declaration records what the agent said,
 not whether it understood the request correctly.
 
+#### Value checks
+
+A contract can also hold the values of the columns it names (MADR 0020).
+`checks` takes `not_null` and an inclusive `min` and `max`, whose bounds are
+numbers for numeric columns or ISO dates and timestamps for temporal ones,
+on any name the contract uses, carried or organizing:
+
+```json
+{"columns": ["station", {"name": "celsius", "type": "float"}], "rows": {"one_per": ["station"]},
+ "order_by": ["read_at"],
+ "checks": [{"column": "celsius", "not_null": true, "min": -60, "max": 60},
+            {"column": "read_at", "min": "2025-06-01", "max": "2025-06-30"}]}
+```
+
+The same checks may be written as an object keyed by column
+(`{"celsius": {"range": [-60, 60]}}`) or inside a column declaration
+(`{"name": "celsius", "type": "float", "not_null": true}`); the contract
+stores them in one canonical form, and changing them on an open contract is
+an amendment that needs a reason. A declaration is refused, with the accepted
+shape as advice, when a check names a column the contract does not use,
+checks nothing, gives a bound that is neither a number nor an ISO date or
+timestamp, mixes the two, puts min above max, gives a range on a column
+declared `string` or `boolean`, or checks one column twice.
+
+`export_result` counts, before anything is written, the null values of each
+checked column and its non-null values outside the range. A null is unknown to
+a range and violates only `not_null`; a NaN is outside every range; an empty
+dataset passes every check, since `rows` already says whether the answer may
+be empty. Temporal values and bounds are compared in the finer type of the
+two: a date compared with a timestamp stands for its midnight, so a timestamp
+bound on a date column keeps its time (a noon lower bound excludes that day),
+and a date bound on a timestamp column is that day's midnight (a `max` of
+`2025-06-30` excludes 10:00 that day). A range on a column that is neither
+numeric nor temporal, or with bounds of the other kind, can never hold and is
+a mismatch too. A violation is
+a recoverable `CONTRACT_MISMATCH` whose problem carries the check, the null and
+out-of-range counts, the observed minimum and maximum, and up to five offending
+rows of the columns the contract names. It carries no repair: the backend
+never changes, drops or invents a value to pass a check. A passing export
+records every check with its counts in the contract evidence and the audit
+event. On a transform, `matches_contract` is said only after the checks are
+counted over the result as export counts them, and a result whose shape fits
+but whose values fail gets `contract_checks_failed` with the counts. A
+contract without checks behaves as before.
+
 This is the trust model of MADR 0008 made concrete: the declaration made
 fresh is the reference, the export attempted twenty turns later is the thing
 that gets checked, and the check runs outside the agent's context.
+
+### Evidence references
+
+Values an agent read from a document, an image or a video enter as rows
+(`import_dataset(rows=...)`), and the reading itself stays outside the
+backend (MADR 0009). `evidence` links those rows and cells to where they were
+read, so provenance can answer where a number came from and not only which
+operation produced it (MADR 0021):
+
+```json
+{"rows": [{"unit": "bakery", "year": 2024, "sold": 1240}, {"unit": "cafe", "year": 2024, "sold": 3015}],
+ "name": "coop_sales",
+ "evidence": [{"artifact": "annual_note.md", "rows": [0], "columns": ["sold"], "quote": "the bakery sold 1,240 loaves"},
+              {"artifact": "board_report.pdf", "rows": [1], "page": 3},
+              {"artifact": "open_day.mp4", "rows": [1], "columns": ["sold"], "time_s": [12.5, 14.0]}]}
+```
+
+A reference names an artifact by id, a file by its path, or an artifact by
+name. A reference written as a path (with a separator or `~`) to an existing
+file names that file: it is found or registered by its path and current
+content hash, so a changed file becomes a new version, another file with the
+same name is never taken for it, and a `content_hash` of an earlier registered
+version of that path resolves to that version. Anything else is matched
+against registered names, which may be relative paths (`doc/notes.md`); only a
+bare name falls back to the file name of a registered artifact (`notes.md`),
+and `content_hash` picks among versions that share a name. `attach_metadata`
+resolves its `source` the same way. `rows` are 0-based positions of the
+imported rows in the order the source is read (rows as written, file order,
+a SQLite table's own order), found by scan order rather than by any column
+name, and `columns` their names; leaving either out means all of them. The place is `page` (1 or more), `span` (`[start, end)` character
+offsets in the artifact's text), `quote`, `time_s` (seconds or `[start, end]`)
+and a free `note`; `content_hash`, when given, must be the registered hash.
+File imports take `evidence` too.
+
+The backend checks what it holds facts for and records the rest as given:
+
+- the artifact, its hash, the row positions and the column names are always
+  checked; a mismatch is refused with advice and no dataset is created (a file
+  import's row positions are checked right after its load, and the loaded
+  table is dropped);
+- in a markdown or text document whose file still has its registered hash, a
+  span must lie within the text, a quote given with a span must equal the text
+  there (whitespace collapsed, case kept), and a quote given alone must occur
+  in the text; it is located, and its span recorded, when it occurs exactly
+  once, and otherwise its number of occurrences is recorded;
+- a page, a time, and a span or quote in a PDF, an image or a video are
+  recorded as given; a page of audio, video or an image, and a time in
+  anything but audio, video or an unknown kind, are refused.
+
+Each stored reference lists what was `checked` and what is `unchecked`;
+neither says the agent read the evidence correctly. It keeps the artifact's
+hash at the time and a snapshot of the cells it names (`values`, one entry per
+referenced row, `{"row": 2, "cells": {"unit": "cafe", "sold": 3015}}`, so no
+imported column name can hide the position). References are written in the
+import's metadata transaction
+(MADR 0001), belong to the version the import created, and are part of the
+import's canonical IR and replay fingerprint when given; an import without
+evidence replays as before. Storage is one row per reference, linear in the
+cells it names.
+
+`get_provenance` returns an `evidence` list. For an imported dataset these are
+its references (`association: "recorded"`). For a materialized dataset they are
+the references of every upstream dataset: `association: "columns"` with
+`carried_as` (referenced column to this dataset's columns) when a column
+carries a referenced column unchanged, which holds through `select`, `filter`,
+`sort`, `limit`, `rename`, `join`, `semi_join` and `group_by` keys and across
+several materializations; `association: "lineage"` otherwise. A derived
+column, a measure and a `raw_query` output carry no reference, and row
+positions are not carried past the import: a filtered or joined dataset does
+not say which of its rows a reference covers.
 
 ### Failure semantics
 
@@ -600,15 +716,116 @@ explained, since sorting by a number there takes a derive and a select around
 it); a sort step that sets the output order and leaves rows tied on its keys
 says how many rows tie and where, since their order is open between runs and a
 preview and its materialization can differ (`sort_ties`; with a limit after the
-sort, only ties that reach the kept rows count); an export whose date or
+sort, only ties that reach the kept rows count); a join that dropped left rows
+matching nothing or multiplied left rows whose key matches several right rows
+says how many and which keys (`join_unmatched_rows`, `join_multiplied_rows`;
+see Join diagnostics below); an addition, subtraction or comparison of two
+operands whose declared units differ names the operands and their units
+(`unit_mismatch`; see Declared units below); an export whose date or
 timestamp pattern formatted nothing names the
 columns (`format_not_applied`, under Exporting an answer); and a result that
 already has, or mechanically reshapes to, the open output contract says so with
-the next call (`matches_contract`, `near_contract`). A `one_per` contract is
-said to match only after the result's distinct keys are counted, as
-`export_result` counts them. The backend teaches its own
+the next call (`matches_contract`, `near_contract`), or that its values fail
+the contract's value checks (`contract_checks_failed`). A `one_per` contract is
+said to match only after the result's distinct keys are counted, and a
+contract with value checks only after they are counted, as `export_result`
+counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
 turn budget, repeated previews) belongs to the agent harness.
+
+#### Join diagnostics
+
+A join can drop the left rows that match nothing and repeat the left rows whose
+key matches several right rows, and the two can cancel: two accounts joined to
+a table that holds the first one twice and the second not at all come back as
+two rows, both of the first account. A check on the row count before and after
+sees nothing. Every semantic `join` step therefore reports what it did to its
+inputs under `joins` on the successful response (and in the operation record),
+whether or not anything is wrong:
+
+```json
+"joins": [{"step": "transform.steps[0] (join)", "right": {"id": "ds_2", "name": "probe_right", "version": 1},
+           "how": "inner", "on": {"account": "account"},
+           "left_rows": 2, "matched_left_rows": 1, "unmatched_left_rows": 1, "null_key_left_rows": 0,
+           "left_keys": 2, "matched_left_keys": 1, "unmatched_left_keys": 1,
+           "left_keys_with_multiple_matches": 1, "rows_added_by_multiple_matches": 1,
+           "right_rows": 2, "unmatched_right_rows": 0, "rows_out": 2, "match_coverage": 0.5,
+           "unmatched_left_key_sample": [{"key": {"account": "B"}, "left_rows": 1}],
+           "multiple_match_sample": [{"key": {"account": "A"}, "left_rows": 1, "right_rows": 2}]}]
+```
+
+The left input is the relation the transform holds just before the join
+(after any filter written before it), the right input the joined dataset's
+version; both are grouped by the join keys, and each left group is counted
+once with the rows of every right group its keys equal under the join's own
+comparison. A key coerced for that comparison can equal several right groups
+(a float left key and two integer right keys that round to it), and those
+matches add up to one multiplied key. A left row with a null key is counted in
+`null_key_left_rows` and among the unmatched rows, and never sampled as a key.
+Keys are distinct non-null key values; `match_coverage` is the share of left
+rows that matched at least one right row; `rows_out` is what the step returns
+for its `how` (a left or full join keeps unmatched left rows, a right or full
+join unmatched right rows). Samples hold at most five keys each, the unmatched
+ones with the most left rows first and the multiplied ones with the most right
+matches first.
+
+These are facts, and the facts carry no verdict: a join meant to pair each
+left row with every match, or to keep only matched rows, is legitimate. Advice
+follows only when something changed the rows. `join_multiplied_rows` names the
+keys that matched several right rows and the rows that added, says when the
+row count equals the left input's only because as many unmatched rows were
+dropped, and names the choices (reduce the right side to one row per key
+first, `semi_join` when only whether a match exists matters, or keep the join).
+`join_unmatched_rows` names the unmatched left rows and keys, what happened to
+them for this `how`, the coverage, and, when fewer than half of the left rows
+matched, that the key columns may hold different identifiers on the two sides.
+Neither is rewritten.
+
+Diagnostics cover semantic `join` steps of every `how`. They do not cover
+`semi_join`, which never repeats a left row and drops unmatched ones by
+design; joins written inside `raw_query` SQL, which the backend does not
+decompose; or semantic steps after a `raw_query` first step, whose input exists
+only inside the sandbox run. Each diagnosed step costs one grouped query over
+its left input and the right dataset, plus one sample query, bounded by the
+sample size, only when some key is unmatched or multiplied. A diagnostic that
+fails is left out of the response and never fails the transform.
+`Backend(..., join_diagnostics=False)` and `agent-backend-mcp
+--no-join-diagnostics` (or `$AGENT_BACKEND_JOIN_DIAGNOSTICS=0`) turn them off.
+
+#### Declared units
+
+A column's unit is what was declared for it: an import `schema_hints` entry,
+`update_metadata`, or `attach_metadata` from a knowledge document. The backend
+never infers one, and it follows the declared units through a transform
+(`agent_backend/core/ir/units.py`, MADR 0019):
+
+- A column keeps its unit through `select`, `filter`, `sort`, `limit`,
+  `rename` and `semi_join`; a `join` brings each right column's own unit.
+- `sum`, `avg`, `min` and `max` keep their field's unit; `count` has none.
+- In an expression a column has its unit and a literal has none; `+` and `-`
+  give the unit both operands agree on and nothing when either is unknown;
+  `abs`, `round`, `floor`, `ceil`, negation and a cast to a number keep their
+  operand's unit; every other operation, `*`, `/` and `%` included, gives none.
+- A `raw_query`'s output columns have no unit.
+
+Two units are one unit when they are equal as written, ignoring case and
+spacing: `USD` and `usd` agree; `USD` and `EUR`, `元` and `万元`, and `%` and
+`percent` do not. Nothing is converted, neither currencies nor scale. An
+undeclared unit is unknown, not dimensionless, and never produces a signal.
+When an addition, subtraction or comparison in a `derive` or a `filter` meets
+two operands with declared units that differ, the successful response carries
+`unit_mismatch` advice naming the step, the operands and their units, and the
+result has no unit:
+
+```json
+{"kind": "unit_mismatch",
+ "explanation": "The derive of mixed_measure at transform.steps[0] adds sales (USD) and return_rate (percent). Their declared units differ, so the values combine two measures; mixed_measure has no unit. ..."}
+```
+
+The transform is not refused and its values do not change. A preview lists
+each result column's unit when it has one, and a materialized dataset stores
+the unit of each of its columns, derived ones included, so a later transform
+over it is checked as well.
 
 ## 2. Repository structure
 
@@ -621,7 +838,7 @@ agent_backend/
 │   ├── logging.py          structured stage events
 │   ├── naming.py           Unicode-aware identifier rules (normalize, slugify, tokens)
 │   ├── models/             Dataset, Column, Artifact, DatasetVersion, LineageEdge, Operation, AuditEvent
-│   ├── ir/                 canonical IR (pydantic), expression parser, shared type and raw_query rules
+│   ├── ir/                 canonical IR (pydantic), expression parser, shared type, raw_query and unit rules
 │   ├── knowledge/          heuristic parser for knowledge.md-style semantic-layer documents
 │   ├── resolver/           dataset / field / expression / transform resolvers
 │   ├── validation/         IR validator (independent re-check)
@@ -629,6 +846,7 @@ agent_backend/
 │   ├── execution/          IR → SQL compiler, executor
 │   ├── export/             export format specification (value rendering at the file boundary)
 │   ├── contracts/          output contracts: declared deliverable shape, checked at export
+│   ├── evidence/           evidence references: reading them, and checking spans and quotes in a text
 │   ├── recovery/           teach on refusal: structured advice and rewrites on refusals and silent failures
 │   ├── lineage/            lineage recording and traversal
 │   └── audit/              audit trail
@@ -729,6 +947,9 @@ uv run agent-backend-mcp --workspace ./workspace
 `--query-timeout SECONDS` (or `$AGENT_BACKEND_QUERY_TIMEOUT`) sets the
 deadline after which a `raw_query` statement is interrupted; without it there
 is none. The library takes the same as `Backend(..., query_timeout=...)`.
+`--no-join-diagnostics` (or `$AGENT_BACKEND_JOIN_DIAGNOSTICS=0`, or
+`Backend(..., join_diagnostics=False)`) stops counting what each semantic join
+does to its inputs (see Join diagnostics).
 
 Client configuration (Claude Desktop / Claude Code / Codex style; see
 `examples/mcp_config.json`):
@@ -891,6 +1112,21 @@ the canonical IR, the full execution plan and the generated SQL.
   renamed, misordered and mistyped columns and for row cardinality, with the
   repair transform carried in the error; evidence recorded on satisfaction;
   exports without a contract unchanged.
+- `test_contract_checks.py`: value checks on made-up grades and weather
+  readings — the three ways to declare them, every refused shape with its
+  advice, amendment, a passing export and its recorded counts, null and
+  out-of-range refusals with bounded offending rows and no file written, nulls
+  passing a range, NaN outside it, temporal and organizing columns, a range
+  that cannot hold its column, an empty dataset, contracts without checks,
+  transform advice that counts the checks, and storage migration.
+- `test_evidence.py`: evidence references on a made-up co-op annual note, a
+  PDF and a video the backend never reads — quotes located and spans checked,
+  a quote that occurs twice, every refused reference with its advice, hashes,
+  pages and times recorded as given, an unknown artifact, a file changed since
+  it was registered, a file import's row positions checked after the load, a
+  failed commit leaving no reference, the replay fingerprint, a reopened
+  workspace, and references carried through filter, sort, limit, rename,
+  group_by keys and joins but not through derives, measures or `raw_query`.
 - `test_export.py`: export to csv/parquet, overwrite and export-root refusals,
   and the format specification: half-up rounding on the shortest decimal form,
   trailing zeros, whole numbers keeping a decimal, date patterns, null text,
@@ -910,6 +1146,18 @@ the canonical IR, the full execution plan and the generated SQL.
   it has passed, the binding tests' deadline calibrated below what one binding
   of their statement takes on the fastest machine measured; the
   `--query-timeout` flag and the MCP surface.
+- `test_join_diagnostics.py`: the join facts and advice on made-up accounts,
+  shifts, stations and budgets — a join whose dropped and added rows cancel in
+  the row count, a unique fully matched join, null keys, left, right and full
+  joins, several keys, a legitimate many-to-many join, the left input after a
+  filter and between two joins, the scope (no `semi_join`, no `raw_query`),
+  rows unchanged with diagnostics off, a failing diagnostic, and the CLI flag.
+- `test_units.py`: declared units on a made-up shop ledger and household
+  budget — a currency added to a percentage, one unit written two ways, an
+  undeclared unit, multiplication and division, scale and currency
+  differences (nothing converted), a comparison in a filter, propagation
+  through rename, select, sort, limit, measures, functions, casts, joins and
+  materialized datasets, `raw_query` outputs, and units set after import.
 - `test_profile.py`: per-column non-null and distinct counts, finite numeric
   and temporal ranges, profile opt-out, wide datasets, and JSON-safe
   non-finite values.
@@ -929,8 +1177,11 @@ These capabilities are available in the current code:
 | Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, rows written inline (`import_dataset(rows=...)`), `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
 | Semantic transforms | `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`, `derive`, `join`, and `semi_join`; grouping without measures returns distinct groups, and compact transforms handle post-aggregate projection. |
 | [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
-| [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |
+| [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, not-null and range [value checks](#value-checks) with evidence, and reproducible value formatting. |
 | [Recovery advice](#failure-semantics) | Structured advice on refusals, mechanical tool-call rewrites, and advice for empty results or results matching the declared contract. |
+| [Declared units](#declared-units) | Units follow their columns through transforms and into materialized datasets; an addition, subtraction or comparison of different declared units is reported, never refused or converted. |
+| [Evidence references](#evidence-references) | Imports carry references from rows and cells to a page, span, quote or time in a registered artifact; the backend checks what it holds facts for, and `get_provenance` returns them with the columns that carry them. |
+| [Join diagnostics](#join-diagnostics) | Every semantic join reports matched, unmatched and multiplied left rows and keys with bounded samples; advice when a join dropped or multiplied rows; server-level opt-out. |
 | Dataset profiles | `describe_dataset` returns non-null/distinct counts and finite numeric/temporal ranges, with explicit opt-out and scan limits. |
 | Operation lifecycle | Materialization, publish, soft delete/restore, metadata updates, provenance, audit, failure compensation and idempotent replay. Calls sharing one `Backend` instance are serialized. |
 | Agent harness | Containerized OpenCode host plus the in-process control loop; optional timestamped video frames, offline speech transcription and importable observations. Perception stays in `agent_harness`, outside the backend and wheel. |
@@ -963,41 +1214,44 @@ are enough to name more of the errors that enter silently.
 
 1. **Silent-failure signals on successful responses.** The signals that
    exist, `value_not_found`, `numbers_compared_as_text`,
-   `numbers_sorted_as_text`, `sort_ties`, `format_not_applied` and
-   `matches_contract` / `near_contract`, come from one rule: the backend
-   reports its own data facts and never reads the task. The next signals are
-   the mistakes an agent makes without noticing
-   and the backend can see: a join that multiplies the left rows (the row
-   count before and after, and the duplicated key), a join key that matches a
-   small share of the left rows, a `one_per` key that is not unique in the
-   result, a measure that adds a column to one whose declared unit differs
-   (`attach_metadata` already records units), and a well-typed filter that
+   `numbers_sorted_as_text`, `sort_ties`, `join_unmatched_rows`,
+   `join_multiplied_rows` (with the `joins` facts), `unit_mismatch`,
+   `format_not_applied` and `matches_contract` / `near_contract`, come from
+   one rule: the backend reports its own data facts and never reads the task.
+   The next signals are the mistakes an agent makes without noticing
+   and the backend can see: a `one_per` key that is not unique in the
+   result, and a well-typed filter that
    keeps nothing although its literal does occur in the column. Each is a
    fact about the workspace, attached to a successful response, never a
    judgement about the task.
 2. **Contracts from shape to values.** `declare_output` records what the
-   answer carries and what it is organized by. The same declaration can carry
-   checks about values, written fresh while the requirement is in front of the
-   agent and verified at export by the machinery that checks the shape: a
-   column that is never null, a value inside a range, a total that reconciles
-   with a source column, a row count that relates to a source in a stated way.
-   A failed check is a `CONTRACT_MISMATCH` with the evidence. The backend
-   still never reads the task; it holds the agent to what the agent wrote
-   down.
+   answer carries, what it is organized by, and now checks on its values: a
+   column that is never null and a value inside a range are verified at
+   export, and a failed check is a `CONTRACT_MISMATCH` with the evidence
+   (MADR 0020). What remains are checks relative to a source, bound to a
+   managed dataset and version rather than to copied values: a total that
+   reconciles with a source column, and a row count or key coverage that
+   relates to a source in a stated way. The backend still never reads the
+   task; it holds the agent to what the agent wrote down.
 3. **Semantic contracts from the human side.** The semantic layer is the
    human's declaration, as the output contract is the agent's.
    `attach_metadata` already ingests descriptions and units from a knowledge
    document. Metric definitions (`revenue := sum(amount)`) would make it a
    contract: the agent references `revenue` and the backend expands it, and
    an aggregate that computes revenue differently is refused with the
-   definition as advice. Units used by the type rules and column-level
-   lineage belong to the same layer.
+   definition as advice. Declared units are already followed and a conflict
+   reported (MADR 0019); whether such a declaration should turn a unit
+   conflict into a refusal, and column-level lineage, belong to the same
+   layer.
 4. **Provenance to the value.** `get_provenance` returns the operation and
-   the inputs that produced a dataset. Column-level lineage, reads of an
-   earlier version (`describe_dataset(version=…)`) and a downstream impact
-   report before a delete or replace lead to the question a reviewer asks,
-   how this number came about, answered as the intent, the step and the
-   source rows it came from.
+   the inputs that produced a dataset, and the evidence references that reach
+   it: where imported rows and cells were read, and which columns carry them
+   unchanged (MADR 0021). Row-level identity through transforms (which rows of
+   a filtered or joined result a reference covers), reads of an earlier
+   version (`describe_dataset(version=…)`) and a downstream impact report
+   before a delete or replace lead to the question a reviewer asks, how this
+   number came about, answered as the intent, the step and the source rows it
+   came from.
 5. **Resume by reference.** The agent's context is not a store (MADR 0008),
    so a fresh agent, or the same one after its context was reset, should be
    able to ask the workspace what is declared, what is done and what is still

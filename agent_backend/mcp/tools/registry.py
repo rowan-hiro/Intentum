@@ -66,7 +66,14 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "result. Instead of `path`, `rows` (a list of objects, one per row, values text, numbers, "
                              "booleans or null) with a `name` enters values you read or computed outside the backend, "
                              "from a document, an image, a video or your own reasoning, as a dataset with the same "
-                             "provenance as a file; a literal answer is entered this way, not written into a query.")
+                             "provenance as a file; a literal answer is entered this way, not written into a query. "
+                             "Optional `evidence` links the imported rows and cells to where they were read: a list "
+                             "of {\"artifact\": id, name or file path, \"rows\": [0-based positions], "
+                             "\"columns\": [...], \"page\": n, \"span\": [start, end], \"quote\": text, "
+                             "\"time_s\": seconds or [start, end], \"note\": text, \"content_hash\": sha256}. "
+                             "The backend checks what it holds (the artifact and its hash, rows, columns, and a span "
+                             "or quote against a markdown or text document) and records the rest as given, saying "
+                             "which is which; get_provenance returns the references.")
     def import_dataset(
         path: str | None = None,
         rows: list[dict[str, Any]] | None = None,
@@ -75,10 +82,12 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
         table: str | None = None,
         schema_hints: dict[str, Any] | None = None,
         aliases: list[str] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         return backend.import_dataset(path, rows=rows, name=name, description=description, table=table,
-                                      schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key)
+                                      schema_hints=schema_hints, aliases=aliases, evidence=evidence,
+                                      idempotency_key=idempotency_key)
 
     @server.tool(name="import_workspace", annotations=annotations("write"),
                  description="Import a whole directory (a task workspace) in one operation: every csv/json/parquet file "
@@ -111,7 +120,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "file, as long as the dataset you export carries it. The names are written to the "
                              "file as you spell them here: a dataset column whose name differs only in case or "
                              "separators (firstproduct for FirstProduct) stands for the declared one, so no rename "
-                             "is needed for spelling. Optional `description`. The "
+                             "is needed for spelling. Optional `checks` hold the answer's values to what the "
+                             "requirement states: [{\"column\": \"rate\", \"not_null\": true, \"min\": 0, "
+                             "\"max\": 100}] (or {\"rate\": {...}}, or the same keys inside a column object) on "
+                             "columns the contract names; bounds are inclusive numbers, or ISO dates and timestamps "
+                             "for temporal columns; a null is not outside a range, so add not_null to forbid it. "
+                             "export_result counts violations and refuses them with the offending rows; the "
+                             "backend never changes a value. Optional `description`. The "
                              "backend keeps the contract and export_result refuses a dataset that does not match "
                              "it, so you cannot drift away from it later. One contract is current per workspace; "
                              "declaring a different shape while one is open needs `reason`, which is recorded as "
@@ -122,8 +137,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "reason. Re-declaring the same shape changes nothing.")
     def declare_output(columns: list[Any] | dict[str, Any] | str, rows: str | int | dict[str, Any] | None = None,
                        order_by: list[Any] | dict[str, Any] | str | None = None,
-                       description: str | None = None, reason: str | None = None) -> dict[str, Any]:
-        return backend.declare_output(columns, rows=rows, order_by=order_by, description=description, reason=reason)
+                       description: str | None = None, reason: str | None = None,
+                       checks: list[Any] | dict[str, Any] | None = None) -> dict[str, Any]:
+        return backend.declare_output(columns, rows=rows, order_by=order_by, description=description, reason=reason,
+                                      checks=checks)
 
     # ``source`` and ``transform`` are typed loosely on purpose: a JSON string that does not parse, or a relation
     # written where a name belongs, must reach the backend, which refuses it with advice (MADR 0010). Typed
@@ -169,7 +186,12 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "says where a filtered value does occur; a text column of numbers ordered against a quoted "
                              "number, which compares as text, is named with the comparison rewritten to try_cast; a sort "
                              "by such a column, which sorts '108' before '12', is named too; rows a sort leaves tied, "
-                             "whose order is open between runs, are counted; a result "
+                             "whose order is open between runs, are counted; every join step reports under `joins` "
+                             "its matched and unmatched left rows and keys and the left keys matching several right "
+                             "rows, with samples, and advice names a join that dropped or multiplied rows (a join "
+                             "meant to do so needs no change); adding, subtracting or comparing columns whose declared "
+                             "units differ (USD and percent; units are compared as written, nothing is converted) "
+                             "is named as unit_mismatch, and result columns list the unit they carry; a result "
                              "with the declared output shape says so.")
     def transform_dataset(
         source: str | dict[str, Any] | list[Any],
@@ -208,7 +230,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "file another system expects. The file carries exactly the dataset's columns, in "
                              "order: shape the dataset first (select/rename) so it has exactly the columns the "
                              "answer asks for. When an output contract was declared with declare_output, the "
-                             "dataset is checked against it (columns, order, types, row cardinality) before "
+                             "dataset is checked against it (columns, order, types, row cardinality, and any "
+                             "declared value checks, whose failures come with the offending rows) before "
                              "anything is written, the header is written as the contract spells it, and a mismatch "
                              "is returned as CONTRACT_MISMATCH with the "
                              "transform that would repair it; a matching export closes the contract with the "
@@ -258,7 +281,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
 
     @server.tool(name="get_provenance", annotations=annotations("read"),
                  description="Explain where a dataset came from: the operation that produced it, the canonical "
-                             "intent that was executed, input datasets, source artifact, upstream lineage and audit trail.")
+                             "intent that was executed, input datasets, source artifact, upstream lineage, audit "
+                             "trail, and the evidence references that reach it: those recorded at its import, and "
+                             "those of upstream datasets, marked with the columns it carries unchanged from a "
+                             "referenced column (carried_as) or as reaching it through lineage only.")
     def get_provenance(dataset: str) -> dict[str, Any]:
         return backend.get_provenance(dataset)
 

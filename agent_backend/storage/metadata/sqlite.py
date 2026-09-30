@@ -15,9 +15,11 @@ from ...core.models.entities import (
     AuditEvent,
     Column,
     ContractColumn,
+    ContractCheck,
     ContractOrder,
     ContractStatus,
     Dataset,
+    EvidenceRef,
     DatasetStatus,
     DatasetVersion,
     LineageEdge,
@@ -134,6 +136,7 @@ CREATE TABLE IF NOT EXISTS output_contracts (
     rows TEXT,
     row_keys_json TEXT NOT NULL DEFAULT '[]',
     order_by_json TEXT NOT NULL DEFAULT '[]',
+    checks_json TEXT NOT NULL DEFAULT '[]',
     description TEXT NOT NULL DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 1,
     operation_id TEXT NOT NULL,
@@ -143,6 +146,23 @@ CREATE TABLE IF NOT EXISTS output_contracts (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evidence_refs (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    dataset_version INTEGER NOT NULL,
+    operation_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    rows_json TEXT,
+    columns_json TEXT,
+    locator_json TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT '',
+    checked_json TEXT NOT NULL DEFAULT '[]',
+    unchecked_json TEXT NOT NULL DEFAULT '[]',
+    values_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_evidence_dataset ON evidence_refs(dataset_id);
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
     operation_id TEXT NOT NULL,
@@ -158,6 +178,7 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("columns", "unit", "TEXT NOT NULL DEFAULT ''"),
     ("operations", "parent_operation_id", "TEXT"),
     ("output_contracts", "order_by_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("output_contracts", "checks_json", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 
@@ -604,6 +625,7 @@ class SqliteMetadataStore:
             row_keys=json.loads(r["row_keys_json"]),
             order_by=[ContractOrder(name=o["column"], descending=bool(o.get("descending")))
                       for o in json.loads(r["order_by_json"] or "[]")],
+            checks=[ContractCheck(**c) for c in json.loads(r["checks_json"] or "[]")],
             description=r["description"],
             revision=int(r["revision"]),
             operation_id=r["operation_id"],
@@ -624,6 +646,7 @@ class SqliteMetadataStore:
             str(c.rows) if c.rows else None,
             json.dumps(c.row_keys, ensure_ascii=False),
             json.dumps([{"column": o.name, "descending": o.descending} for o in c.order_by], ensure_ascii=False),
+            json.dumps([check.model_dump(exclude_defaults=True) for check in c.checks], ensure_ascii=False),
             c.description,
             c.revision,
             c.operation_id,
@@ -636,9 +659,9 @@ class SqliteMetadataStore:
 
     def insert_contract(self, contract: OutputContract) -> None:
         self.conn.execute(
-            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, order_by_json, description, "
-            "revision, operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, order_by_json, checks_json, "
+            "description, revision, operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             self._contract_values(contract),
         )
 
@@ -646,7 +669,7 @@ class SqliteMetadataStore:
         values = self._contract_values(contract)
         self.conn.execute(
             "UPDATE output_contracts SET status=?, columns_json=?, rows=?, row_keys_json=?, order_by_json=?, "
-            "description=?, revision=?, operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, "
+            "checks_json=?, description=?, revision=?, operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, "
             "created_at=?, updated_at=? WHERE id=?",
             values[1:] + (contract.id,),
         )
@@ -664,6 +687,37 @@ class SqliteMetadataStore:
             "SELECT * FROM output_contracts ORDER BY created_at DESC, CAST(substr(id, 4) AS INTEGER) DESC LIMIT ?", (limit,)
         ).fetchall()
         return [self._row_to_contract(r) for r in rows]
+
+    # -- evidence references ---------------------------------------------
+    def insert_evidence(self, refs: list[EvidenceRef]) -> None:
+        def dump(value: Any) -> str | None:
+            return None if value is None else json.dumps(value, ensure_ascii=False)
+
+        self.conn.executemany(
+            "INSERT INTO evidence_refs(id, dataset_id, dataset_version, operation_id, artifact_id, artifact_hash, "
+            "rows_json, columns_json, locator_json, note, checked_json, unchecked_json, values_json, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(r.id, r.dataset_id, r.dataset_version, r.operation_id, r.artifact_id, r.artifact_hash, dump(r.rows),
+              dump(r.columns), dump(r.locator), r.note, dump(r.checked), dump(r.unchecked), dump(r.values),
+              _iso(r.created_at)) for r in refs],
+        )
+
+    def list_evidence(self, dataset_id: str) -> list[EvidenceRef]:
+        rows = self.conn.execute(
+            "SELECT * FROM evidence_refs WHERE dataset_id = ? ORDER BY CAST(substr(id, 4) AS INTEGER)", (dataset_id,)
+        ).fetchall()
+        return [
+            EvidenceRef(
+                id=r["id"], dataset_id=r["dataset_id"], dataset_version=int(r["dataset_version"]),
+                operation_id=r["operation_id"], artifact_id=r["artifact_id"], artifact_hash=r["artifact_hash"],
+                rows=json.loads(r["rows_json"]) if r["rows_json"] is not None else None,
+                columns=json.loads(r["columns_json"]) if r["columns_json"] is not None else None,
+                locator=json.loads(r["locator_json"]), note=r["note"], checked=json.loads(r["checked_json"]),
+                unchecked=json.loads(r["unchecked_json"]), values=json.loads(r["values_json"]),
+                created_at=_dt(r["created_at"]),
+            )
+            for r in rows
+        ]
 
     # -- idempotency -----------------------------------------------------
     def get_idempotent_response(self, key: str) -> dict[str, Any] | None:

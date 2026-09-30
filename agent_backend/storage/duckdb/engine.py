@@ -97,6 +97,10 @@ class AnalyticsEngine(Protocol):
     def column_contains(self, table: str, column: str, value: Any) -> bool: ...
     def compare_text_as_number(self, table: str, column: str, op: str, text: str) -> tuple[int, int, str | None]: ...
     def compare_text_order(self, table: str, column: str) -> tuple[int, int, tuple[str, str] | None]: ...
+    def check_values(self, sql: str, column: str, *, not_null: bool = False, low: Any = None, high: Any = None,
+                     cast: str | None = None, nan: bool = False, context: list[str] | None = None,
+                     sample: int = 0) -> tuple[int, int, Any, Any, list[tuple[Any, ...]]]: ...
+    def rows_at(self, table: str, positions: list[int], columns: list[str]) -> list[tuple[Any, ...]]: ...
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]: ...
     def profile_columns(self, table: str, columns: list[str], *, ranged: list[str]) -> dict[str, dict[str, Any]]: ...
     def read_table(self, table: str, *, columns: list[str] | None = None,
@@ -112,6 +116,9 @@ class DuckDBEngine:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self.conn = duckdb.connect(str(self.path))
+        # Scans return rows in the order they were inserted, which is the source's order after an import: previews,
+        # exports and evidence row positions (rows_at) rely on it. It is DuckDB's default, stated here.
+        self.conn.execute("SET preserve_insertion_order = true")
         self._sqlite_loaded = False
 
     # -- readers ---------------------------------------------------------
@@ -376,6 +383,67 @@ class DuckDBEngine:
         ).fetchone()
         example = (str(row[2]), str(row[3])) if row and row[2] is not None else None
         return int(row[0] or 0), int(row[1] or 0), example
+
+    def check_values(self, sql: str, column: str, *, not_null: bool = False, low: Any = None, high: Any = None,
+                     cast: str | None = None, nan: bool = False, context: list[str] | None = None,
+                     sample: int = 0) -> tuple[int, int, Any, Any, list[tuple[Any, ...]]]:
+        """Hold ``column`` of the rows ``sql`` returns to a value check (an output contract's, MADR 0020).
+
+        Returns how many values are null, how many non-null values fall outside [low, high] (bounds are bound as
+        parameters; values and bounds are compared as ``cast`` when given; with ``nan`` a NaN is outside every
+        range), the smallest and
+        largest value, and up to ``sample`` violating rows projected to ``context``. A null is a violation only
+        under ``not_null``. One scan, plus one for the sample when something violates.
+        """
+        ident = quote_ident(column)
+        bound = f"CAST(? AS {cast})" if cast else "?"
+        # Compared in the cast type, so a date column meets a timestamp bound as its midnight, not the bound as a date.
+        value = f"CAST({ident} AS {cast})" if cast else ident
+        terms: list[str] = []
+        params: list[Any] = []
+        if low is not None:
+            terms.append(f"{value} < {bound}")
+            params.append(low)
+        if high is not None:
+            terms.append(f"{value} > {bound}")
+            params.append(high)
+        if nan and terms:
+            terms.append(f"isnan({ident})")
+        outside = f"({ident} IS NOT NULL AND ({' OR '.join(terms)}))" if terms else "FALSE"
+        try:
+            row = self.conn.execute(
+                f"SELECT count(*) FILTER (WHERE {ident} IS NULL), count(*) FILTER (WHERE {outside}), "
+                f"min({ident}), max({ident}) FROM ({sql}) AS checked", params,
+            ).fetchone()
+            nulls, out = int(row[0] or 0), int(row[1] or 0)
+            rows: list[tuple[Any, ...]] = []
+            if sample and (out or (not_null and nulls)):
+                violating = f"({ident} IS NULL OR {outside})" if not_null else outside
+                projection = ", ".join(quote_ident(c) for c in (context or [column]))
+                rows = self.conn.execute(
+                    f"SELECT {projection} FROM ({sql}) AS checked WHERE {violating} LIMIT {int(sample)}", params,
+                ).fetchall()
+        except duckdb.Error as exc:
+            raise ExecutionFailedError(f"Execution failed: {exc}", details={"sql": sql}) from exc
+        return nulls, out, row[2], row[3], rows
+
+    def rows_at(self, table: str, positions: list[int], columns: list[str]) -> list[tuple[Any, ...]]:
+        """The rows at 0-based ``positions`` of a table as it was loaded, as (position, *columns), in position order.
+
+        A scan without ORDER BY returns a table's rows in insertion order (DuckDB's preserve_insertion_order, on by
+        default), and a table created from a source was inserted in the order the source was read, so the row at
+        OFFSET n is the source's row n. No name is involved: the rowid pseudo-column would be shadowed by an
+        imported column named rowid.
+        """
+        if not positions:
+            return []
+        projection = ", ".join(quote_ident(c) for c in columns)
+        found: list[tuple[Any, ...]] = []
+        for position in sorted(set(int(p) for p in positions)):
+            _, rows = self.query(f"SELECT {projection} FROM {quote_ident(table)} LIMIT 1 OFFSET {position}")
+            if rows:
+                found.append((position, *rows[0]))
+        return found
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)

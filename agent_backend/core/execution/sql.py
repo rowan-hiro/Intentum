@@ -105,6 +105,54 @@ class SqlCompiler:
         return (prefix + ",\n" + ",\n".join(ctes)
                 + f"\nSELECT {listed}, n, count(*) OVER (), sum(n) OVER () FROM tied{kept} ORDER BY n DESC, {listed} LIMIT 1")
 
+    def compile_join_facts(self, ir: TransformIR, physical_inputs: dict[str, str], position: int,
+                           sample: int = 5) -> tuple[str, str]:
+        """Two statements describing what the join at ``position`` does to its inputs.
+
+        The left input is the relation the transform holds just before the join; the right is the joined
+        dataset's version. Both are grouped by the join keys. Each left group is then counted once, with the rows
+        of every right group its keys equal under the join's own comparison: a key coerced for the comparison can
+        equal several right groups (a float left key and two integer right keys that round to it), and those
+        matches add up. A null key never matches. The first statement returns one row of counts: left rows, left
+        rows with a null key, unmatched left rows, distinct non-null left keys, matched left keys, left keys
+        matching several right rows, the rows those extra matches add, matched row pairs, right rows and
+        unmatched right rows. The second returns at most ``sample`` unmatched left keys and ``sample`` left keys
+        with several right matches: a tag, the key values, the left rows and the right rows of each.
+        """
+        step = ir.steps[position]
+        if not isinstance(step, JoinStep) or (ir.steps and isinstance(ir.steps[0], RawQueryStep)):
+            raise TypeError("join facts are compiled for a semantic join step of a transform without a raw_query")
+        chain = self.compile(ir.model_copy(update={"steps": ir.steps[:position]}), physical_inputs)
+        prefix, _, _ = chain.rpartition("\nSELECT * FROM ")
+        keys = [f"k{i}" for i in range(len(step.on))]
+        left = ", ".join(f"l.{q(c.left.name)} AS {k}" for c, k in zip(step.on, keys))
+        right = ", ".join(f"r.{q(c.right.name)} AS {k}" for c, k in zip(step.on, keys))
+        listed = ", ".join(keys)
+        grouped = ", ".join(f"jl.{k}" for k in keys)
+        null = " OR ".join(f"jl.{k} IS NULL" for k in keys)
+        on = " AND ".join(f"jl.{k} = jr.{k}" for k in keys)
+        ctes = (prefix + ",\n"
+                + f"jl AS (SELECT {left}, count(*) AS n FROM s{position} AS l GROUP BY {listed}),\n"
+                + f"jr AS (SELECT {right}, count(*) AS n FROM {q(physical_inputs[step.right.dataset_id])} AS r "
+                  f"GROUP BY {listed}),\n"
+                + f"jm AS (SELECT {', '.join(f'jl.{k} AS {k}' for k in keys)}, jl.n AS ln, sum(jr.n) AS rn, "
+                  f"({null}) AS lnull FROM jl LEFT JOIN jr ON {on} GROUP BY {grouped}, jl.n),\n"
+                + f"ju AS (SELECT jr.n FROM jr WHERE NOT EXISTS (SELECT 1 FROM jl WHERE {on}))")
+        counts = (ctes + "\nSELECT coalesce(sum(ln), 0), coalesce(sum(ln) FILTER (WHERE lnull), 0), "
+                  "coalesce(sum(ln) FILTER (WHERE rn IS NULL), 0), count(*) FILTER (WHERE NOT lnull), "
+                  "count(*) FILTER (WHERE rn IS NOT NULL), count(*) FILTER (WHERE rn > 1), "
+                  "coalesce(sum(ln * (rn - 1)) FILTER (WHERE rn > 1), 0), "
+                  "coalesce(sum(ln * rn) FILTER (WHERE rn IS NOT NULL), 0), "
+                  "(SELECT coalesce(sum(n), 0) FROM jr), (SELECT coalesce(sum(n), 0) FROM ju) FROM jm")
+        samples = (ctes + ",\n"
+                   + f"unmatched AS (SELECT 'unmatched' AS tag, {listed}, ln, rn FROM jm WHERE NOT lnull "
+                     f"AND rn IS NULL ORDER BY ln DESC, {listed} LIMIT {int(sample)}),\n"
+                   + f"multiple AS (SELECT 'multiple' AS tag, {listed}, ln, rn FROM jm WHERE rn > 1 "
+                     f"ORDER BY rn DESC, {listed} LIMIT {int(sample)})\n"
+                   + f"SELECT * FROM (SELECT * FROM unmatched UNION ALL SELECT * FROM multiple) "
+                     f"ORDER BY tag DESC, CASE WHEN tag = 'unmatched' THEN ln ELSE rn END DESC, {listed}")
+        return counts, samples
+
     def _step_sql(self, step, prev: str, physical_inputs: dict[str, str]) -> str:
         if isinstance(step, SelectStep):
             return f"SELECT {', '.join(q(f.name) for f in step.fields)} FROM {prev}"

@@ -28,18 +28,26 @@ from typing import Any, Callable, Iterator
 
 from pydantic import ValidationError
 
-from ..storage.duckdb.engine import SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource, physical_to_logical
+from ..storage.duckdb.engine import (SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource, physical_to_logical,
+                                     quote_ident)
 from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
 from ..storage.metadata.sqlite import SqliteMetadataStore
-from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_sort_ties,
-                       advise_text_comparison, advise_text_sort, advise_unapplied_format, call as tool_call)
+from .recovery import (Advice, advise_contract, advise_empty_result, advise_error, advise_joins, advise_sort_ties,
+                       advise_text_comparison, advise_text_sort, advise_unapplied_format, advise_units,
+                       call as tool_call)
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
+    BoundCheck,
+    ContractProblem,
     ContractSpec,
+    bind_checks,
+    check_problem,
+    check_summary,
     contract_summary,
+    describe_check,
     match_columns,
     organizing_keys,
     parse_contract,
@@ -48,6 +56,7 @@ from .contracts import (
     verify_columns,
     verify_rows,
 )
+from .evidence import EvidenceSpec, check_kind, check_text, parse_evidence
 from .errors import (
     AmbiguousReferenceError,
     BackendError,
@@ -66,6 +75,7 @@ from .export import ExportFormat, ValueRenderer, write_formatted_csv
 from .ir import (AggregateStep, DeriveStep, FilterStep, ImportIR, JoinStep, LimitStep, OutputMode, RawQueryStep, RenameStep,
                  SelectStep, SemiJoinStep, SortStep, TransformIR)
 from .ir.raw_query import QueryShape
+from .ir.units import UnitReport, infer_units
 from .knowledge import ColumnFact, KnowledgeDocument, TableFact, parse_knowledge_markdown
 from .lineage import LineageService
 from .logging import log_event
@@ -78,6 +88,7 @@ from .models.entities import (
     Dataset,
     DatasetStatus,
     DatasetVersion,
+    EvidenceRef,
     LogicalType,
     Operation,
     OperationKind,
@@ -266,6 +277,7 @@ class _ImportSpec:
     hints: dict[str, dict[str, Any]] = dc_field(default_factory=dict)
     aliases: list[str] = dc_field(default_factory=list)
     parent_operation_id: str | None = None
+    evidence: list["_Evidence"] = dc_field(default_factory=list)
 
     @property
     def locator(self) -> str | None:
@@ -273,6 +285,21 @@ class _ImportSpec:
 
     def describe(self) -> str:
         return f"{self.artifact.name}::{self.locator}" if self.locator else self.artifact.name
+
+
+@dataclass
+class _Evidence:
+    """An evidence reference whose artifact is resolved and whose place is checked as far as the backend can."""
+
+    spec: EvidenceSpec
+    artifact: Artifact
+    locator: dict[str, Any]
+    checked: list[str]
+    unchecked: list[str]
+
+    def canonical(self) -> dict[str, Any]:
+        return {"artifact_id": self.artifact.id, "content_hash": self.artifact.content_hash, "rows": self.spec.rows,
+                "columns": self.spec.columns, "locator": self.locator, "note": self.spec.note}
 
 
 class Backend:
@@ -286,6 +313,7 @@ class Backend:
         engine: AnalyticsEngine | None = None,
         export_root: str | Path | None = None,
         query_timeout: float | None = None,
+        join_diagnostics: bool = True,
     ) -> None:
         self._lock = threading.RLock()  # one semantic operation at a time; see semantic_operation
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
@@ -296,6 +324,9 @@ class Backend:
                                           or query_timeout <= 0):
             raise ValueError(f"query_timeout must be a positive number of seconds or None, got {query_timeout!r}")
         self.query_timeout = float(query_timeout) if query_timeout is not None else None
+        # Count what each semantic join step does to its inputs: one grouped query per join step, plus one bounded
+        # sample query when rows are unmatched or multiplied. False leaves joins undiagnosed.
+        self.join_diagnostics = bool(join_diagnostics)
         self.clock = clock or _utcnow
         self.policy = policy or AllowAllPolicy()
         self.store = store or SqliteMetadataStore(self.workspace.metadata_path)
@@ -467,6 +498,9 @@ class Backend:
         }
         if op and op.canonical_ir:
             body["canonical_intent"] = op.canonical_ir
+        evidence = self._evidence_for(ds)
+        if evidence:
+            body["evidence"] = evidence
         return self._with_notes(body, notes)
 
     @semantic_operation("get_output_contract")
@@ -515,13 +549,14 @@ class Backend:
         table: str | None = None,
         schema_hints: dict[str, Any] | None = None,
         aliases: list[str] | None = None,
+        evidence: Any = None,
         idempotency_key: str | None = None,
         principal: str | None = None,
     ) -> dict[str, Any]:
         if rows is not None or path is None:
             return self._import_rows(path, rows, name=name, description=description, format=format, table=table,
-                                     schema_hints=schema_hints, aliases=aliases, idempotency_key=idempotency_key,
-                                     principal=principal)
+                                     schema_hints=schema_hints, aliases=aliases, evidence=evidence,
+                                     idempotency_key=idempotency_key, principal=principal)
         source = Path(str(path)).expanduser()
         if not source.is_file():
             raise NotFoundError(f"File {path!r} does not exist or is not a file.", field="path", recoverable=True,
@@ -567,14 +602,16 @@ class Backend:
             description=description or "",
             hints=hints,
             aliases=[str(a) for a in (aliases or [])],
+            evidence=self._resolve_evidence(evidence, row_count=None),
         )
         intent = _jsonable({"path": path, "name": name, "description": description, "format": format, "table": table,
-                            "schema_hints": schema_hints, "aliases": aliases})
+                            "schema_hints": schema_hints, "aliases": aliases, "evidence": evidence})
         return self._import_source(spec, intent, idempotency_key, principal)
 
     def _import_rows(self, path: str | None, rows: Any, *, name: str | None, description: str | None,
                      format: str | None, table: str | None, schema_hints: dict[str, Any] | None,
-                     aliases: list[str] | None, idempotency_key: str | None, principal: str | None) -> dict[str, Any]:
+                     aliases: list[str] | None, evidence: Any, idempotency_key: str | None,
+                     principal: str | None) -> dict[str, Any]:
         """Rows the agent read or computed outside the backend, entered as a dataset (MADR 0008, 0009).
 
         They are the agent's fresh output, accepted as given; kept as a content-addressed JSON source, they are
@@ -593,6 +630,7 @@ class Backend:
             raise InvalidIntentError("format and table describe a file; rows written inline take neither.",
                                      field="format" if format not in (None, "json") else "table")
         records = _inline_records(rows)
+        resolved = self._resolve_evidence(evidence, row_count=len(records))
         artifact = self._register_artifact(self.workspace.write_rows(records), ArtifactKind.JSON,
                                            name="rows written inline", metadata={"origin": "inline_rows"})
         spec = _ImportSpec(
@@ -602,10 +640,11 @@ class Backend:
             description=description or "",
             hints=self._normalize_hints(schema_hints),
             aliases=[str(a) for a in (aliases or [])],
+            evidence=resolved,
         )
         intent = _jsonable({"rows": {"count": len(records), "columns": list(records[0]), "artifact_id": artifact.id},
                             "name": name, "description": description, "schema_hints": schema_hints,
-                            "aliases": aliases})
+                            "aliases": aliases, "evidence": evidence})
         return self._import_source(spec, intent, idempotency_key, principal)
 
     @semantic_operation("import_workspace")
@@ -751,6 +790,7 @@ class Backend:
         ir = ImportIR(
             source_path=spec.artifact.path, format=spec.source.format, locator=spec.locator, name=spec.name,
             description=spec.description, content_hash=spec.artifact.content_hash, column_hints=spec.hints,
+            evidence=[e.canonical() for e in spec.evidence],
         )
         key = idempotency_key or f"import:{ir.logical_fingerprint()}"
         replay = self._replay(key, ir.logical_fingerprint())
@@ -774,6 +814,7 @@ class Backend:
             if not physical_columns:
                 raise InvalidSchemaError(f"{spec.describe()} has no columns.", field="path")
             self._check_column_names([c for c, _ in physical_columns])
+            evidence_columns = self._evidence_columns(spec.evidence, [c for c, _ in physical_columns])
             dataset_id = self.store.allocate_id("ds")
             table = f"{dataset_id}_v1"
             plan = ExecutionPlan(
@@ -803,6 +844,8 @@ class Backend:
                     op.execution_plan = plan.to_dict()
                     log_event("ir.canonical", operation_id=op.id, refined_types=refined)
                 log_event("execution.completed", operation_id=op.id, table=table, rows=row_count)
+                snapshots = self._evidence_values(spec.evidence, evidence_columns, table, row_count,
+                                                  [c for c, _ in physical_columns])
                 now = self.clock()
                 with self.store.transaction():
                     columns = self._build_columns(dataset_id, physical_columns, spec.hints)
@@ -836,6 +879,19 @@ class Backend:
                                                "artifact_id": spec.artifact.id, "locator": spec.locator})
                     self.audit.record(event_type="version.created", entity_type="dataset", entity_id=dataset_id,
                                       operation_id=op.id, now=now, actor=principal, details={"version": 1, "table": table})
+                    refs = [
+                        EvidenceRef(id=self.store.allocate_id("ev"), dataset_id=dataset_id, dataset_version=1,
+                                    operation_id=op.id, artifact_id=e.artifact.id, artifact_hash=e.artifact.content_hash,
+                                    rows=e.spec.rows, columns=names, locator=e.locator, note=e.spec.note,
+                                    checked=e.checked, unchecked=e.unchecked, values=values, created_at=now)
+                        for e, names, values in zip(spec.evidence, evidence_columns, snapshots)
+                    ]
+                    if refs:
+                        self.store.insert_evidence(refs)
+                        self.audit.record(event_type="evidence.recorded", entity_type="dataset", entity_id=dataset_id,
+                                          operation_id=op.id, now=now, actor=principal,
+                                          details={"references": [r.id for r in refs],
+                                                   "artifacts": sorted({r.artifact_id for r in refs})})
                     response = {
                         "status": "success",
                         "operation_id": op.id,
@@ -844,8 +900,11 @@ class Backend:
                         "schema": [self._column_summary(c) for c in columns],
                         "source": {"artifact_id": spec.artifact.id, "name": spec.artifact.name,
                                    "kind": str(spec.artifact.kind), "locator": spec.locator},
-                        "summary": f"Imported {spec.describe()} as {spec.name} ({row_count} rows, {len(columns)} columns).",
+                        "summary": f"Imported {spec.describe()} as {spec.name} ({row_count} rows, {len(columns)} columns)."
+                                   + (f" {len(refs)} evidence reference(s) recorded." if refs else ""),
                     }
+                    if refs:
+                        response["evidence"] = [self._evidence_summary(r, association="recorded") for r in refs]
                     response = self._with_notes(response, notes)
                     self._complete(op, response, key, ir.logical_fingerprint(), now)
             except Exception:
@@ -967,25 +1026,32 @@ class Backend:
             self._save_operation(op)
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
-            result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir))
+            result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir),
+                                                     diagnose_joins=self.join_diagnostics,
+                                                     value_checks=self._contract_checks(ir))
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
+            units = self._units(ir, used)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
                                             ir.output.name if materialize else None, distinct_keys=result.distinct_keys,
-                                            ties=result.ties)
+                                            ties=result.ties, joins=result.joins, units=units,
+                                            check_counts=result.check_counts)
 
             now = self.clock()
             response: dict[str, Any]
             try:
                 with self.store.transaction():
                     if materialize:
-                        response = self._commit_materialization(op, ir, used, dataset_id, table, result, now, principal)
+                        response = self._commit_materialization(op, ir, used, dataset_id, table, result, now, principal,
+                                                                units=units)
                     else:
                         response = {
                             "status": "success",
                             "operation_id": op.id,
                             "source": {"id": ir.source.dataset_id, "name": ir.source.name, "version": ir.source.version},
                             "result": {
-                                "columns": [{"name": f.name, "type": str(f.logical_type)} for f in ir.output_schema],
+                                "columns": [{"name": f.name, "type": str(f.logical_type),
+                                             **({"unit": units.units[f.name]} if units.units.get(f.name) else {})}
+                                            for f in ir.output_schema],
                                 "rows": _jsonable(result.rows),
                                 "row_count": result.row_count,
                                 "truncated": result.truncated,
@@ -993,6 +1059,9 @@ class Backend:
                             "summary": self._summarize(ir, None),
                             "hint": "Call materialize_result with the same source/transform and a name to persist this result.",
                         }
+                    if result.joins:
+                        # What each join did to its inputs: data facts, reported whether or not advice follows.
+                        response["joins"] = _jsonable([facts.to_dict() for facts in result.joins])
                     if advice:
                         response["advice"] = [a.to_dict() for a in advice]
                     response["plan"] = plan.to_text()
@@ -1023,11 +1092,26 @@ class Backend:
         keys = [stands.get(k) for k in contract.row_keys]
         return [k for k in keys if k] if all(keys) else None
 
+    def _contract_checks(self, ir: TransformIR) -> list[BoundCheck] | None:
+        """The open contract's value checks on the result's columns, when every one of them can be counted there:
+        export counts them, so the advice must too before it says a result matches (MADR 0020)."""
+        try:
+            contract = self.store.latest_contract()
+        except Exception as err:  # advice never breaks a response
+            log_event("advice.skipped", error=repr(err))
+            return None
+        if contract is None or contract.status != ContractStatus.OPEN or not contract.checks:
+            return None
+        bound, problems = bind_checks(contract, [(f.name, f.logical_type) for f in ir.output_schema])
+        return bound if not problems and len(bound) == len(contract.checks) else None
+
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
-                          distinct_keys: int | None = None, ties: Any = None) -> list[Advice]:
+                          distinct_keys: int | None = None, ties: Any = None, joins: Any = None,
+                          units: UnitReport | None = None, check_counts: Any = None) -> list[Advice]:
         """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, rows
-        a sort leaves tied, or a result that fits the contract."""
+        a sort leaves tied, rows a join dropped or multiplied, operands with different declared units, or a
+        result that fits the contract."""
         advice: list[Advice] = []
         try:
             if row_count == 0:
@@ -1046,15 +1130,29 @@ class Backend:
             found = advise_sort_ties(ir, ties)
             if found is not None:
                 advice.append(found)
+            advice.extend(advise_joins(joins or []))
+            found = advise_units(units.conflicts if units is not None else [])
+            if found is not None:
+                advice.append(found)
             contract = self.store.latest_contract()
             if contract is not None:
                 found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,
-                                        materialized_name=materialized_name, distinct_keys=distinct_keys)
+                                        materialized_name=materialized_name, distinct_keys=distinct_keys,
+                                        check_counts=check_counts)
                 if found is not None:
                     advice.append(found)
         except Exception as err:  # advice never breaks a response
             log_event("advice.skipped", error=repr(err))
         return advice
+
+    def _units(self, ir: TransformIR, used: list[Dataset]) -> UnitReport:
+        """The declared units followed through the transform (core/ir/units.py); empty when they cannot be."""
+        declared = {c.id: c.unit for d in used for c in d.columns if c.unit.strip()}
+        try:
+            return infer_units(ir, lambda column_id: declared.get(column_id or "", ""))
+        except Exception as err:  # units serve advice and metadata only: they never fail the transform
+            log_event("advice.skipped", error=repr(err))
+            return UnitReport()
 
     def _column_contains(self, dataset: Dataset, column: Column, value: Any) -> bool:
         version = self.store.get_version(dataset.id, dataset.version)
@@ -1085,8 +1183,10 @@ class Backend:
         result,
         now: dt.datetime,
         principal: str | None,
+        units: UnitReport | None = None,
     ) -> dict[str, Any]:
         physical_types = dict(self.engine.describe_table(table))
+        inferred = units.units if units is not None else {}
         columns: list[Column] = []
         source_columns = {c.id: c for d in used for c in d.columns}
         for position, f in enumerate(ir.output_schema):
@@ -1096,7 +1196,9 @@ class Backend:
                 logical_type=f.logical_type, physical_type=physical_types.get(f.name, "UNKNOWN"),
                 description=origin.description if origin else "",
                 semantic_role=origin.semantic_role if origin else (SemanticRole.MEASURE if f.logical_type.is_numeric else SemanticRole.UNKNOWN),
-                aliases=list(origin.aliases) if origin else [], unit=origin.unit if origin else "", position=position,
+                aliases=list(origin.aliases) if origin else [], position=position,
+                # The unit the transform's inputs agree on (core/ir/units.py): a column's own, or a derived one's.
+                unit=inferred.get(f.name) or (origin.unit if origin else ""),
             ))
         metadata = {"derived": True, "intent_fingerprint": ir.logical_fingerprint()}
         dataset = Dataset(
@@ -1316,35 +1418,265 @@ class Backend:
             log_event("state.committed", operation_id=op.id, datasets=len(touched))
             return self._with_notes(response, notes)
 
+    # -- evidence references (MADR 0021) -----------------------------------
+    def _resolve_evidence(self, loose: Any, *, row_count: int | None) -> list[_Evidence]:
+        """Read evidence references and check them against what the backend holds, before anything is loaded.
+
+        The artifact is resolved (a file not registered yet is registered), a given hash must be the registered
+        one, a place must suit the artifact's kind, and a span or quote in a markdown or text document whose file
+        still holds its registered content is checked against its text. Row positions are checked here when the
+        row count is known (rows written inline) and after the load otherwise; columns once the source is read.
+        """
+        found: list[_Evidence] = []
+        for spec in parse_evidence(loose):
+            artifact = self._find_artifact(spec.artifact, f"{spec.field}.artifact", content_hash=spec.content_hash)
+            checked, unchecked = ["artifact"], []
+            if spec.content_hash is not None:
+                if spec.content_hash != artifact.content_hash:
+                    raise ConflictError(
+                        f"content_hash does not match {artifact.name} ({artifact.id}), which is registered with "
+                        f"{artifact.content_hash}.", field=f"{spec.field}.content_hash",
+                        details={"artifact": self._artifact_summary(artifact), "registered": artifact.content_hash,
+                                 "given": spec.content_hash},
+                        hint="Reference the file as it is now by its path to register its current content, or leave "
+                             "content_hash out.")
+                checked.append("content_hash")
+            check_kind(spec, artifact.kind, artifact.name)
+            if spec.rows is not None and row_count is not None:
+                self._check_evidence_rows(spec, row_count)
+            locator = spec.locator()
+            for key in ("page", "time_s"):
+                if key in locator:
+                    unchecked.append(key)
+            if spec.span is not None or spec.quote is not None:
+                text = self._artifact_text(artifact)
+                if text is None:
+                    unchecked += [k for k in ("span", "quote") if k in locator]
+                else:
+                    result = check_text(spec, text, artifact.name)
+                    checked += result.checked
+                    if result.span is not None:
+                        locator["span"] = list(result.span)
+                        checked.append("span")
+                    if result.occurrences and result.occurrences > 1:
+                        locator["quote_occurrences"] = result.occurrences
+            found.append(_Evidence(spec, artifact, locator, checked, unchecked))
+        return found
+
+    @staticmethod
+    def _check_evidence_rows(spec: EvidenceSpec, row_count: int) -> None:
+        outside = [r for r in spec.rows or [] if r >= row_count]
+        if outside:
+            raise InvalidIntentError(
+                f"Reference {spec.index + 1} names row position(s) {outside}, but the import holds {row_count} "
+                f"row(s), at positions 0 to {row_count - 1}.", field=f"{spec.field}.rows",
+                details={"rows": row_count, "outside": outside})
+
+    def _artifact_text(self, artifact: Artifact) -> str | None:
+        """A markdown or text artifact's text, when its file still holds the registered content; None otherwise."""
+        if artifact.kind not in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT):
+            return None
+        path = Path(artifact.managed_path or artifact.path)
+        try:
+            if not path.is_file() or self.workspace.content_hash(path) != artifact.content_hash:
+                return None
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    @staticmethod
+    def _evidence_columns(evidence: list[_Evidence], physical: list[str]) -> list[list[str] | None]:
+        """Each reference's columns as the source names them (exactly, or ignoring case); refuse unknown ones."""
+        by_fold = {c.casefold(): c for c in physical}
+        found: list[list[str] | None] = []
+        for e in evidence:
+            if e.spec.columns is None:
+                found.append(None)
+                continue
+            names = []
+            for name in e.spec.columns:
+                column = name if name in physical else by_fold.get(name.casefold())
+                if column is None:
+                    raise InvalidIntentError(f"Reference {e.spec.index + 1} names column {name!r}, which the import "
+                                             f"does not have; its columns are {', '.join(physical)}.",
+                                             field=f"{e.spec.field}.columns", candidates=physical)
+                names.append(column)
+            if "columns" not in e.checked:
+                e.checked.append("columns")
+            found.append(list(dict.fromkeys(names)))
+        return found
+
+    def _evidence_values(self, evidence: list[_Evidence], columns: list[list[str] | None], table: str,
+                         row_count: int, physical: list[str]) -> list[list[dict[str, Any]]]:
+        """Check each reference's row positions against the loaded rows and snapshot the cells it names."""
+        snapshots: list[list[dict[str, Any]]] = []
+        for e, names in zip(evidence, columns):
+            if e.spec.rows is None:
+                snapshots.append([])
+                continue
+            self._check_evidence_rows(e.spec, row_count)
+            if "rows" not in e.checked:
+                e.checked.append("rows")
+            shown = names or physical
+            # The cells sit under their own key, so no imported column (one named row, say) can hide the position.
+            snapshots.append([{"row": int(position), "cells": dict(zip(shown, _jsonable(list(values))))}
+                              for position, *values in self.engine.rows_at(table, e.spec.rows, shown)])
+        return snapshots
+
+    def _evidence_for(self, ds: Dataset) -> list[dict[str, Any]]:
+        """The evidence references that reach a dataset (MADR 0021).
+
+        Its own references, recorded at its import; then every upstream dataset's references, each marked with
+        the columns of this dataset that carry a referenced column unchanged, or as reaching it through lineage.
+        """
+        found = [self._evidence_summary(r, association="recorded") for r in self.store.list_evidence(ds.id)]
+        upstream = list(dict.fromkeys(e["source"] for e in self.lineage.upstream(ds.id)))
+        if not upstream:
+            return found
+        origins = self._column_origins(ds)
+        for source_id in upstream:
+            for ref in self.store.list_evidence(source_id):
+                carried: dict[str, list[str]] = {}
+                for column, chain in origins.items():
+                    for dataset_id, name in chain:
+                        if dataset_id == source_id and (ref.columns is None or name in ref.columns):
+                            carried.setdefault(name, []).append(column)
+                summary = self._evidence_summary(ref, association="columns" if carried else "lineage")
+                if carried:
+                    summary["carried_as"] = carried
+                found.append(summary)
+        return found
+
+    def _column_origins(self, ds: Dataset) -> dict[str, list[tuple[str, str]]]:
+        """For each column of a dataset, the upstream (dataset id, column) it carries unchanged, nearest first.
+
+        A materialized column carries a source column unchanged when the producing transform's canonical IR gives
+        it that column's id (select, filter, sort, limit, rename, join, semi_join, group_by keys); the chain is
+        followed through every materialization in between and stops at a computed column or an import.
+        """
+        origins: dict[str, list[tuple[str, str]]] = {}
+        for column in ds.columns:
+            chain: list[tuple[str, str]] = []
+            current, name = ds, column.name
+            while current is not None and len(chain) < 64:
+                source = self._carried_from(current, name)
+                if source is None:
+                    break
+                chain.append((source[0].id, source[1]))
+                current, name = source
+            origins[column.name] = chain
+        return origins
+
+    def _carried_from(self, ds: Dataset, name: str) -> tuple[Dataset, str] | None:
+        version = self.store.get_version(ds.id, ds.version)
+        op = self.store.get_operation(version.operation_id) if version and version.operation_id else None
+        if op is None or op.kind not in (OperationKind.TRANSFORM, OperationKind.MATERIALIZE) or not op.canonical_ir:
+            return None
+        try:
+            ir = TransformIR.model_validate(op.canonical_ir)
+        except ValidationError:
+            return None
+        column_id = next((f.column_id for f in ir.output_schema if f.name == name), None)
+        if column_id is None:
+            return None
+        for ref in ir.referenced_datasets():
+            source = self.store.get_dataset(ref.dataset_id, include_deleted=True)
+            column = next((c for c in source.columns if c.id == column_id), None) if source else None
+            if column is not None:
+                return source, column.name
+        return None
+
+    def _evidence_summary(self, ref: EvidenceRef, *, association: str) -> dict[str, Any]:
+        artifact = self.store.get_artifact(ref.artifact_id)
+        dataset = self.store.get_dataset(ref.dataset_id, include_deleted=True)
+        body: dict[str, Any] = {
+            "id": ref.id,
+            "association": association,
+            "dataset": {"id": ref.dataset_id, "name": dataset.name if dataset else None, "version": ref.dataset_version},
+            "artifact": {"id": ref.artifact_id, "name": artifact.name if artifact else None,
+                         "kind": str(artifact.kind) if artifact else None, "content_hash": ref.artifact_hash},
+            "rows": ref.rows,
+            "columns": ref.columns,
+            "locator": ref.locator,
+            "checked": ref.checked,
+            "unchecked": ref.unchecked,
+            "operation_id": ref.operation_id,
+        }
+        if ref.note:
+            body["note"] = ref.note
+        if ref.values:
+            body["values"] = ref.values
+        return body
+
+    @staticmethod
+    def _written_as_path(reference: str) -> bool:
+        """Whether a reference is written as a path (it has a separator or starts with ~), not as a bare name."""
+        return "/" in reference or "\\" in reference or reference.startswith("~")
+
+    def _find_artifact(self, reference: str, field: str, *, noun: str = "artifacts",
+                       listed: Callable[[Artifact], bool] | None = None,
+                       content_hash: str | None = None) -> Artifact:
+        """An artifact by id, by the path of a file, or by name.
+
+        A reference written as a path to an existing file names that file: it is found or registered by its path
+        and current content hash, so a changed file becomes a new version and another file with the same name is
+        never taken for it. A ``content_hash`` of an earlier registered version of the path resolves to that
+        version; one that matches neither a registered version nor the file as it is now is refused. Anything
+        else is matched against registered names, which may be relative paths (doc/notes.md, also written
+        /doc/notes.md or ./doc/notes.md); only a bare name falls back to the file name of a registered artifact
+        (notes.md). ``content_hash`` picks among versions that share a name, and a path whose file is gone
+        resolves to its registered versions.
+        """
+        text = reference.strip()
+        artifact = self.store.get_artifact(text)
+        if artifact is not None:
+            return artifact
+        as_path = self._written_as_path(text)
+        path = Path(text).expanduser()
+        if path.is_file() and as_path:
+            resolved = str(path.resolve())
+            versions = [a for a in self.store.list_artifacts() if a.path == resolved]
+            earlier = next((a for a in versions if a.content_hash == content_hash), None) if content_hash else None
+            if earlier is not None:
+                return earlier
+            current = self.workspace.content_hash(path.resolve())
+            if content_hash is not None and content_hash != current:
+                raise ConflictError(
+                    f"content_hash does not match {text} as it is now ({current}) or any registered version of it.",
+                    field=field.rsplit(".", 1)[0] + ".content_hash",
+                    details={"path": resolved, "registered": current, "given": content_hash,
+                             "versions": [{"id": a.id, "content_hash": a.content_hash} for a in versions]},
+                    hint="Leave content_hash out to reference the file as it is now.")
+            return self._register_artifact(path, self._classify(path, None))
+        artifacts = self.store.list_artifacts()
+        loose = text.lstrip("./").lower()
+        candidates = [a for a in artifacts if a.name.lower() in (text.lower(), loose)]
+        if not candidates and as_path:
+            candidates = [a for a in artifacts if a.path == str(path.resolve())]  # a registered file that is gone
+        if not candidates and not as_path:
+            candidates = [a for a in artifacts if Path(a.name).name.lower() == loose]
+        if len(candidates) > 1 and content_hash:
+            candidates = [a for a in candidates if a.content_hash == content_hash] or candidates
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise AmbiguousReferenceError(f"Several artifacts are named {text!r}; give content_hash or an artifact id.",
+                                          field=field, candidates=[self._artifact_summary(a) for a in candidates])
+        if path.is_file():
+            return self._register_artifact(path, self._classify(path, None))
+        known = [a for a in artifacts if listed is None or listed(a)]
+        shown = ", ".join(a.name for a in known[:12]) if known else "none"
+        raise NotFoundError(
+            f"No artifact or file matches {text!r}; the {noun} registered here are {shown}.",
+            field=field,
+            candidates=[self._artifact_summary(a) for a in known],
+            details={"reference": text, noun: [a.name for a in known]},
+        )
+
     def _resolve_document(self, source: str) -> Artifact:
         if not isinstance(source, str) or not source.strip():
             raise InvalidIntentError("source must be an artifact id, an artifact name, or a path to a markdown document.", field="source")
-        text = source.strip()
-        artifact = self.store.get_artifact(text)
-        if artifact is None:
-            # A leading slash or ./ and a bare file name are the same document to an agent.
-            loose = text.lstrip("./").lower()
-            candidates = [a for a in self.store.list_artifacts()
-                          if a.name.lower() in (text.lower(), loose) or a.path == text]
-            if not candidates and loose:
-                candidates = [a for a in self.store.list_artifacts() if Path(a.name).name.lower() == Path(loose).name]
-            if len(candidates) == 1:
-                artifact = candidates[0]
-            elif len(candidates) > 1:
-                raise AmbiguousReferenceError(f"Several artifacts are named {text!r}.", field="source",
-                                              candidates=[self._artifact_summary(a) for a in candidates])
-        if artifact is None:
-            path = Path(text).expanduser()
-            if not path.is_file():
-                documents = [a for a in self.store.list_artifacts() if a.kind.is_document]
-                shown = ", ".join(a.name for a in documents[:12]) if documents else "none"
-                raise NotFoundError(
-                    f"No artifact or file matches {text!r}; the documents registered here are {shown}.",
-                    field="source",
-                    candidates=[self._artifact_summary(a) for a in documents],
-                    details={"reference": text, "documents": [a.name for a in documents]},
-                )
-            artifact = self._register_artifact(path, self._classify(path, None))
+        artifact = self._find_artifact(source, "source", noun="documents", listed=lambda a: a.kind.is_document)
         if artifact.kind not in (ArtifactKind.MARKDOWN, ArtifactKind.TEXT):
             raise InvalidSchemaError(f"{artifact.name} is a {artifact.kind} artifact; attach_metadata reads markdown or text.", field="source")
         return artifact
@@ -1698,6 +2030,7 @@ class Backend:
         order_by: Any = None,
         description: str | None = None,
         reason: str | None = None,
+        checks: Any = None,
         principal: str | None = None,
     ) -> dict[str, Any]:
         """Declare the shape of the deliverable before (or while) working towards it.
@@ -1707,16 +2040,19 @@ class Backend:
         contract is current per workspace: declaring while one is open and
         unsatisfied is an amendment and needs a ``reason``, which is recorded.
         Re-declaring the same shape changes nothing and is not an error.
+        ``checks`` hold the values of named columns to not_null and inclusive
+        ranges, verified at export like the shape (MADR 0020).
         """
         try:
-            spec = parse_contract(columns, rows, order_by, description)
+            spec = parse_contract(columns, rows, order_by, description, checks)
         except BackendError as err:
             # Teach on refusal: a declaration is refused with the grammar it accepts.
             err.advice = advise_error(err, tool="declare_output", arguments={
-                "columns": columns, "rows": rows, "order_by": order_by, "description": description})
+                "columns": columns, "rows": rows, "order_by": order_by, "description": description,
+                "checks": checks})
             raise
         intent = _jsonable({"columns": columns, "rows": rows, "order_by": order_by, "description": description,
-                            "reason": reason})
+                            "reason": reason, "checks": checks})
         with self._operation(OperationKind.DECLARE_OUTPUT, intent, principal) as op:
             op.canonical_ir = {
                 "operation": "declare_output",
@@ -1724,6 +2060,7 @@ class Backend:
                 "rows": str(spec.rows) if spec.rows else None,
                 "row_keys": spec.row_keys,
                 "order_by": [{"column": o.name, "descending": o.descending} for o in spec.order_by],
+                "checks": [check_summary(c) for c in spec.checks],
             }
             current = self.store.latest_contract()
             now = self.clock()
@@ -1752,6 +2089,7 @@ class Backend:
                 current.rows = spec.rows
                 current.row_keys = spec.row_keys
                 current.order_by = spec.order_by
+                current.checks = spec.checks
                 if spec.description:
                     current.description = spec.description
                 current.revision += 1
@@ -1774,8 +2112,9 @@ class Backend:
                 log_event("state.committed", operation_id=op.id, contract_id=current.id, amended=True)
                 return response
             contract = OutputContract(id=self.store.allocate_id("oc"), columns=spec.columns, rows=spec.rows,
-                                      row_keys=spec.row_keys, order_by=spec.order_by, description=spec.description,
-                                      operation_id=op.id, created_at=now, updated_at=now)
+                                      row_keys=spec.row_keys, order_by=spec.order_by, checks=spec.checks,
+                                      description=spec.description, operation_id=op.id, created_at=now,
+                                      updated_at=now)
             with self.store.transaction():
                 self.store.insert_contract(contract)
                 details: dict[str, Any] = {"contract": contract_summary(contract)}
@@ -1886,11 +2225,16 @@ class Backend:
             distinct = self.engine.count_distinct_rows(version.physical_table, [k for k in keys if k])
         if contract.rows != RowCardinality.ONE_PER or distinct is not None or version.row_count == 0:
             problems += verify_rows(contract, version.row_count, distinct)
+        checked, check_problems = self._check_values(contract, actual, version.physical_table, stands)
+        problems += check_problems
         if problems:
             repair = repair_transform(contract, problems)
+            only_values = all(p.kind == "check" for p in problems)
             if repair is not None:
                 first = (f"Reshape it with materialize_result(source={ds.name!r}, transform={json.dumps(repair, ensure_ascii=False)}) "
                          "and export that dataset, or")
+            elif only_values:
+                first = "Produce a dataset whose values hold the declared checks and export that, or"
             else:
                 first = "Produce a dataset with the declared shape and export that, or"
             details: dict[str, Any] = {
@@ -1902,7 +2246,8 @@ class Backend:
             if repair is not None:
                 details["repair"] = repair
             err = ContractMismatchError(
-                f"{ds.name} does not have the shape declared in output contract {contract.id}: "
+                (f"{ds.name} fails the value checks of output contract {contract.id}: " if only_values else
+                 f"{ds.name} does not have the shape declared in output contract {contract.id}: ")
                 + " ".join(p.message for p in problems),
                 field="dataset",
                 candidates=[n for n, _ in actual],
@@ -1922,6 +2267,12 @@ class Backend:
                 err.advice = [Advice("reshape_to_contract",
                                      f"{ds.name} differs from the declared shape only in shape: {problem_text} "
                                      "Reshape it as below and export the new dataset." + amend, rewrite=rewrite)]
+            elif only_values:
+                err.advice = [Advice("contract_mismatch",
+                                     f"{ds.name} holds values the contract's checks exclude: {problem_text} "
+                                     "The offending rows are in details.problems[].evidence. The backend changes no "
+                                     "value to pass a check: find where these values come from in the data and "
+                                     "export a dataset whose values hold." + amend)]
             else:
                 err.advice = [Advice("contract_mismatch",
                                      f"{ds.name} lacks something the contract declares: {problem_text} "
@@ -1933,10 +2284,40 @@ class Backend:
             evidence["cardinality"] = str(contract.rows)
         if distinct is not None:
             evidence["distinct_keys"] = distinct
+        if checked:
+            evidence["checks"] = checked
         header = respelled(contract, [n for n, _ in actual])
         if header:
             evidence["written_as"] = header  # dataset column -> the declared spelling the file carries (MADR 0018)
         return evidence
+
+    # Offending rows a failed value check shows, as evidence.
+    CHECK_SAMPLE_ROWS = 5
+
+    def _check_values(self, contract: OutputContract, actual: list[tuple[str, LogicalType]], table: str,
+                      stands: dict[str, str]) -> tuple[list[dict[str, Any]], list[ContractProblem]]:
+        """Count each value check over the dataset: its counts for the evidence, and the checks that failed.
+
+        A failed check shows up to ``CHECK_SAMPLE_ROWS`` offending rows, projected to the columns the contract
+        names (carried, then organizing) so each row can be found again.
+        """
+        bound, problems = bind_checks(contract, actual)
+        context = list(dict.fromkeys(stands[n] for n in [c.name for c in contract.columns] + organizing_keys(contract)
+                                     if n in stands))
+        checked: list[dict[str, Any]] = []
+        for target in bound:
+            check = target.check
+            nulls, outside, low, high, rows = self.engine.check_values(
+                f"SELECT * FROM {quote_ident(table)}", target.column, not_null=check.not_null, low=check.min,
+                high=check.max, cast=target.cast, nan=target.nan, context=context, sample=self.CHECK_SAMPLE_ROWS)
+            low, high = _jsonable(low), _jsonable(high)
+            problem = check_problem(target, nulls, outside, low, high,
+                                    [dict(zip(context, _jsonable(list(r)))) for r in rows])
+            if problem is not None:
+                problems.append(problem)
+            checked.append({**check_summary(check), "null_values": nulls, "values_outside": outside,
+                            "observed_min": low, "observed_max": high})
+        return checked, problems
 
     @staticmethod
     def _contract_shape(contract: OutputContract) -> str:
@@ -1948,6 +2329,8 @@ class Backend:
         if contract.order_by:
             text += (", ordered by ["
                      + ", ".join(o.name + (" desc" if o.descending else "") for o in contract.order_by) + "]")
+        if contract.checks:
+            text += f", checks on [{', '.join(c.column for c in contract.checks)}]"
         return text
 
     @staticmethod
@@ -1967,6 +2350,8 @@ class Backend:
         if keys:
             text += (f"; [{', '.join(keys)}] organize the answer without being part of it, so the dataset must carry "
                      "them and the file will not")
+        if contract.checks:
+            text += "; its values must hold: " + "; ".join(describe_check(c) for c in contract.checks)
         if contract.status == ContractStatus.SATISFIED:
             return text + f"; satisfied by {contract.satisfied_by}."
         return text + "; export_result will refuse anything else."

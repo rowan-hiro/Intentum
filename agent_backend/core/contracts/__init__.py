@@ -1,8 +1,14 @@
 from .spec import (
+    CHECKS_HINT,
+    BoundCheck,
     ContractProblem,
     ContractSpec,
-    ContractSpec,
+    bind_checks,
+    bound_kind,
+    check_problem,
+    check_summary,
     contract_summary,
+    describe_check,
     match_columns,
     organizing_keys,
     parse_contract,
@@ -13,10 +19,16 @@ from .spec import (
 )
 
 __all__ = [
+    "CHECKS_HINT",
+    "BoundCheck",
     "ContractProblem",
     "ContractSpec",
-    "ContractSpec",
+    "bind_checks",
+    "bound_kind",
+    "check_problem",
+    "check_summary",
     "contract_summary",
+    "describe_check",
     "match_columns",
     "organizing_keys",
     "parse_contract",

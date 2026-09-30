@@ -80,3 +80,9 @@ Declaration timing measured (2026-09-02, twelve runs): declarations made once a 
 Status: Accepted → Accepted
 
 The contract grammar now separates the columns the deliverable carries from the columns it is organized by (MADR 0012): order_by and the one_per keys may name columns the answer does not carry, the export sorts and counts by them and leaves them out of the file, and rows is required. The declaration is also answered with what the workspace holds under each declared name. What the backend holds the export to is unchanged; what the agent can say in a declaration is wider.
+
+### 2026-09-30T08:39:22.312Z
+
+Status: accepted -> accepted
+
+Outcome 2026-09-30-0830-91hh: the deferred row-level assertions now exist for not_null and inclusive ranges on columns the contract names, verified at export with evidence and counted by transform advice before it says a result matches (MADR 0020). Reconciliation and coverage relative to a source dataset remain deferred.

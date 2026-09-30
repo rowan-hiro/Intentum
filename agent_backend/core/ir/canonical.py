@@ -305,6 +305,9 @@ class ImportIR(IRModel):
     # Types the import itself refined (text → date/timestamp); replayable, and
     # excluded from the fingerprint because they are derived from the source.
     refined_types: dict[str, str] = Field(default_factory=dict)
+    # Evidence references the agent gave (MADR 0021), with their artifacts resolved; part of the fingerprint
+    # only when present, so an import without evidence replays as it always has.
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -318,5 +321,7 @@ class ImportIR(IRModel):
     def logical_fingerprint(self) -> str:
         payload = self.model_dump(mode="json")
         payload.pop("refined_types", None)
+        if not payload.get("evidence"):
+            payload.pop("evidence", None)
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()

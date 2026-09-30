@@ -4,13 +4,18 @@ A refusal that only says what was wrong leaves the agent to guess what the
 backend accepts. The set of things an agent may try is open; the language the
 backend accepts is small and closed. Every detector here maps one observed
 attempt onto the nearest accepted shape and, when the mapping is mechanical,
-rewrites the agent's own request into tool calls it can send as-is. Six
+rewrites the agent's own request into tool calls it can send as-is. Eight
 signals on successful responses get the same treatment: an empty result whose
 filter literal is absent from the filtered column, a text column of numbers
 ordered against a quoted number (it compares as text) or sorted by (it sorts as
-text), a sort that leaves tied rows in no defined order, a result that already
-has (or mechanically reshapes to) the declared output shape, and an export
-whose date or timestamp pattern formatted no value.
+text), a sort that leaves tied rows in no defined order, a semantic join that
+dropped left rows matching nothing or repeated left rows whose key matches
+several right rows (from the executor's counts, which the response also
+carries as facts under ``joins``), an addition, subtraction or comparison of
+operands whose declared units differ (core/ir/units.py), a result that already
+has (or mechanically reshapes to) the declared output shape, or whose values
+fail the contract's value checks, and an export whose date or timestamp
+pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -26,17 +31,24 @@ import json
 import re
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
+from ..contracts import (CHECKS_HINT, bind_checks, check_problem, match_columns, repair_transform, respelled,
+                         verify_columns, verify_rows)
 from ..errors import BackendError, ErrorCode
+from ..evidence import EVIDENCE_HINT
 from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LimitStep,
                   LiteralExpr, RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
 from ..ir.raw_query import QueryShape
 from ..ir.expression_parser import parse_expression, token_spans
 from ..ir.typing import signature
+from ..ir.units import UnitConflict
 from ..models.entities import ArtifactKind, Column, ContractStatus, Dataset, LogicalType, OutputContract, RowCardinality
 from ..naming import normalize, slugify
+from ..planner.planner import _expr_text
+
+if TYPE_CHECKING:
+    from ..execution import JoinFacts
 
 
 @dataclass
@@ -1267,7 +1279,12 @@ def _contract_amendment(err: BackendError, tool: str, arguments: dict[str, Any])
         differences.append(f"the row cardinality {rows} would be dropped")
     elif arguments.get("rows") is not None and arguments.get("rows") != rows:
         differences.append(f"the row cardinality {rows} would become {arguments.get('rows')!r}")
-    what = ("; ".join(differences)[0].upper() + "; ".join(differences)[1:] + ". ") if differences else ""
+    checked = [str(c.get("column")) for c in contract.get("checks") or [] if isinstance(c, dict)]
+    inline = isinstance(asked, list) and any(isinstance(c, dict) and set(c) & {"not_null", "min", "max", "range"}
+                                             for c in asked)
+    if checked and not arguments.get("checks") and not inline:
+        differences.append(f"the value checks on {checked} would be dropped")
+    what =("; ".join(differences)[0].upper() + "; ".join(differences)[1:] + ". ") if differences else ""
     return Advice("contract_amendment",
                   f"Output contract {contract.get('id')} is open with columns {declared}"
                   + (f" and rows {rows}" if rows is not None else "") + f". {what}"
@@ -1503,6 +1520,36 @@ def _declaration_order(err: BackendError, tool: str, arguments: dict[str, Any]) 
         "not belong in columns: the backend sorts by it and leaves it out of the file, as long as the dataset you "
         "export carries it.",
     )
+
+
+def _evidence_reference(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """An import's evidence reference the backend could not accept, with the grammar and what it holds."""
+    if not (err.field or "").startswith("evidence"):
+        return None
+    details = err.details if isinstance(err.details, dict) else {}
+    if err.code == ErrorCode.CONFLICT and "registered" in details:
+        return Advice("evidence_reference",
+                      f"The artifact is registered with content hash {details['registered']}, and the reference gave "
+                      f"{details.get('given')}: the file was read in another version, or the reference names another "
+                      "file. Name the file by its path to register it as it is now, or leave content_hash out to "
+                      "reference the registered content.")
+    if err.code == ErrorCode.NOT_FOUND:
+        known = details.get("artifacts") or []
+        listed = f" The registered artifacts are {', '.join(known[:12])}." if known else ""
+        return Advice("evidence_reference", "A reference names a registered artifact by its id or name, or a file "
+                      "by its path, which is registered with its content hash." + listed)
+    return Advice("evidence_reference", EVIDENCE_HINT + " The backend checks what it holds facts for and records the "
+                  "rest as given; it never reads a PDF or a frame.")
+
+
+def _declaration_checks(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A declaration whose value checks are not a shape the contract can hold."""
+    if err.code != ErrorCode.INVALID_INTENT or err.field != "checks":
+        return None
+    names = (err.details or {}).get("contract_names")
+    named = f" This contract names {', '.join(names)}." if names else ""
+    return Advice("declaration_checks", CHECKS_HINT + named + " A check is what the answer's values must satisfy "
+                  "as the requirement states it; the backend counts violations at export and changes no value.")
 
 
 # ----------------------------------------------------------------------------
@@ -2329,6 +2376,8 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_predicate_not_boolean, _TRANSFORM_TOOLS, False),
     (_declaration_rows, ("declare_output",), False),
     (_declaration_order, ("declare_output",), False),
+    (_declaration_checks, ("declare_output",), False),
+    (_evidence_reference, ("import_dataset",), False),
     # detectors that read the facts the raise site attached
     (_transform_as_text, _TRANSFORM_TOOLS, False),
     (_function_as_infix, _TRANSFORM_TOOLS, False),
@@ -2803,6 +2852,106 @@ def advise_sort_ties(ir: TransformIR, ties: tuple[list[Any], int, int, int] | No
                   "settles the order.")
 
 
+def _key_text(facts: "JoinFacts", values: list[Any]) -> str:
+    pairs = [f"{name} = {value!r}" for name, value in facts.key(values).items()]
+    return pairs[0] if len(pairs) == 1 else "(" + ", ".join(pairs) + ")"
+
+
+def _plural(n: int, one: str, many: str | None = None) -> str:
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def advise_joins(facts: list["JoinFacts"]) -> list[Advice]:
+    """What a join did to its inputs, when it dropped left rows or multiplied them.
+
+    ``facts`` are the executor's counts, one per diagnosed join step. The advice states the counts and what they
+    mean for the rows; it never rewrites and never calls a join wrong: a join meant to pair every match, or to keep
+    only matched rows, is legitimate, and only the agent knows which one was meant.
+    """
+    found: list[Advice] = []
+    for f in facts:
+        right = f.step.right.name
+        at = f"The join with {right} at transform.steps[{f.position}]"
+        if f.multiple_match_keys:
+            example = ""
+            if f.multiple_sample:
+                values, _, matches = f.multiple_sample[0]
+                example = f" (such as {_key_text(f, values)}, which matches {matches} rows)"
+            explanation = (f"{at} matched {_plural(f.multiple_match_keys, 'left key')} to more than one row of "
+                           f"{right}{example}; a left row with such a key appears once per match, which added "
+                           f"{_plural(f.added_rows, 'row')}.")
+            if f.step.how == "inner" and f.unmatched_left_rows and f.rows_out == f.left_rows:
+                explanation += (f" The join returns as many rows as its left input ({f.left_rows}) only because it "
+                                f"also dropped {_plural(f.unmatched_left_rows, 'unmatched left row')}: the added "
+                                "rows hide the dropped ones, so the row count alone shows neither.")
+            right_keys = ", ".join(c.right.name for c in f.step.on)
+            found.append(Advice("join_multiplied_rows", explanation + (
+                f" If each left row should appear once, reduce {right} to one row per [{right_keys}] first (an "
+                "aggregate materialized, then joined), or use semi_join when only whether a match exists matters; "
+                "a join meant to pair each left row with every match needs no change.")))
+        kept_right = f.step.how in ("right", "full") and f.unmatched_right_rows
+        if not f.unmatched_left_rows and not kept_right:
+            continue
+        parts: list[str] = []
+        if f.unmatched_left_rows:
+            detail: list[str] = []
+            if f.unmatched_left_keys:
+                keys = _plural(f.unmatched_left_keys, "key")
+                if f.unmatched_sample:
+                    keys += f", such as {_key_text(f, f.unmatched_sample[0][0])}"
+                detail.append(keys)
+            if f.null_key_left_rows:
+                detail.append(f"{_plural(f.null_key_left_rows, 'row')} with a null key, which never matches")
+            listed = f" ({'; '.join(detail)})" if detail else ""
+            fate = ("are kept with nulls in the columns it adds" if f.step.how in ("left", "full")
+                    else "are not in the result")
+            parts.append(f"{at} found no row of {right} for {f.unmatched_left_rows} of {f.left_rows} left rows"
+                         f"{listed}; they {fate}. The match coverage is {f.coverage:.0%} of the left rows.")
+            if f.step.how in ("inner", "right"):
+                parts.append("A left join keeps unmatched left rows with nulls instead.")
+            if f.coverage is not None and f.coverage < 0.5:
+                parts.append("When most left rows match nothing, the key columns may hold different identifiers on "
+                             "the two sides; describe_dataset shows their values.")
+        if kept_right:
+            parts.append(f"{_plural(f.unmatched_right_rows, 'row')} of {right} match no left row and are kept "
+                         "with nulls in the left columns.")
+        found.append(Advice("join_unmatched_rows", " ".join(parts)))
+    return found
+
+
+def advise_units(conflicts: list[UnitConflict], shown: int = 5) -> Advice | None:
+    """Operands whose declared units differ, added, subtracted or compared (core/ir/units.py, MADR 0019).
+
+    Explained, never rewritten and never refused: which operand to convert, and by what factor, is the agent's
+    to know; the backend converts nothing.
+    """
+    if not conflicts:
+        return None
+    facts: list[str] = []
+    for c in conflicts[:shown]:
+        left = f"{_expr_text(c.left)} ({c.left_unit})"
+        right = f"{_expr_text(c.right)} ({c.right_unit})"
+        subject = f"derive of {c.name}" if c.step == "derive" and c.name else c.step
+        where = f"{'the' if facts else 'The'} {subject} at transform.steps[{c.position}]"
+        if c.op == "+":
+            did = f"adds {left} and {right}"
+        elif c.op == "-":
+            did = f"subtracts {right} from {left}"
+        else:
+            did = f"compares {left} {c.op} {right}"
+        facts.append(f"{where} {did}")
+    if len(conflicts) > shown:
+        facts.append(f"{len(conflicts) - shown} more")
+    derived = list(dict.fromkeys(c.name for c in conflicts if c.name))
+    result = (f"; {', '.join(derived)} {'has' if len(derived) == 1 else 'have'} no unit" if derived else "")
+    return Advice("unit_mismatch",
+                  "; ".join(facts) + f". Their declared units differ, so the values combine two measures{result}. "
+                  "Units are compared as declared, ignoring case and spacing, and the backend converts nothing, "
+                  "neither currencies nor scale. Convert one operand to the other's unit first (a derive before "
+                  "this step), or, when both are one unit written two ways, give them one spelling with "
+                  "update_metadata. The result is returned as computed.")
+
+
 def _append_steps(transform: Any, repair: dict[str, Any]) -> Any:
     steps = _steps(transform)
     if "rename" in repair:
@@ -2821,11 +2970,14 @@ def advise_contract(
     arguments: dict[str, Any],
     materialized_name: str | None,
     distinct_keys: int | None = None,
+    check_counts: list[tuple[int, int]] | None = None,
 ) -> Advice | None:
     """A result that has, or mechanically reshapes to, the declared output shape: say so, with the next call.
 
     ``distinct_keys`` counts the result's distinct combinations of a one_per contract's keys. export_result
-    checks rows with that count, so without it a keyed result is never said to match.
+    checks rows with that count, so without it a keyed result is never said to match. ``check_counts`` holds,
+    per value check of the contract, the result's null and out-of-range values: without them a contract with
+    checks is never said to match, and a result whose values fail is named as such.
     """
     if contract.status != ContractStatus.OPEN:
         return None
@@ -2835,6 +2987,21 @@ def advise_contract(
     keyed = contract.rows == RowCardinality.ONE_PER and all(k in stands for k in contract.row_keys)
     if not problems and keyed and row_count > 0 and distinct_keys is None:
         return None
+    if contract.checks:
+        bound, unfit = bind_checks(contract, actual)
+        if unfit or len(bound) != len(contract.checks) or check_counts is None or len(check_counts) != len(bound):
+            return None  # not counted the way export counts, so nothing is promised
+        failed = [f for f in (check_problem(t, nulls, outside) for t, (nulls, outside) in zip(bound, check_counts))
+                  if f is not None]
+        if failed:
+            subject = materialized_name or "This result"
+            return Advice(
+                "contract_checks_failed",
+                f"{subject} fails value checks of output contract {contract.id}: "
+                + " ".join(p.message[0].upper() + p.message[1:] for p in failed)
+                + " export_result will refuse it until the values hold, and shows the offending rows. The backend "
+                  "changes no value to pass a check: find where these values come from in the data, or amend the "
+                  "checks with declare_output and a reason if the requirement is different.")
     shape = f"columns [{', '.join(c.name for c in contract.columns)}]" + (f", rows {contract.rows}" if contract.rows else "")
     answer = f"answer_{contract.id}"
     if not problems:

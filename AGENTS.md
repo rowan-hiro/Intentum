@@ -28,13 +28,14 @@ perception extracts enters the backend only through `import_dataset` or
 | `agent_backend/core/logging.py` | Structured events for the execution stages. |
 | `agent_backend/core/naming.py` | Unicode-aware identifier rules shared by the IR, validator and resolvers. |
 | `agent_backend/core/models/` | Dataset, column, version, operation, lineage, and audit entities. |
-| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, shared type rules, and the raw_query step's rules (`raw_query.py`, MADR 0002). |
+| `agent_backend/core/ir/` | Canonical Pydantic models, expression parser, shared type rules, the raw_query step's rules (`raw_query.py`, MADR 0002), and the unit rules that follow declared units through a transform (`units.py`, MADR 0019). |
 | `agent_backend/core/resolver/` | Resolve loose dataset, field, expression, and transform references into canonical IR. |
 | `agent_backend/core/validation/` | Independently validate IR types, schemas, input versions, and dataset state. |
 | `agent_backend/core/planner/` | Build explicit, inspectable execution plans. |
 | `agent_backend/core/execution/` | Compile IR to internal SQL, execute plans, and roll back physical tables on failure. |
 | `agent_backend/core/export/` | Export format specification: how typed values are rendered as text at the file boundary. |
-| `agent_backend/core/contracts/` | Output contracts: read a declared deliverable shape into canonical form and check a dataset against it. |
+| `agent_backend/core/contracts/` | Output contracts: read a declared deliverable shape and its value checks into canonical form and check a dataset against them (MADR 0020). |
+| `agent_backend/core/evidence/` | Evidence references from imported rows and cells to registered artifacts: read them into canonical form, and check a span or quote against a text document (MADR 0021). |
 | `agent_backend/core/recovery/` | Teach on refusal (MADR 0010): turn a refusal or a silent-failure signal into structured advice naming what the backend accepts, with the request rewritten as tool calls when mechanical. |
 | `agent_backend/core/knowledge/` | Parse knowledge.md-style semantic-layer documents into table and column facts. |
 | `agent_backend/core/lineage/` | Record lineage edges and traverse upstream and downstream dependencies. |
