@@ -35,3 +35,9 @@ declare_output accepts checks on names the contract uses, carried or organizing:
 * A wrong check is enforced as faithfully as a right one; amending it needs a reason, as for the shape
 
 ## Decision History
+
+### 2026-09-30T09:29:08.919Z, outcome 2026-09-30-0924-nvtr
+
+Status: accepted -> accepted
+
+Review of PR 18: temporal values and bounds are compared in the finer type of the two. A date compared with a timestamp stands for its midnight, so a timestamp bound on a date column keeps its time instead of being cut to its date, and a date bound on a timestamp column is that day's midnight.

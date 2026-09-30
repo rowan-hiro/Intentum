@@ -282,3 +282,49 @@ def test_the_mcp_tool_takes_evidence(backend, files):
     assert body["status"] == "success" and "quote" in body["evidence"][0]["checked"]
     provenance = asyncio.run(server.call_tool("get_provenance", {"dataset": "coop_sales"})).structured_content
     assert provenance["evidence"][0]["id"] == body["evidence"][0]["id"]
+
+
+# -- review of PR 18 --------------------------------------------------------------------------------------------
+
+def test_a_column_named_rowid_does_not_move_row_positions(backend, files, tmp_path):
+    response = imported(backend, [{"artifact": str(files["note"]), "rows": [0], "columns": ["amount"]}],
+                        rows=[{"rowid": 1, "amount": 10}, {"rowid": 0, "amount": 20}], name="shadowed")
+    assert response["evidence"][0]["values"] == [{"row": 0, "amount": 10}]
+    ledger = write_csv(tmp_path / "ledger.csv", "rowid,amount", ["2,30", "1,40", "0,50"])
+    response = backend.import_dataset(str(ledger), evidence=[{"artifact": str(files["note"]), "rows": [0, 2]}])
+    assert response["evidence"][0]["values"] == [{"row": 0, "rowid": 2, "amount": 30},
+                                                 {"row": 2, "rowid": 0, "amount": 50}]
+
+
+def test_a_path_names_its_own_file_before_any_artifact_name(backend, tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first, second = tmp_path / "a" / "report.md", tmp_path / "b" / "report.md"
+    first.write_text("Alpha wrote 12 pages.\n", encoding="utf-8")
+    second.write_text("Beta wrote 30 pages.\n", encoding="utf-8")
+    a = imported(backend, [{"artifact": str(first)}], name="from_a")["evidence"][0]["artifact"]
+    b = imported(backend, [{"artifact": str(second), "quote": "Beta wrote 30 pages."}], name="from_b")["evidence"][0]
+    assert b["artifact"]["id"] != a["id"] and "quote" in b["checked"]
+    assert b["artifact"]["content_hash"] == hashlib.sha256(second.read_bytes()).hexdigest()
+    ambiguous = backend.import_dataset(rows=ROWS, name="by_name", evidence=[{"artifact": "report.md"}])
+    assert ambiguous["status"] == "needs_resolution"
+    by_hash = imported(backend, [{"artifact": "report.md", "content_hash": a["content_hash"]}], name="by_hash")
+    assert by_hash["evidence"][0]["artifact"]["id"] == a["id"]
+
+
+def test_a_new_version_of_a_path_is_registered_and_the_old_one_stays_reachable(backend, tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text("Draft: 12 pages.\n", encoding="utf-8")
+    old = imported(backend, [{"artifact": str(report)}], name="draft")["evidence"][0]["artifact"]
+    report.write_text("Final: 14 pages.\n", encoding="utf-8")
+    new_hash = hashlib.sha256(report.read_bytes()).hexdigest()
+    new = imported(backend, [{"artifact": str(report), "content_hash": new_hash, "quote": "Final: 14 pages."}],
+                   name="final")["evidence"][0]
+    assert new["artifact"]["id"] != old["id"] and new["artifact"]["content_hash"] == new_hash
+    assert {"content_hash", "quote"} <= set(new["checked"])
+    earlier = imported(backend, [{"artifact": str(report), "content_hash": old["content_hash"]}],
+                       name="earlier")["evidence"][0]
+    assert earlier["artifact"]["id"] == old["id"] and "content_hash" in earlier["checked"]
+    stale = backend.import_dataset(rows=ROWS, name="stale", evidence=[{"artifact": str(report), "content_hash": "1" * 64}])
+    assert stale["code"] == "CONFLICT" and stale["field"] == "evidence[0].content_hash"
+    assert "evidence_reference" in kinds(stale)

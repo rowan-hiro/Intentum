@@ -233,3 +233,24 @@ def test_the_cli_turns_join_diagnostics_off(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_BACKEND_JOIN_DIAGNOSTICS", "0")
     server_main.main(["--workspace", str(tmp_path / "c")])
     assert seen == [True, False, False]
+
+
+def test_a_left_key_coerced_to_equal_several_right_keys_is_counted_once(backend):
+    # 9007199254740993 has no double of its own: compared with the float key it equals 9007199254740992.0 too.
+    rows(backend, "readings", [{"sensor": 9007199254740992.0, "value": 1.5}])
+    rows(backend, "sensors", [{"sensor": 9007199254740992, "site": "north"},
+                              {"sensor": 9007199254740993, "site": "south"}])
+    response = backend.transform_dataset("readings", {"join": {"right": "sensors", "on": {"sensor": "sensor"}}})
+    assert response["result"]["row_count"] == 2
+    [facts] = response["joins"]
+    assert (facts["left_rows"], facts["left_keys"], facts["matched_left_keys"]) == (1, 1, 1)
+    assert facts["left_keys_with_multiple_matches"] == 1 and facts["rows_added_by_multiple_matches"] == 1
+    assert facts["right_rows"] == 2 and facts["unmatched_right_rows"] == 0 and facts["rows_out"] == 2
+    assert facts["multiple_match_sample"] == [{"key": {"sensor": 9007199254740992.0}, "left_rows": 1, "right_rows": 2}]
+    assert kinds(response) == ["join_multiplied_rows"]
+    # the other way round: two integer left keys both equal one float right key, and each matches it once
+    reverse = backend.transform_dataset("sensors", {"join": {"right": "readings", "on": {"sensor": "sensor"}}})
+    [facts] = reverse["joins"]
+    assert reverse["result"]["row_count"] == 2 == facts["rows_out"]
+    assert (facts["left_rows"], facts["left_keys"], facts["matched_left_keys"]) == (2, 2, 2)
+    assert facts["left_keys_with_multiple_matches"] == 0 and facts["unmatched_right_rows"] == 0

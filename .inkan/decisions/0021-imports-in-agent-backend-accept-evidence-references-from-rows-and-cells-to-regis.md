@@ -36,3 +36,9 @@ import_dataset, with rows or a path, takes an optional evidence list. Each refer
 * The harness can attach its recorded observations (frame ids, segment ids, timestamps) as references when it imports what it read; that change belongs to agent_harness
 
 ## Decision History
+
+### 2026-09-30T09:29:08.957Z, outcome 2026-09-30-0924-nvtr
+
+Status: accepted -> accepted
+
+Review of PR 18, two clarifications. A reference written as a path to an existing file names that file: it is found or registered by path and current content hash before any name is matched, a content_hash of an earlier registered version of the path resolves to that version, and only a bare name falls back to the file name of a registered artifact; attach_metadata resolves its source the same way. Row positions are found by the table's scan order (insertion order, the source's order after an import) rather than the rowid pseudo-column, which an imported column named rowid shadows.

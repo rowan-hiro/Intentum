@@ -1429,7 +1429,7 @@ class Backend:
         """
         found: list[_Evidence] = []
         for spec in parse_evidence(loose):
-            artifact = self._find_artifact(spec.artifact, f"{spec.field}.artifact")
+            artifact = self._find_artifact(spec.artifact, f"{spec.field}.artifact", content_hash=spec.content_hash)
             checked, unchecked = ["artifact"], []
             if spec.content_hash is not None:
                 if spec.content_hash != artifact.content_hash:
@@ -1607,36 +1607,70 @@ class Backend:
             body["values"] = ref.values
         return body
 
+    @staticmethod
+    def _written_as_path(reference: str) -> bool:
+        """Whether a reference is written as a path (it has a separator or starts with ~), not as a bare name."""
+        return "/" in reference or "\\" in reference or reference.startswith("~")
+
     def _find_artifact(self, reference: str, field: str, *, noun: str = "artifacts",
-                       listed: Callable[[Artifact], bool] | None = None) -> Artifact:
-        """An artifact by id, name or path; a file that is not registered yet is registered with its hash."""
+                       listed: Callable[[Artifact], bool] | None = None,
+                       content_hash: str | None = None) -> Artifact:
+        """An artifact by id, by the path of a file, or by name.
+
+        A reference written as a path to an existing file names that file: it is found or registered by its path
+        and current content hash, so a changed file becomes a new version and another file with the same name is
+        never taken for it. A ``content_hash`` of an earlier registered version of the path resolves to that
+        version; one that matches neither a registered version nor the file as it is now is refused. Anything
+        else is matched against registered names, which may be relative paths (doc/notes.md, also written
+        /doc/notes.md or ./doc/notes.md); only a bare name falls back to the file name of a registered artifact
+        (notes.md). ``content_hash`` picks among versions that share a name, and a path whose file is gone
+        resolves to its registered versions.
+        """
         text = reference.strip()
         artifact = self.store.get_artifact(text)
-        if artifact is None:
-            # A leading slash or ./ and a bare file name are the same file to an agent.
-            loose = text.lstrip("./").lower()
-            candidates = [a for a in self.store.list_artifacts()
-                          if a.name.lower() in (text.lower(), loose) or a.path == text]
-            if not candidates and loose:
-                candidates = [a for a in self.store.list_artifacts() if Path(a.name).name.lower() == Path(loose).name]
-            if len(candidates) == 1:
-                artifact = candidates[0]
-            elif len(candidates) > 1:
-                raise AmbiguousReferenceError(f"Several artifacts are named {text!r}.", field=field,
-                                              candidates=[self._artifact_summary(a) for a in candidates])
-        if artifact is None:
-            path = Path(text).expanduser()
-            if not path.is_file():
-                known = [a for a in self.store.list_artifacts() if listed is None or listed(a)]
-                shown = ", ".join(a.name for a in known[:12]) if known else "none"
-                raise NotFoundError(
-                    f"No artifact or file matches {text!r}; the {noun} registered here are {shown}.",
-                    field=field,
-                    candidates=[self._artifact_summary(a) for a in known],
-                    details={"reference": text, noun: [a.name for a in known]},
-                )
-            artifact = self._register_artifact(path, self._classify(path, None))
-        return artifact
+        if artifact is not None:
+            return artifact
+        as_path = self._written_as_path(text)
+        path = Path(text).expanduser()
+        if path.is_file() and as_path:
+            resolved = str(path.resolve())
+            versions = [a for a in self.store.list_artifacts() if a.path == resolved]
+            earlier = next((a for a in versions if a.content_hash == content_hash), None) if content_hash else None
+            if earlier is not None:
+                return earlier
+            current = self.workspace.content_hash(path.resolve())
+            if content_hash is not None and content_hash != current:
+                raise ConflictError(
+                    f"content_hash does not match {text} as it is now ({current}) or any registered version of it.",
+                    field=field.rsplit(".", 1)[0] + ".content_hash",
+                    details={"path": resolved, "registered": current, "given": content_hash,
+                             "versions": [{"id": a.id, "content_hash": a.content_hash} for a in versions]},
+                    hint="Leave content_hash out to reference the file as it is now.")
+            return self._register_artifact(path, self._classify(path, None))
+        artifacts = self.store.list_artifacts()
+        loose = text.lstrip("./").lower()
+        candidates = [a for a in artifacts if a.name.lower() in (text.lower(), loose)]
+        if not candidates and as_path:
+            candidates = [a for a in artifacts if a.path == str(path.resolve())]  # a registered file that is gone
+        if not candidates and not as_path:
+            candidates = [a for a in artifacts if Path(a.name).name.lower() == loose]
+        if len(candidates) > 1 and content_hash:
+            candidates = [a for a in candidates if a.content_hash == content_hash] or candidates
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise AmbiguousReferenceError(f"Several artifacts are named {text!r}; give content_hash or an artifact id.",
+                                          field=field, candidates=[self._artifact_summary(a) for a in candidates])
+        if path.is_file():
+            return self._register_artifact(path, self._classify(path, None))
+        known = [a for a in artifacts if listed is None or listed(a)]
+        shown = ", ".join(a.name for a in known[:12]) if known else "none"
+        raise NotFoundError(
+            f"No artifact or file matches {text!r}; the {noun} registered here are {shown}.",
+            field=field,
+            candidates=[self._artifact_summary(a) for a in known],
+            details={"reference": text, noun: [a.name for a in known]},
+        )
 
     def _resolve_document(self, source: str) -> Artifact:
         if not isinstance(source, str) or not source.strip():

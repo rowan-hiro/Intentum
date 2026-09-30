@@ -276,3 +276,23 @@ def test_checks_reach_the_backend_through_the_mcp_tool(backend):
     result = asyncio.run(server.call_tool("declare_output", {
         "columns": ["student", "score"], "rows": "at_least_one", "checks": {"score": {"min": 0, "max": 100}}}))
     assert result.structured_content["contract"]["checks"] == [{"column": "score", "min": 0, "max": 100}]
+
+
+def test_a_timestamp_bound_keeps_its_time_against_a_date_column(backend, exports):
+    backend.import_dataset(name="events", rows=[{"day": "2025-06-02"}])
+    backend.declare_output(["day"], rows="one", checks={"day": {"min": "2025-06-02T12:00:00"}})
+    response = backend.export_result("events", str(exports / "events.csv"))
+    assert response["code"] == "CONTRACT_MISMATCH"
+    assert response["details"]["problems"][0]["evidence"]["values_outside"] == 1
+    backend.declare_output(["day"], rows="one", checks={"day": {"min": "2025-06-02", "max": "2025-06-02T00:00:00"}},
+                           reason="mixed bounds: a date and a timestamp")
+    assert backend.export_result("events", str(exports / "mixed.csv"))["status"] == "success"
+
+
+def test_a_date_bound_on_a_timestamp_column_is_that_days_midnight(backend, exports):
+    backend.import_dataset(name="shifts", rows=[{"started": "2025-06-30T10:00:00"}])
+    backend.declare_output(["started"], rows="one", checks={"started": {"max": "2025-06-30"}})
+    response = backend.export_result("shifts", str(exports / "late.csv"))
+    assert response["code"] == "CONTRACT_MISMATCH"
+    backend.declare_output(["started"], rows="one", checks={"started": {"max": "2025-07-01"}}, reason="next midnight")
+    assert backend.export_result("shifts", str(exports / "ok.csv"))["status"] == "success"

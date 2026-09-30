@@ -464,10 +464,17 @@ class BoundCheck:
 
     @property
     def cast(self) -> str | None:
-        """The type a bound is cast to before it is compared: none for numbers."""
-        if self.check.min is None and self.check.max is None or self.logical_type.is_numeric:
+        """The type values and bounds are compared in: none for numbers, and the finer temporal type of the two.
+
+        A date compared with a timestamp stands for its midnight, so a timestamp bound on a date column keeps its
+        time (a noon lower bound excludes that day), and a date bound on a timestamp column is that day's midnight.
+        """
+        bounds = [b for b in (self.check.min, self.check.max) if b is not None]
+        if not bounds or self.logical_type.is_numeric:
             return None
-        return "DATE" if self.logical_type == LogicalType.DATE else "TIMESTAMP"
+        if self.logical_type == LogicalType.TIMESTAMP or any(bound_kind(b) == "timestamp" for b in bounds):
+            return "TIMESTAMP"
+        return "DATE"
 
     @property
     def nan(self) -> bool:

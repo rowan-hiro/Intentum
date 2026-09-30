@@ -510,8 +510,13 @@ declared `string` or `boolean`, or checks one column twice.
 checked column and its non-null values outside the range. A null is unknown to
 a range and violates only `not_null`; a NaN is outside every range; an empty
 dataset passes every check, since `rows` already says whether the answer may
-be empty. A range on a column that is neither numeric nor temporal, or with
-bounds of the other kind, can never hold and is a mismatch too. A violation is
+be empty. Temporal values and bounds are compared in the finer type of the
+two: a date compared with a timestamp stands for its midnight, so a timestamp
+bound on a date column keeps its time (a noon lower bound excludes that day),
+and a date bound on a timestamp column is that day's midnight (a `max` of
+`2025-06-30` excludes 10:00 that day). A range on a column that is neither
+numeric nor temporal, or with bounds of the other kind, can never hold and is
+a mismatch too. A violation is
 a recoverable `CONTRACT_MISMATCH` whose problem carries the check, the null and
 out-of-range counts, the observed minimum and maximum, and up to five offending
 rows of the columns the contract names. It carries no repair: the backend
@@ -542,11 +547,19 @@ operation produced it (MADR 0021):
               {"artifact": "open_day.mp4", "rows": [1], "columns": ["sold"], "time_s": [12.5, 14.0]}]}
 ```
 
-A reference names an artifact by id or name, or a file by its path, which is
-then registered with its content hash. `rows` are 0-based positions of the
+A reference names an artifact by id, a file by its path, or an artifact by
+name. A reference written as a path (with a separator or `~`) to an existing
+file names that file: it is found or registered by its path and current
+content hash, so a changed file becomes a new version, another file with the
+same name is never taken for it, and a `content_hash` of an earlier registered
+version of that path resolves to that version. Anything else is matched
+against registered names, which may be relative paths (`doc/notes.md`); only a
+bare name falls back to the file name of a registered artifact (`notes.md`),
+and `content_hash` picks among versions that share a name. `attach_metadata`
+resolves its `source` the same way. `rows` are 0-based positions of the
 imported rows in the order the source is read (rows as written, file order,
-a SQLite table's own order) and `columns` their names; leaving either out means
-all of them. The place is `page` (1 or more), `span` (`[start, end)` character
+a SQLite table's own order), found by scan order rather than by any column
+name, and `columns` their names; leaving either out means all of them. The place is `page` (1 or more), `span` (`[start, end)` character
 offsets in the artifact's text), `quote`, `time_s` (seconds or `[start, end]`)
 and a free `note`; `content_hash`, when given, must be the registered hash.
 File imports take `evidence` too.
@@ -741,8 +754,11 @@ whether or not anything is wrong:
 
 The left input is the relation the transform holds just before the join
 (after any filter written before it), the right input the joined dataset's
-version; both are grouped by the join keys and the groups matched with the
-join's own equality, so a left row with a null key is counted in
+version; both are grouped by the join keys, and each left group is counted
+once with the rows of every right group its keys equal under the join's own
+comparison. A key coerced for that comparison can equal several right groups
+(a float left key and two integer right keys that round to it), and those
+matches add up to one multiplied key. A left row with a null key is counted in
 `null_key_left_rows` and among the unmatched rows, and never sampled as a key.
 Keys are distinct non-null key values; `match_coverage` is the share of left
 rows that matched at least one right row; `rows_out` is what the step returns

@@ -116,6 +116,9 @@ class DuckDBEngine:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self.conn = duckdb.connect(str(self.path))
+        # Scans return rows in the order they were inserted, which is the source's order after an import: previews,
+        # exports and evidence row positions (rows_at) rely on it. It is DuckDB's default, stated here.
+        self.conn.execute("SET preserve_insertion_order = true")
         self._sqlite_loaded = False
 
     # -- readers ---------------------------------------------------------
@@ -387,19 +390,22 @@ class DuckDBEngine:
         """Hold ``column`` of the rows ``sql`` returns to a value check (an output contract's, MADR 0020).
 
         Returns how many values are null, how many non-null values fall outside [low, high] (bounds are bound as
-        parameters, cast to ``cast`` when given; with ``nan`` a NaN is outside every range), the smallest and
+        parameters; values and bounds are compared as ``cast`` when given; with ``nan`` a NaN is outside every
+        range), the smallest and
         largest value, and up to ``sample`` violating rows projected to ``context``. A null is a violation only
         under ``not_null``. One scan, plus one for the sample when something violates.
         """
         ident = quote_ident(column)
         bound = f"CAST(? AS {cast})" if cast else "?"
+        # Compared in the cast type, so a date column meets a timestamp bound as its midnight, not the bound as a date.
+        value = f"CAST({ident} AS {cast})" if cast else ident
         terms: list[str] = []
         params: list[Any] = []
         if low is not None:
-            terms.append(f"{ident} < {bound}")
+            terms.append(f"{value} < {bound}")
             params.append(low)
         if high is not None:
-            terms.append(f"{ident} > {bound}")
+            terms.append(f"{value} > {bound}")
             params.append(high)
         if nan and terms:
             terms.append(f"isnan({ident})")
@@ -424,16 +430,20 @@ class DuckDBEngine:
     def rows_at(self, table: str, positions: list[int], columns: list[str]) -> list[tuple[Any, ...]]:
         """The rows at 0-based ``positions`` of a table as it was loaded, as (position, *columns), in position order.
 
-        A table created from a source keeps the order the source was read in as its rowid (DuckDB preserves
-        insertion order), so a position names the same row the source had there.
+        A scan without ORDER BY returns a table's rows in insertion order (DuckDB's preserve_insertion_order, on by
+        default), and a table created from a source was inserted in the order the source was read, so the row at
+        OFFSET n is the source's row n. No name is involved: the rowid pseudo-column would be shadowed by an
+        imported column named rowid.
         """
         if not positions:
             return []
         projection = ", ".join(quote_ident(c) for c in columns)
-        listed = ", ".join(str(int(p)) for p in sorted(set(positions)))
-        _, rows = self.query(f"SELECT rowid, {projection} FROM {quote_ident(table)} WHERE rowid IN ({listed}) "
-                             "ORDER BY rowid")
-        return rows
+        found: list[tuple[Any, ...]] = []
+        for position in sorted(set(int(p) for p in positions)):
+            _, rows = self.query(f"SELECT {projection} FROM {quote_ident(table)} LIMIT 1 OFFSET {position}")
+            if rows:
+                found.append((position, *rows[0]))
+        return found
 
     def sample(self, table: str, limit: int) -> tuple[list[str], list[tuple[Any, ...]]]:
         return self.query(f"SELECT * FROM {quote_ident(table)}", limit=limit)
