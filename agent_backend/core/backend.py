@@ -28,7 +28,8 @@ from typing import Any, Callable, Iterator
 
 from pydantic import ValidationError
 
-from ..storage.duckdb.engine import SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource, physical_to_logical
+from ..storage.duckdb.engine import (SUPPORTED_FORMATS, AnalyticsEngine, DuckDBEngine, TableSource, physical_to_logical,
+                                     quote_ident)
 from ..storage.duckdb.sandbox import QuerySandbox
 from ..storage.files.workspace import Workspace
 from ..storage.metadata.interface import MetadataStore
@@ -39,8 +40,14 @@ from .recovery import (Advice, advise_contract, advise_empty_result, advise_erro
 from .access import AccessPolicy, AllowAllPolicy
 from .audit import AuditService
 from .contracts import (
+    BoundCheck,
+    ContractProblem,
     ContractSpec,
+    bind_checks,
+    check_problem,
+    check_summary,
     contract_summary,
+    describe_check,
     match_columns,
     organizing_keys,
     parse_contract,
@@ -974,12 +981,14 @@ class Backend:
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
             result = self.executor.execute_transform(ir, plan, count_distinct=self._contract_keys(ir),
-                                                     diagnose_joins=self.join_diagnostics)
+                                                     diagnose_joins=self.join_diagnostics,
+                                                     value_checks=self._contract_checks(ir))
             log_event("execution.completed", operation_id=op.id, rows=result.row_count, table=result.physical_table)
             units = self._units(ir, used)
             advice = self._transform_advice(ir, used, result.row_count, tool, call_arguments,
                                             ir.output.name if materialize else None, distinct_keys=result.distinct_keys,
-                                            ties=result.ties, joins=result.joins, units=units)
+                                            ties=result.ties, joins=result.joins, units=units,
+                                            check_counts=result.check_counts)
 
             now = self.clock()
             response: dict[str, Any]
@@ -1037,10 +1046,23 @@ class Backend:
         keys = [stands.get(k) for k in contract.row_keys]
         return [k for k in keys if k] if all(keys) else None
 
+    def _contract_checks(self, ir: TransformIR) -> list[BoundCheck] | None:
+        """The open contract's value checks on the result's columns, when every one of them can be counted there:
+        export counts them, so the advice must too before it says a result matches (MADR 0020)."""
+        try:
+            contract = self.store.latest_contract()
+        except Exception as err:  # advice never breaks a response
+            log_event("advice.skipped", error=repr(err))
+            return None
+        if contract is None or contract.status != ContractStatus.OPEN or not contract.checks:
+            return None
+        bound, problems = bind_checks(contract, [(f.name, f.logical_type) for f in ir.output_schema])
+        return bound if not problems and len(bound) == len(contract.checks) else None
+
     def _transform_advice(self, ir: TransformIR, used: list[Dataset], row_count: int, tool: str,
                           arguments: dict[str, Any], materialized_name: str | None,
                           distinct_keys: int | None = None, ties: Any = None, joins: Any = None,
-                          units: UnitReport | None = None) -> list[Advice]:
+                          units: UnitReport | None = None, check_counts: Any = None) -> list[Advice]:
         """Advice on a successful transform: an empty result explained, numbers compared or sorted as text, rows
         a sort leaves tied, rows a join dropped or multiplied, operands with different declared units, or a
         result that fits the contract."""
@@ -1069,7 +1091,8 @@ class Backend:
             contract = self.store.latest_contract()
             if contract is not None:
                 found = advise_contract(ir, contract=contract, row_count=row_count, tool=tool, arguments=arguments,
-                                        materialized_name=materialized_name, distinct_keys=distinct_keys)
+                                        materialized_name=materialized_name, distinct_keys=distinct_keys,
+                                        check_counts=check_counts)
                 if found is not None:
                     advice.append(found)
         except Exception as err:  # advice never breaks a response
@@ -1731,6 +1754,7 @@ class Backend:
         order_by: Any = None,
         description: str | None = None,
         reason: str | None = None,
+        checks: Any = None,
         principal: str | None = None,
     ) -> dict[str, Any]:
         """Declare the shape of the deliverable before (or while) working towards it.
@@ -1740,16 +1764,19 @@ class Backend:
         contract is current per workspace: declaring while one is open and
         unsatisfied is an amendment and needs a ``reason``, which is recorded.
         Re-declaring the same shape changes nothing and is not an error.
+        ``checks`` hold the values of named columns to not_null and inclusive
+        ranges, verified at export like the shape (MADR 0020).
         """
         try:
-            spec = parse_contract(columns, rows, order_by, description)
+            spec = parse_contract(columns, rows, order_by, description, checks)
         except BackendError as err:
             # Teach on refusal: a declaration is refused with the grammar it accepts.
             err.advice = advise_error(err, tool="declare_output", arguments={
-                "columns": columns, "rows": rows, "order_by": order_by, "description": description})
+                "columns": columns, "rows": rows, "order_by": order_by, "description": description,
+                "checks": checks})
             raise
         intent = _jsonable({"columns": columns, "rows": rows, "order_by": order_by, "description": description,
-                            "reason": reason})
+                            "reason": reason, "checks": checks})
         with self._operation(OperationKind.DECLARE_OUTPUT, intent, principal) as op:
             op.canonical_ir = {
                 "operation": "declare_output",
@@ -1757,6 +1784,7 @@ class Backend:
                 "rows": str(spec.rows) if spec.rows else None,
                 "row_keys": spec.row_keys,
                 "order_by": [{"column": o.name, "descending": o.descending} for o in spec.order_by],
+                "checks": [check_summary(c) for c in spec.checks],
             }
             current = self.store.latest_contract()
             now = self.clock()
@@ -1785,6 +1813,7 @@ class Backend:
                 current.rows = spec.rows
                 current.row_keys = spec.row_keys
                 current.order_by = spec.order_by
+                current.checks = spec.checks
                 if spec.description:
                     current.description = spec.description
                 current.revision += 1
@@ -1807,8 +1836,9 @@ class Backend:
                 log_event("state.committed", operation_id=op.id, contract_id=current.id, amended=True)
                 return response
             contract = OutputContract(id=self.store.allocate_id("oc"), columns=spec.columns, rows=spec.rows,
-                                      row_keys=spec.row_keys, order_by=spec.order_by, description=spec.description,
-                                      operation_id=op.id, created_at=now, updated_at=now)
+                                      row_keys=spec.row_keys, order_by=spec.order_by, checks=spec.checks,
+                                      description=spec.description, operation_id=op.id, created_at=now,
+                                      updated_at=now)
             with self.store.transaction():
                 self.store.insert_contract(contract)
                 details: dict[str, Any] = {"contract": contract_summary(contract)}
@@ -1919,11 +1949,16 @@ class Backend:
             distinct = self.engine.count_distinct_rows(version.physical_table, [k for k in keys if k])
         if contract.rows != RowCardinality.ONE_PER or distinct is not None or version.row_count == 0:
             problems += verify_rows(contract, version.row_count, distinct)
+        checked, check_problems = self._check_values(contract, actual, version.physical_table, stands)
+        problems += check_problems
         if problems:
             repair = repair_transform(contract, problems)
+            only_values = all(p.kind == "check" for p in problems)
             if repair is not None:
                 first = (f"Reshape it with materialize_result(source={ds.name!r}, transform={json.dumps(repair, ensure_ascii=False)}) "
                          "and export that dataset, or")
+            elif only_values:
+                first = "Produce a dataset whose values hold the declared checks and export that, or"
             else:
                 first = "Produce a dataset with the declared shape and export that, or"
             details: dict[str, Any] = {
@@ -1935,7 +1970,8 @@ class Backend:
             if repair is not None:
                 details["repair"] = repair
             err = ContractMismatchError(
-                f"{ds.name} does not have the shape declared in output contract {contract.id}: "
+                (f"{ds.name} fails the value checks of output contract {contract.id}: " if only_values else
+                 f"{ds.name} does not have the shape declared in output contract {contract.id}: ")
                 + " ".join(p.message for p in problems),
                 field="dataset",
                 candidates=[n for n, _ in actual],
@@ -1955,6 +1991,12 @@ class Backend:
                 err.advice = [Advice("reshape_to_contract",
                                      f"{ds.name} differs from the declared shape only in shape: {problem_text} "
                                      "Reshape it as below and export the new dataset." + amend, rewrite=rewrite)]
+            elif only_values:
+                err.advice = [Advice("contract_mismatch",
+                                     f"{ds.name} holds values the contract's checks exclude: {problem_text} "
+                                     "The offending rows are in details.problems[].evidence. The backend changes no "
+                                     "value to pass a check: find where these values come from in the data and "
+                                     "export a dataset whose values hold." + amend)]
             else:
                 err.advice = [Advice("contract_mismatch",
                                      f"{ds.name} lacks something the contract declares: {problem_text} "
@@ -1966,10 +2008,40 @@ class Backend:
             evidence["cardinality"] = str(contract.rows)
         if distinct is not None:
             evidence["distinct_keys"] = distinct
+        if checked:
+            evidence["checks"] = checked
         header = respelled(contract, [n for n, _ in actual])
         if header:
             evidence["written_as"] = header  # dataset column -> the declared spelling the file carries (MADR 0018)
         return evidence
+
+    # Offending rows a failed value check shows, as evidence.
+    CHECK_SAMPLE_ROWS = 5
+
+    def _check_values(self, contract: OutputContract, actual: list[tuple[str, LogicalType]], table: str,
+                      stands: dict[str, str]) -> tuple[list[dict[str, Any]], list[ContractProblem]]:
+        """Count each value check over the dataset: its counts for the evidence, and the checks that failed.
+
+        A failed check shows up to ``CHECK_SAMPLE_ROWS`` offending rows, projected to the columns the contract
+        names (carried, then organizing) so each row can be found again.
+        """
+        bound, problems = bind_checks(contract, actual)
+        context = list(dict.fromkeys(stands[n] for n in [c.name for c in contract.columns] + organizing_keys(contract)
+                                     if n in stands))
+        checked: list[dict[str, Any]] = []
+        for target in bound:
+            check = target.check
+            nulls, outside, low, high, rows = self.engine.check_values(
+                f"SELECT * FROM {quote_ident(table)}", target.column, not_null=check.not_null, low=check.min,
+                high=check.max, cast=target.cast, nan=target.nan, context=context, sample=self.CHECK_SAMPLE_ROWS)
+            low, high = _jsonable(low), _jsonable(high)
+            problem = check_problem(target, nulls, outside, low, high,
+                                    [dict(zip(context, _jsonable(list(r)))) for r in rows])
+            if problem is not None:
+                problems.append(problem)
+            checked.append({**check_summary(check), "null_values": nulls, "values_outside": outside,
+                            "observed_min": low, "observed_max": high})
+        return checked, problems
 
     @staticmethod
     def _contract_shape(contract: OutputContract) -> str:
@@ -1981,6 +2053,8 @@ class Backend:
         if contract.order_by:
             text += (", ordered by ["
                      + ", ".join(o.name + (" desc" if o.descending else "") for o in contract.order_by) + "]")
+        if contract.checks:
+            text += f", checks on [{', '.join(c.column for c in contract.checks)}]"
         return text
 
     @staticmethod
@@ -2000,6 +2074,8 @@ class Backend:
         if keys:
             text += (f"; [{', '.join(keys)}] organize the answer without being part of it, so the dataset must carry "
                      "them and the file will not")
+        if contract.checks:
+            text += "; its values must hold: " + "; ".join(describe_check(c) for c in contract.checks)
         if contract.status == ContractStatus.SATISFIED:
             return text + f"; satisfied by {contract.satisfied_by}."
         return text + "; export_result will refuse anything else."

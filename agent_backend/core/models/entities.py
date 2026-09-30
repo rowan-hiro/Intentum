@@ -251,6 +251,19 @@ class ContractOrder(_Entity):
     descending: bool = False
 
 
+class ContractCheck(_Entity):
+    """A check on the values of one column the contract names, verified at export.
+
+    ``not_null`` forbids nulls; ``min`` and ``max`` bound the non-null values inclusively and are numbers, or ISO
+    dates or timestamps for temporal columns. A null value is unknown to a range, and a NaN is outside every range.
+    """
+
+    column: str
+    not_null: bool = False
+    min: int | float | str | None = None
+    max: int | float | str | None = None
+
+
 class OutputContract(_Entity):
     """The declared shape of the deliverable an agent is working towards.
 
@@ -262,7 +275,8 @@ class OutputContract(_Entity):
     order. ``order_by`` and ``row_keys`` are what it is *organized by*: they may
     name columns the deliverable does not carry, and those columns are expected
     in the dataset at export so the backend can order and count by them, then
-    left out of the file (MADR 0012).
+    left out of the file (MADR 0012). ``checks`` hold the values of named
+    columns to a declared condition (MADR 0020).
     """
 
     id: str
@@ -271,6 +285,7 @@ class OutputContract(_Entity):
     rows: RowCardinality | None = None
     row_keys: list[str] = Field(default_factory=list)
     order_by: list[ContractOrder] = Field(default_factory=list)
+    checks: list[ContractCheck] = Field(default_factory=list)
     description: str = ""
     revision: int = 1
     operation_id: str

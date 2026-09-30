@@ -54,8 +54,9 @@ without advice and the repair rate beside the pass rate.
 ### The deliverable is declared before the work, and the export is held to it
 
 `declare_output` records the shape of the answer while the requirement is in
-front of the agent: the columns the file carries, the row cardinality, and
-what it is organized by (MADR 0007, 0012). `export_result` checks the dataset
+front of the agent: the columns the file carries, the row cardinality, what
+it is organized by, and optional checks on their values (MADR 0007, 0012,
+0020). `export_result` checks the dataset
 against that contract before anything is read or written, refuses a mismatch
 with the declared and the actual shape and the transform that repairs it, and
 records a match with its evidence. The declaration is made at turn one; the
@@ -481,6 +482,46 @@ This review is an interaction instruction, not an additional confirmation API
 or a backend model: a successful declaration records what the agent said,
 not whether it understood the request correctly.
 
+#### Value checks
+
+A contract can also hold the values of the columns it names (MADR 0020).
+`checks` takes `not_null` and an inclusive `min` and `max`, whose bounds are
+numbers for numeric columns or ISO dates and timestamps for temporal ones,
+on any name the contract uses, carried or organizing:
+
+```json
+{"columns": ["station", {"name": "celsius", "type": "float"}], "rows": {"one_per": ["station"]},
+ "order_by": ["read_at"],
+ "checks": [{"column": "celsius", "not_null": true, "min": -60, "max": 60},
+            {"column": "read_at", "min": "2025-06-01", "max": "2025-06-30"}]}
+```
+
+The same checks may be written as an object keyed by column
+(`{"celsius": {"range": [-60, 60]}}`) or inside a column declaration
+(`{"name": "celsius", "type": "float", "not_null": true}`); the contract
+stores them in one canonical form, and changing them on an open contract is
+an amendment that needs a reason. A declaration is refused, with the accepted
+shape as advice, when a check names a column the contract does not use,
+checks nothing, gives a bound that is neither a number nor an ISO date or
+timestamp, mixes the two, puts min above max, gives a range on a column
+declared `string` or `boolean`, or checks one column twice.
+
+`export_result` counts, before anything is written, the null values of each
+checked column and its non-null values outside the range. A null is unknown to
+a range and violates only `not_null`; a NaN is outside every range; an empty
+dataset passes every check, since `rows` already says whether the answer may
+be empty. A range on a column that is neither numeric nor temporal, or with
+bounds of the other kind, can never hold and is a mismatch too. A violation is
+a recoverable `CONTRACT_MISMATCH` whose problem carries the check, the null and
+out-of-range counts, the observed minimum and maximum, and up to five offending
+rows of the columns the contract names. It carries no repair: the backend
+never changes, drops or invents a value to pass a check. A passing export
+records every check with its counts in the contract evidence and the audit
+event. On a transform, `matches_contract` is said only after the checks are
+counted over the result as export counts them, and a result whose shape fits
+but whose values fail gets `contract_checks_failed` with the counts. A
+contract without checks behaves as before.
+
 This is the trust model of MADR 0008 made concrete: the declaration made
 fresh is the reference, the export attempted twenty turns later is the thing
 that gets checked, and the check runs outside the agent's context.
@@ -609,9 +650,11 @@ operands whose declared units differ names the operands and their units
 timestamp pattern formatted nothing names the
 columns (`format_not_applied`, under Exporting an answer); and a result that
 already has, or mechanically reshapes to, the open output contract says so with
-the next call (`matches_contract`, `near_contract`). A `one_per` contract is
-said to match only after the result's distinct keys are counted, as
-`export_result` counts them. The backend teaches its own
+the next call (`matches_contract`, `near_contract`), or that its values fail
+the contract's value checks (`contract_checks_failed`). A `one_per` contract is
+said to match only after the result's distinct keys are counted, and a
+contract with value checks only after they are counted, as `export_result`
+counts them. The backend teaches its own
 language and reports its own data; it still never reads the task. Pacing (the
 turn budget, repeated previews) belongs to the agent harness.
 
@@ -990,6 +1033,13 @@ the canonical IR, the full execution plan and the generated SQL.
   renamed, misordered and mistyped columns and for row cardinality, with the
   repair transform carried in the error; evidence recorded on satisfaction;
   exports without a contract unchanged.
+- `test_contract_checks.py`: value checks on made-up grades and weather
+  readings — the three ways to declare them, every refused shape with its
+  advice, amendment, a passing export and its recorded counts, null and
+  out-of-range refusals with bounded offending rows and no file written, nulls
+  passing a range, NaN outside it, temporal and organizing columns, a range
+  that cannot hold its column, an empty dataset, contracts without checks,
+  transform advice that counts the checks, and storage migration.
 - `test_export.py`: export to csv/parquet, overwrite and export-root refusals,
   and the format specification: half-up rounding on the shortest decimal form,
   trailing zeros, whole numbers keeping a decimal, date patterns, null text,
@@ -1040,7 +1090,7 @@ These capabilities are available in the current code:
 | Imports and semantic metadata | Unicode identifiers, CSV/JSON/Parquet/SQLite imports, rows written inline (`import_dataset(rows=...)`), `import_workspace`, source artifacts, `attach_metadata`, and import-time date/timestamp refinement. |
 | Semantic transforms | `select`, `filter`, `aggregate`, `sort`, `limit`, `rename`, `derive`, `join`, and `semi_join`; grouping without measures returns distinct groups, and compact transforms handle post-aggregate projection. |
 | [Raw query fallback](#raw-query-fallback) | Read-only DuckDB SQL for windows, tie-aware extrema, unions and CTEs, with version-bound inputs, schema validation, sandbox execution, optional query deadlines, lineage, idempotency and replay. Responses report `used_raw_query`. |
-| [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, and reproducible value formatting. |
+| [Output contracts](#output-contracts) and [exports](#exporting-an-answer) | Declaration and reasoned amendment, separate carried and organizing columns, export-time shape checks, not-null and range [value checks](#value-checks) with evidence, and reproducible value formatting. |
 | [Recovery advice](#failure-semantics) | Structured advice on refusals, mechanical tool-call rewrites, and advice for empty results or results matching the declared contract. |
 | [Declared units](#declared-units) | Units follow their columns through transforms and into materialized datasets; an addition, subtraction or comparison of different declared units is reported, never refused or converted. |
 | [Join diagnostics](#join-diagnostics) | Every semantic join reports matched, unmatched and multiplied left rows and keys with bounded samples; advice when a join dropped or multiplied rows; server-level opt-out. |
@@ -1087,14 +1137,14 @@ are enough to name more of the errors that enter silently.
    fact about the workspace, attached to a successful response, never a
    judgement about the task.
 2. **Contracts from shape to values.** `declare_output` records what the
-   answer carries and what it is organized by. The same declaration can carry
-   checks about values, written fresh while the requirement is in front of the
-   agent and verified at export by the machinery that checks the shape: a
-   column that is never null, a value inside a range, a total that reconciles
-   with a source column, a row count that relates to a source in a stated way.
-   A failed check is a `CONTRACT_MISMATCH` with the evidence. The backend
-   still never reads the task; it holds the agent to what the agent wrote
-   down.
+   answer carries, what it is organized by, and now checks on its values: a
+   column that is never null and a value inside a range are verified at
+   export, and a failed check is a `CONTRACT_MISMATCH` with the evidence
+   (MADR 0020). What remains are checks relative to a source, bound to a
+   managed dataset and version rather than to copied values: a total that
+   reconciles with a source column, and a row count or key coverage that
+   relates to a source in a stated way. The backend still never reads the
+   task; it holds the agent to what the agent wrote down.
 3. **Semantic contracts from the human side.** The semantic layer is the
    human's declaration, as the output contract is the agent's.
    `attach_metadata` already ingests descriptions and units from a knowledge

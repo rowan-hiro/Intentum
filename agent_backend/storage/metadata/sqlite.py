@@ -15,6 +15,7 @@ from ...core.models.entities import (
     AuditEvent,
     Column,
     ContractColumn,
+    ContractCheck,
     ContractOrder,
     ContractStatus,
     Dataset,
@@ -134,6 +135,7 @@ CREATE TABLE IF NOT EXISTS output_contracts (
     rows TEXT,
     row_keys_json TEXT NOT NULL DEFAULT '[]',
     order_by_json TEXT NOT NULL DEFAULT '[]',
+    checks_json TEXT NOT NULL DEFAULT '[]',
     description TEXT NOT NULL DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 1,
     operation_id TEXT NOT NULL,
@@ -158,6 +160,7 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("columns", "unit", "TEXT NOT NULL DEFAULT ''"),
     ("operations", "parent_operation_id", "TEXT"),
     ("output_contracts", "order_by_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("output_contracts", "checks_json", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 
@@ -604,6 +607,7 @@ class SqliteMetadataStore:
             row_keys=json.loads(r["row_keys_json"]),
             order_by=[ContractOrder(name=o["column"], descending=bool(o.get("descending")))
                       for o in json.loads(r["order_by_json"] or "[]")],
+            checks=[ContractCheck(**c) for c in json.loads(r["checks_json"] or "[]")],
             description=r["description"],
             revision=int(r["revision"]),
             operation_id=r["operation_id"],
@@ -624,6 +628,7 @@ class SqliteMetadataStore:
             str(c.rows) if c.rows else None,
             json.dumps(c.row_keys, ensure_ascii=False),
             json.dumps([{"column": o.name, "descending": o.descending} for o in c.order_by], ensure_ascii=False),
+            json.dumps([check.model_dump(exclude_defaults=True) for check in c.checks], ensure_ascii=False),
             c.description,
             c.revision,
             c.operation_id,
@@ -636,9 +641,9 @@ class SqliteMetadataStore:
 
     def insert_contract(self, contract: OutputContract) -> None:
         self.conn.execute(
-            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, order_by_json, description, "
-            "revision, operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO output_contracts(id, status, columns_json, rows, row_keys_json, order_by_json, checks_json, "
+            "description, revision, operation_id, satisfied_by, dataset_id, dataset_version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             self._contract_values(contract),
         )
 
@@ -646,7 +651,7 @@ class SqliteMetadataStore:
         values = self._contract_values(contract)
         self.conn.execute(
             "UPDATE output_contracts SET status=?, columns_json=?, rows=?, row_keys_json=?, order_by_json=?, "
-            "description=?, revision=?, operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, "
+            "checks_json=?, description=?, revision=?, operation_id=?, satisfied_by=?, dataset_id=?, dataset_version=?, "
             "created_at=?, updated_at=? WHERE id=?",
             values[1:] + (contract.id,),
         )

@@ -13,8 +13,9 @@ dropped left rows matching nothing or repeated left rows whose key matches
 several right rows (from the executor's counts, which the response also
 carries as facts under ``joins``), an addition, subtraction or comparison of
 operands whose declared units differ (core/ir/units.py), a result that already
-has (or mechanically reshapes to) the declared output shape, and an export
-whose date or timestamp pattern formatted no value.
+has (or mechanically reshapes to) the declared output shape, or whose values
+fail the contract's value checks, and an export whose date or timestamp
+pattern formatted no value.
 
 The module knows the backend's language and the workspace's data. It knows
 nothing about the task, the turn budget or the model; that side is the
@@ -32,7 +33,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
-from ..contracts import match_columns, repair_transform, respelled, verify_columns, verify_rows
+from ..contracts import (CHECKS_HINT, bind_checks, check_problem, match_columns, repair_transform, respelled,
+                         verify_columns, verify_rows)
 from ..errors import BackendError, ErrorCode
 from ..ir import (BinaryExpr, CastExpr, ColumnExpr, DeriveStep, FilterStep, FunctionExpr, InExpr, LimitStep,
                   LiteralExpr, RawQueryStep, SortStep, TransformIR, TryCastExpr, UnaryExpr)
@@ -1276,7 +1278,12 @@ def _contract_amendment(err: BackendError, tool: str, arguments: dict[str, Any])
         differences.append(f"the row cardinality {rows} would be dropped")
     elif arguments.get("rows") is not None and arguments.get("rows") != rows:
         differences.append(f"the row cardinality {rows} would become {arguments.get('rows')!r}")
-    what = ("; ".join(differences)[0].upper() + "; ".join(differences)[1:] + ". ") if differences else ""
+    checked = [str(c.get("column")) for c in contract.get("checks") or [] if isinstance(c, dict)]
+    inline = isinstance(asked, list) and any(isinstance(c, dict) and set(c) & {"not_null", "min", "max", "range"}
+                                             for c in asked)
+    if checked and not arguments.get("checks") and not inline:
+        differences.append(f"the value checks on {checked} would be dropped")
+    what =("; ".join(differences)[0].upper() + "; ".join(differences)[1:] + ". ") if differences else ""
     return Advice("contract_amendment",
                   f"Output contract {contract.get('id')} is open with columns {declared}"
                   + (f" and rows {rows}" if rows is not None else "") + f". {what}"
@@ -1512,6 +1519,16 @@ def _declaration_order(err: BackendError, tool: str, arguments: dict[str, Any]) 
         "not belong in columns: the backend sorts by it and leaves it out of the file, as long as the dataset you "
         "export carries it.",
     )
+
+
+def _declaration_checks(err: BackendError, tool: str, arguments: dict[str, Any]) -> Advice | None:
+    """A declaration whose value checks are not a shape the contract can hold."""
+    if err.code != ErrorCode.INVALID_INTENT or err.field != "checks":
+        return None
+    names = (err.details or {}).get("contract_names")
+    named = f" This contract names {', '.join(names)}." if names else ""
+    return Advice("declaration_checks", CHECKS_HINT + named + " A check is what the answer's values must satisfy "
+                  "as the requirement states it; the backend counts violations at export and changes no value.")
 
 
 # ----------------------------------------------------------------------------
@@ -2338,6 +2355,7 @@ _REGISTRY: list[tuple[Detector, tuple[str, ...] | None, bool]] = [
     (_predicate_not_boolean, _TRANSFORM_TOOLS, False),
     (_declaration_rows, ("declare_output",), False),
     (_declaration_order, ("declare_output",), False),
+    (_declaration_checks, ("declare_output",), False),
     # detectors that read the facts the raise site attached
     (_transform_as_text, _TRANSFORM_TOOLS, False),
     (_function_as_infix, _TRANSFORM_TOOLS, False),
@@ -2930,11 +2948,14 @@ def advise_contract(
     arguments: dict[str, Any],
     materialized_name: str | None,
     distinct_keys: int | None = None,
+    check_counts: list[tuple[int, int]] | None = None,
 ) -> Advice | None:
     """A result that has, or mechanically reshapes to, the declared output shape: say so, with the next call.
 
     ``distinct_keys`` counts the result's distinct combinations of a one_per contract's keys. export_result
-    checks rows with that count, so without it a keyed result is never said to match.
+    checks rows with that count, so without it a keyed result is never said to match. ``check_counts`` holds,
+    per value check of the contract, the result's null and out-of-range values: without them a contract with
+    checks is never said to match, and a result whose values fail is named as such.
     """
     if contract.status != ContractStatus.OPEN:
         return None
@@ -2944,6 +2965,21 @@ def advise_contract(
     keyed = contract.rows == RowCardinality.ONE_PER and all(k in stands for k in contract.row_keys)
     if not problems and keyed and row_count > 0 and distinct_keys is None:
         return None
+    if contract.checks:
+        bound, unfit = bind_checks(contract, actual)
+        if unfit or len(bound) != len(contract.checks) or check_counts is None or len(check_counts) != len(bound):
+            return None  # not counted the way export counts, so nothing is promised
+        failed = [f for f in (check_problem(t, nulls, outside) for t, (nulls, outside) in zip(bound, check_counts))
+                  if f is not None]
+        if failed:
+            subject = materialized_name or "This result"
+            return Advice(
+                "contract_checks_failed",
+                f"{subject} fails value checks of output contract {contract.id}: "
+                + " ".join(p.message[0].upper() + p.message[1:] for p in failed)
+                + " export_result will refuse it until the values hold, and shows the offending rows. The backend "
+                  "changes no value to pass a check: find where these values come from in the data, or amend the "
+                  "checks with declare_output and a reason if the requirement is different.")
     shape = f"columns [{', '.join(c.name for c in contract.columns)}]" + (f", rows {contract.rows}" if contract.rows else "")
     answer = f"answer_{contract.id}"
     if not problems:

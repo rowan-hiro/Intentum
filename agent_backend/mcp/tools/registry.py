@@ -111,7 +111,13 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "file, as long as the dataset you export carries it. The names are written to the "
                              "file as you spell them here: a dataset column whose name differs only in case or "
                              "separators (firstproduct for FirstProduct) stands for the declared one, so no rename "
-                             "is needed for spelling. Optional `description`. The "
+                             "is needed for spelling. Optional `checks` hold the answer's values to what the "
+                             "requirement states: [{\"column\": \"rate\", \"not_null\": true, \"min\": 0, "
+                             "\"max\": 100}] (or {\"rate\": {...}}, or the same keys inside a column object) on "
+                             "columns the contract names; bounds are inclusive numbers, or ISO dates and timestamps "
+                             "for temporal columns; a null is not outside a range, so add not_null to forbid it. "
+                             "export_result counts violations and refuses them with the offending rows; the "
+                             "backend never changes a value. Optional `description`. The "
                              "backend keeps the contract and export_result refuses a dataset that does not match "
                              "it, so you cannot drift away from it later. One contract is current per workspace; "
                              "declaring a different shape while one is open needs `reason`, which is recorded as "
@@ -122,8 +128,10 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "reason. Re-declaring the same shape changes nothing.")
     def declare_output(columns: list[Any] | dict[str, Any] | str, rows: str | int | dict[str, Any] | None = None,
                        order_by: list[Any] | dict[str, Any] | str | None = None,
-                       description: str | None = None, reason: str | None = None) -> dict[str, Any]:
-        return backend.declare_output(columns, rows=rows, order_by=order_by, description=description, reason=reason)
+                       description: str | None = None, reason: str | None = None,
+                       checks: list[Any] | dict[str, Any] | None = None) -> dict[str, Any]:
+        return backend.declare_output(columns, rows=rows, order_by=order_by, description=description, reason=reason,
+                                      checks=checks)
 
     # ``source`` and ``transform`` are typed loosely on purpose: a JSON string that does not parse, or a relation
     # written where a name belongs, must reach the backend, which refuses it with advice (MADR 0010). Typed
@@ -213,7 +221,8 @@ def register_tools(server: MCPServer, backend: Backend) -> None:
                              "file another system expects. The file carries exactly the dataset's columns, in "
                              "order: shape the dataset first (select/rename) so it has exactly the columns the "
                              "answer asks for. When an output contract was declared with declare_output, the "
-                             "dataset is checked against it (columns, order, types, row cardinality) before "
+                             "dataset is checked against it (columns, order, types, row cardinality, and any "
+                             "declared value checks, whose failures come with the offending rows) before "
                              "anything is written, the header is written as the contract spells it, and a mismatch "
                              "is returned as CONTRACT_MISMATCH with the "
                              "transform that would repair it; a matching export closes the contract with the "

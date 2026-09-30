@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..contracts import BoundCheck
 from ..errors import ExecutionFailedError
 from ..ir import JoinStep, OutputMode, RawQueryStep, TransformIR
 from ..ir.raw_query import QueryEngine
 from ..planner import ExecutionPlan
-from ...storage.duckdb.engine import AnalyticsEngine
+from ...storage.duckdb.engine import AnalyticsEngine, quote_ident
 from .sql import SqlCompiler
 
 
@@ -28,6 +29,8 @@ class ExecutionResult:
     ties: tuple[list[Any], int, int, int] | None = None
     # What each semantic join step did to its inputs, in step order; empty when nothing was diagnosed.
     joins: list["JoinFacts"] = field(default_factory=list)
+    # Per value check asked for, in order: (null values, values outside the range); None when not counted.
+    check_counts: list[tuple[int, int]] | None = None
 
 
 @dataclass
@@ -110,15 +113,18 @@ class Executor:
         self.queries = queries  # the sandbox raw_query statements run in
 
     def execute_transform(self, ir: TransformIR, plan: ExecutionPlan,
-                          count_distinct: list[str] | None = None, diagnose_joins: bool = False) -> ExecutionResult:
+                          count_distinct: list[str] | None = None, diagnose_joins: bool = False,
+                          value_checks: list[BoundCheck] | None = None) -> ExecutionResult:
         """Run the transform; ``count_distinct`` names columns whose distinct combinations the result should count.
 
         ``diagnose_joins`` counts what each semantic join step did to its inputs (``JoinFacts``). A transform that
         starts with a raw_query is not diagnosed: its later steps read a result that exists only in the sandbox.
+        ``value_checks`` are an output contract's checks, counted over the result as export counts them.
         """
         if ir.steps and isinstance(ir.steps[0], RawQueryStep):
-            return self._execute_after_query(ir, plan, count_distinct)
-        result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs), count_distinct)
+            return self._execute_after_query(ir, plan, count_distinct, value_checks)
+        result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs), count_distinct,
+                               value_checks)
         if result.row_count:  # one row kept by a limit can still be one of several tied rows
             try:
                 result.ties = self._ties(ir, plan)
@@ -161,7 +167,8 @@ class Executor:
         return list(keys), int(size), int(groups), int(tied)
 
     def _execute(self, ir: TransformIR, plan: ExecutionPlan, sql: str,
-                 count_distinct: list[str] | None = None) -> ExecutionResult:
+                 count_distinct: list[str] | None = None,
+                 value_checks: list[BoundCheck] | None = None) -> ExecutionResult:
         if ir.output.mode == OutputMode.MATERIALIZED:
             assert plan.output_table is not None
             row_count = self.engine.create_table_from_query(plan.output_table, sql)
@@ -170,6 +177,8 @@ class Executor:
                                      physical_table=plan.output_table, truncated=row_count > len(rows))
             if count_distinct and row_count:
                 result.distinct_keys = self._count(lambda: self.engine.count_distinct_rows(plan.output_table, count_distinct))
+            if value_checks:
+                result.check_counts = self._check(f"SELECT * FROM {quote_ident(plan.output_table)}", value_checks)
             return result
         row_count = self.engine.count_rows_of_query(sql)
         columns, rows = self.engine.query(sql, limit=ir.output.preview_limit)
@@ -178,7 +187,21 @@ class Executor:
         if count_distinct and row_count:
             # A preview has no table, and after a raw_query its SQL runs only while the sandbox session is open.
             result.distinct_keys = self._count(lambda: self.engine.count_distinct_of_query(sql, count_distinct))
+        if value_checks:
+            result.check_counts = self._check(sql, value_checks)
         return result
+
+    def _check(self, sql: str, checks: list[BoundCheck]) -> list[tuple[int, int]] | None:
+        """Null and out-of-range counts per check over the rows ``sql`` returns; None when counting failed."""
+        def count() -> list[tuple[int, int]]:
+            found: list[tuple[int, int]] = []
+            for target in checks:
+                nulls, outside, *_ = self.engine.check_values(
+                    sql, target.column, not_null=target.check.not_null, low=target.check.min, high=target.check.max,
+                    cast=target.cast, nan=target.nan)
+                found.append((nulls, outside))
+            return found
+        return self._count(count)
 
     @staticmethod
     def _count(count: Any) -> int | None:
@@ -189,7 +212,8 @@ class Executor:
             return None
 
     def _execute_after_query(self, ir: TransformIR, plan: ExecutionPlan,
-                             count_distinct: list[str] | None = None) -> ExecutionResult:
+                             count_distinct: list[str] | None = None,
+                             value_checks: list[BoundCheck] | None = None) -> ExecutionResult:
         """Run the raw_query in its sandbox, then the rest of the transform over its result as usual."""
         query = ir.steps[0]
         assert isinstance(query, RawQueryStep)
@@ -211,7 +235,8 @@ class Executor:
                                            "did when it was validated.", details={"raw_query": {"refused": "execution"}})
             base = session.run(query.sql)
             try:
-                result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs, base=base), count_distinct)
+                result = self._execute(ir, plan, self.compiler.compile(ir, plan.physical_inputs, base=base),
+                                       count_distinct, value_checks)
             except ExecutionFailedError as err:
                 if "sql" in err.details:
                     err.details = {**err.details, "sql": shown}
