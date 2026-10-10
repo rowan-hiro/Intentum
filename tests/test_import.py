@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import ORDERS_CSV, write_csv
 
 
@@ -83,6 +85,79 @@ def test_import_rejects_unknown_hint_columns(backend, tmp_path: Path):
     assert response["code"] == "INVALID_SCHEMA"
     assert response["candidates"] == ["a", "b"]
     assert backend.list_datasets()["count"] == 0
+    assert backend.integrity_report()["ok"]
+
+
+def test_csv_string_hints_preserve_text_before_type_inference(backend, tmp_path):
+    source = write_csv(tmp_path / "values.csv", "amount,stamp,quantity", [
+        "1.20,2026-01-02T03:04:05Z,3", "2.00,2026-01-03T03:04:05Z,4",
+    ])
+    hints = {"AMOUNT": {"type": "string"}, "stamp": {"type": "string"}}
+    imported = backend.import_dataset(str(source), schema_hints=hints)
+    assert imported["status"] == "success", imported
+    assert [(c["name"], c["type"]) for c in imported["schema"]] == [
+        ("amount", "string"), ("stamp", "string"), ("quantity", "integer"),
+    ]
+    result = backend.transform_dataset("values", [
+        {"derive": {"name": "text", "expression": "trim(amount)"}},
+        {"select": ["text", "stamp", "quantity"]},
+    ])
+    assert result["status"] == "success", result
+    assert result["result"]["rows"] == [
+        ["1.20", "2026-01-02T03:04:05Z", 3], ["2.00", "2026-01-03T03:04:05Z", 4],
+    ]
+    assert backend.import_dataset(str(source), schema_hints=hints)["idempotent_replay"]
+
+
+@pytest.mark.parametrize("source_kind", ["csv", "json", "wrapped_json", "parquet", "sqlite", "rows"])
+def test_import_type_hints_support_downstream_operations(backend, tmp_path, source_kind):
+    rows = [{"code": 7, "units": "12"}]
+    source = tmp_path / f"values.{source_kind}"
+    arguments = {"path": str(source)}
+    if source_kind == "rows":
+        arguments = {"rows": rows}
+    elif source_kind == "csv":
+        write_csv(source, "code,units", ["7,12"])
+    elif source_kind in ("json", "wrapped_json"):
+        source = source.with_suffix(".json")
+        source.write_text(json.dumps(rows if source_kind == "json" else {"records": rows}))
+        arguments = {"path": str(source)}
+    elif source_kind == "parquet":
+        backend.engine.conn.execute(
+            "COPY (SELECT 7 AS code, '12' AS units) TO ? (FORMAT PARQUET)", [str(source)])
+    else:
+        import sqlite3
+
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE values_table (code INTEGER, units TEXT)")
+            connection.execute("INSERT INTO values_table VALUES (7, '12')")
+        arguments["table"] = "values_table"
+    imported = backend.import_dataset(**arguments, name="values", schema_hints={
+        "code": {"type": "string"}, "units": {"type": "integer"},
+    })
+    assert imported["status"] == "success", imported
+    result = backend.transform_dataset("values", [
+        {"derive": {"name": "label", "expression": "trim(code)"}},
+        {"derive": {"name": "next_units", "expression": "units + 1"}},
+        {"select": ["label", "next_units"]},
+    ])
+    assert result["status"] == "success", result
+    assert result["result"]["rows"] == [["7", 13]]
+
+
+@pytest.mark.parametrize("source_kind", ["csv", "rows"])
+def test_import_unconvertible_type_hint_fails_without_dataset(backend, tmp_path, source_kind):
+    if source_kind == "csv":
+        source = write_csv(tmp_path / "values.csv", "units", ["12", "not a number"])
+        arguments = {"path": str(source)}
+    else:
+        arguments = {"rows": [{"units": "12"}, {"units": "not a number"}]}
+    response = backend.import_dataset(**arguments, name="values", schema_hints={"units": {"type": "integer"}})
+    assert response["status"] == "error", response
+    assert response["code"] == "EXECUTION_FAILED"
+    assert "units" in response["message"]
+    assert backend.list_datasets()["count"] == 0
+    assert backend.engine.list_tables() == []
     assert backend.integrity_report()["ok"]
 
 

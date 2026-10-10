@@ -20,7 +20,7 @@ import threading
 from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass, field as dc_field, replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -814,6 +814,7 @@ class Backend:
             if not physical_columns:
                 raise InvalidSchemaError(f"{spec.describe()} has no columns.", field="path")
             self._check_column_names([c for c, _ in physical_columns])
+            source = replace(spec.source, column_types=self._import_column_types(physical_columns, spec.hints))
             evidence_columns = self._evidence_columns(spec.evidence, [c for c, _ in physical_columns])
             dataset_id = self.store.allocate_id("ds")
             table = f"{dataset_id}_v1"
@@ -832,7 +833,9 @@ class Backend:
             log_event("plan.created", operation_id=op.id, plan=plan.to_text())
 
             try:
-                row_count = self.engine.import_source(spec.source, table)
+                row_count = self.engine.import_source(source, table)
+                if source.column_types:
+                    physical_columns = self.engine.describe_table(table)
                 notes: list[ResolutionNote] = []
                 refined = self._refine_temporal_columns(table, physical_columns, spec.hints, notes)
                 if refined:
@@ -2700,23 +2703,31 @@ class Backend:
             if not n.strip():
                 raise InvalidSchemaError("The source has an empty column name.", field="path", details={"columns": names})
 
-    def _build_columns(self, dataset_id: str, physical_columns: list[tuple[str, str]],
-                       hints: dict[str, dict[str, Any]]) -> list[Column]:
-        lowered_hints = {k.casefold(): v for k, v in hints.items()}
-        unknown = sorted(set(lowered_hints) - {n.casefold() for n, _ in physical_columns})
+    @staticmethod
+    def _import_column_types(physical_columns: list[tuple[str, str]],
+                             hints: dict[str, dict[str, Any]]) -> dict[str, LogicalType]:
+        names = {name.casefold(): name for name, _ in physical_columns}
+        unknown = sorted({name.casefold() for name in hints} - names.keys())
         if unknown:
             raise InvalidSchemaError(f"schema_hints reference unknown columns {unknown}.", field="schema_hints",
                                      candidates=[n for n, _ in physical_columns])
+        types: dict[str, LogicalType] = {}
+        for name, hint in hints.items():
+            if "type" in hint:
+                try:
+                    types[names[name.casefold()]] = LogicalType(str(hint["type"]).lower())
+                except ValueError as exc:
+                    raise InvalidSchemaError(f"Unknown type hint {hint['type']!r} for column {name!r}.", field="schema_hints",
+                                             details={"allowed": [str(t) for t in LogicalType]}) from exc
+        return types
+
+    def _build_columns(self, dataset_id: str, physical_columns: list[tuple[str, str]],
+                       hints: dict[str, dict[str, Any]]) -> list[Column]:
+        lowered_hints = {k.casefold(): v for k, v in hints.items()}
         columns: list[Column] = []
         for position, (name, physical) in enumerate(physical_columns):
             logical = physical_to_logical(physical)
             hint = lowered_hints.get(name.casefold(), {})
-            if "type" in hint:
-                try:
-                    logical = LogicalType(str(hint["type"]).lower())
-                except ValueError as exc:
-                    raise InvalidSchemaError(f"Unknown type hint {hint['type']!r} for column {name!r}.", field="schema_hints",
-                                             details={"allowed": [str(t) for t in LogicalType]}) from exc
             role = self._infer_role(name, logical)
             if "semantic_role" in hint:
                 try:
