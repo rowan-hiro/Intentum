@@ -11,7 +11,7 @@ SQLite tables.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -35,6 +35,7 @@ class TableSource:
     path: Path
     format: str
     table: str | None = None  # locator inside a multi-table container (sqlite)
+    column_types: dict[str, LogicalType] = field(default_factory=dict)
 
     def describe(self) -> str:
         return f"{self.path.name}::{self.table}" if self.table else self.path.name
@@ -130,24 +131,36 @@ class DuckDBEngine:
         """SELECT statement that reads the source. SQLite sources must be attached first."""
         literal = _literal(str(source.path))
         if source.format == "csv":
-            return f"SELECT * FROM read_csv({literal}, header=true, sample_size=-1)"
+            # Apply hints while parsing: casting 1.20 back to text after numeric
+            # inference would already have lost the source spelling.
+            types = ", ".join(f"{_literal(name)}: {_literal(logical_to_physical(typ))}"
+                              for name, typ in source.column_types.items())
+            options = f", types={{{types}}}" if types else ""
+            return f"SELECT * FROM read_csv({literal}, header=true, sample_size=-1{options})"
         if source.format == "parquet":
-            return f"SELECT * FROM read_parquet({literal})"
-        if source.format == "json":
+            sql = f"SELECT * FROM read_parquet({literal})"
+        elif source.format == "json":
             base = f"read_json_auto({literal}, maximum_object_size=1073741824)"
             columns = self._describe_sql(f"SELECT * FROM {base}")
             lists = [(name, typ) for name, typ in columns if typ.startswith("STRUCT(") and typ.endswith("[]")]
             if len(lists) == 1 and all(not t.endswith("[]") for n, t in columns if n != lists[0][0]):
                 # {"table": "...", "records": [ {...}, ... ]} wrapper: expand the record list.
-                return f"SELECT unnest({quote_ident(lists[0][0])}, recursive := true) FROM {base}"
-            return f"SELECT * FROM {base}"
-        if source.format == "sqlite":
+                sql = f"SELECT unnest({quote_ident(lists[0][0])}, recursive := true) FROM {base}"
+            else:
+                sql = f"SELECT * FROM {base}"
+        elif source.format == "sqlite":
             if not source.table:
                 raise InvalidSchemaError("A SQLite source needs a table locator.", field="path")
-            return f"SELECT * FROM {quote_ident(self._sqlite_alias(source.path))}.{quote_ident(source.table)}"
-        raise InvalidSchemaError(
-            f"Unsupported file format {source.format!r}; supported formats are {', '.join(SUPPORTED_FORMATS)}."
-        )
+            sql = f"SELECT * FROM {quote_ident(self._sqlite_alias(source.path))}.{quote_ident(source.table)}"
+        else:
+            raise InvalidSchemaError(
+                f"Unsupported file format {source.format!r}; supported formats are {', '.join(SUPPORTED_FORMATS)}."
+            )
+        if source.column_types:
+            casts = ", ".join(f"CAST({quote_ident(name)} AS {logical_to_physical(typ)}) AS {quote_ident(name)}"
+                              for name, typ in source.column_types.items())
+            sql = f"SELECT * REPLACE ({casts}) FROM ({sql})"
+        return sql
 
     # -- sqlite attachment -----------------------------------------------
     @staticmethod
