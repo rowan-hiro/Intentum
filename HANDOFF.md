@@ -3,7 +3,7 @@
 Read these, in this order, before changing anything. Nothing else is needed
 to start.
 
-1. `AGENTS.md` — the Inkan protocol you must follow and the module map.
+1. `AGENTS.md` — the pstr workflow, historical id mapping and module map.
    `CLAUDE.md` is a symlink to it.
 2. `README.md` — architecture. Sections 1 ("Output contracts", "Transform
    language", "Exporting an answer", "Failure semantics"), 2 (the two
@@ -20,14 +20,30 @@ to start.
    before and after the recovery module; the 2026-08-30 section the champion
    comparison.
 
-Then re-anchor:
+Then re-anchor through the `pstr` MCP server (project `intentum`): call
+`context` with the node you are resuming, or with `task` and `paths` for new
+work. Put new work in `plan` and report its results there, not in Inkan.
 
-```sh
-inkan status
-inkan log -n 3
-```
+Historical entry points, migrated as summaries on 2026-10-11:
 
-Outcomes under Inkan (`inkan log` carries them), newest first:
+- `get` with `ref: "I-1"` gives the migration and original-id indexes.
+- `context` with `node: "I-2"` gives the 16 decision summaries; fetch any
+  omitted decisions with `get`. MADR ids are not generally pstr node ids:
+  `0001`–`0012` map to `D-1`–`D-12`, `0018`–`0021` to `D-13`–`D-16`.
+- `I-3`–`I-73` retain the 71 outcome summaries, their original dates, source
+  paths and decision/follow-up links. `I-73` is the last outcome in that
+  snapshot: explicit import type hints, with PR readiness rather than proof
+  of PR submission. `I-67`–`I-72` cover join diagnostics, units, value checks,
+  evidence references and their review fixes.
+- `I-46` remains historically `partial`; its deadline-test failure was later
+  addressed by `I-47`, with the documentation follow-up in `I-48`. Do not
+  mistake the preserved status for a newly discovered outstanding failure.
+
+These are historical reports, not test results rerun during migration.
+`.inkan/` remains the unchanged source archive for details. The older
+handoff selections below are historical context, not the current work queue.
+
+Selected Inkan-era outcomes (also summarized in pstr), newest first:
 
 - `2026-09-11-0130-bnw8` aligns existing media configuration with the
   champion reference and records three fresh DataSpace attempts: `task_312`
@@ -95,7 +111,8 @@ Outcomes under Inkan (`inkan log` carries them), newest first:
   3/3 and 0/3).
 
 The outcomes named below closed before the repository moved to Inkan;
-`inkan log` does not carry them.
+they are not among the 71 `.inkan/outcomes/` records migrated to pstr. Their
+mentions here and in decision histories remain historical references.
 
 - Outcome `2026-09-02-006` split the output contract in two (MADR 0012):
   `columns` is what the answer carries, `order_by` and the `one_per` keys are
@@ -126,7 +143,8 @@ The outcomes named below closed before the repository moved to Inkan;
 - Outcome `2026-08-28-010` is where output contracts and the trust model
   came from; its closing note is still the best summary of the backend.
 
-MADRs, in reading order (`.inkan/decisions/`):
+MADRs, in reading order (pstr summaries under `I-2`; original details in
+`.inkan/decisions/`, with the id mapping above):
 
 - `0004` — what Intentum is: a general backend; benchmarks validate it, they
   do not define it.

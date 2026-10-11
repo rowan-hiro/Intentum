@@ -1,7 +1,9 @@
 # Intentum
 
-Sealed outcomes in this repository are recorded with
-[Inkan](https://github.com/rowan-hiro/inkan).
+Current plans, decisions and work reports live in pstr (project `intentum`).
+Historical [Inkan](https://github.com/rowan-hiro/inkan) outcomes and decisions
+were migrated as concise summaries; `.inkan/` retains their source records.
+Use pstr `get` with `ref: "I-1"` for the migration's original-id indexes.
 
 ![Intentum: Semantic intent. Deterministic data operations.](docs/promo/intentum-hero.png)
 
@@ -24,10 +26,10 @@ package is still `agent_backend`; the text below says "the backend" wherever
 the runtime's process stands opposite the agent harness. The category name
 changed because a backend waits to be called, and this one refuses, teaches,
 holds the agent to its word and undoes its own work. Inkan, which this
-repository uses for its own work, rests on the same idea one level up: what
-the work is meant to deliver is written down before it starts, and what was
-delivered is declared against it at the end. Intentum is that idea at the
-tool-call boundary.
+repository previously used for its own work, rests on the same idea one level
+up: what the work is meant to deliver is written down before it starts, and
+what was delivered is declared against it at the end. Intentum is that idea
+at the tool-call boundary.
 
 ## What a database behind an MCP server does not do
 
